@@ -48,6 +48,7 @@ bash install.sh
 | 多用户 session/memory 隔离 | session_search 和 memory 按用户隔离 | #17989 |
 | 语义技能检索 (FTS5) | SQLite FTS5 全文索引替代暴力注入 | #18316 |
 | 混合技能选择器 | 规则+关键词+AI推断三层检索 | #18316 |
+| 修复轮换池丢弃 | /model 切换不再丢弃 credential pool，轮换机制正常工作 | #19064 |
 | Memory 权威性保护 | 防止上下文压缩削弱 memory | 上游已合并 |
 | 技能执行纪律框架 | Agent 必须遵循已加载的技能规则 | #18849 |
 | 合规检查插件 | 每 8 次工具调用触发合规检查 | #18849 |
