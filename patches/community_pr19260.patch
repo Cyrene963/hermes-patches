@@ -1,0 +1,75 @@
+From 7b5f80af478cd3242959c5bde80fe7375528f17d Mon Sep 17 00:00:00 2001
+From: Alan Chen <alanxchen@gmail.com>
+Date: Sun, 3 May 2026 22:42:24 +0800
+Subject: [PATCH] fix(auth): stop treating CLAUDE_CODE_OAUTH_TOKEN as Anthropic
+ API key
+
+CLAUDE_CODE_OAUTH_TOKEN is an OAuth token scoped to Claude Code. When
+Hermes runs in the same environment as Claude Code (common on dev
+machines), it picks up this token and tries to use it for Anthropic
+API requests. The Anthropic API rejects it with HTTP 400 because the
+token is bound to Claude Code's OAuth client, not Hermes.
+
+This causes silent auth failures or crash loops when the user has
+Claude Code installed but hasn't explicitly configured Anthropic
+credentials for Hermes.
+
+Remove CLAUDE_CODE_OAUTH_TOKEN from:
+- auth.py: Anthropic provider api_key_env_vars
+- providers.py: Anthropic HermesOverlay extra_env_vars
+- web_server.py: auth status endpoint fallback
+
+The token is already in the terminal subprocess blocklist (local.py)
+and marked as implicit in setup.py, so this completes the separation.
+Users who want Anthropic access in Hermes should set ANTHROPIC_API_KEY
+explicitly.
+
+Fixes #15080
+---
+ hermes_cli/auth.py       | 2 +-
+ hermes_cli/providers.py  | 2 +-
+ hermes_cli/web_server.py | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/hermes_cli/auth.py b/hermes_cli/auth.py
+index 1d77fffa9..bcd6f6627 100644
+--- a/hermes_cli/auth.py
++++ b/hermes_cli/auth.py
+@@ -279,7 +279,7 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
+         name="Anthropic",
+         auth_type="api_key",
+         inference_base_url="https://api.anthropic.com",
+-        api_key_env_vars=("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
++        api_key_env_vars=("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN"),
+         base_url_env_var="ANTHROPIC_BASE_URL",
+     ),
+     "alibaba": ProviderConfig(
+diff --git a/hermes_cli/providers.py b/hermes_cli/providers.py
+index f766a50eb..b86e196dd 100644
+--- a/hermes_cli/providers.py
++++ b/hermes_cli/providers.py
+@@ -90,7 +90,7 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
+     ),
+     "anthropic": HermesOverlay(
+         transport="anthropic_messages",
+-        extra_env_vars=("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
++        extra_env_vars=("ANTHROPIC_TOKEN",),
+     ),
+     "zai": HermesOverlay(
+         transport="openai_chat",
+diff --git a/hermes_cli/web_server.py b/hermes_cli/web_server.py
+index 014a938e0..0e76c8928 100644
+--- a/hermes_cli/web_server.py
++++ b/hermes_cli/web_server.py
+@@ -1356,7 +1356,7 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
+             "has_refresh_token": bool(cc_creds.get("refreshToken")),
+         }
+ 
+-    env_token = os.getenv("ANTHROPIC_TOKEN") or os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
++    env_token = os.getenv("ANTHROPIC_TOKEN")
+     if env_token:
+         return {
+             "logged_in": True,
+-- 
+2.39.5
+

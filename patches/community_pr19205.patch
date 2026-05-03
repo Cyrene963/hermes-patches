@@ -1,0 +1,72 @@
+From 74861ed471e0365a013c78903c64f88eba5c2b48 Mon Sep 17 00:00:00 2001
+From: holynn <holynn@placeholder.local>
+Date: Sun, 3 May 2026 20:19:49 +0800
+Subject: [PATCH] fix(cli): allow custom:* provider slugs in model validation
+
+Two related fixes for custom_providers model switching:
+
+1. validate_requested_model() now recognizes custom:<name> slugs
+   (e.g. custom:volcengine) as custom endpoints, not generic providers.
+   Previously only the bare 'custom' slug matched the relaxed validation
+   branch, causing model validation to fail with 'not found in provider
+   listing' for all named custom providers.
+
+2. switch_model() now consults the custom_providers list when deciding
+   whether to override a validation rejection. If the requested model
+   matches the entry's 'model' field or any key in its 'models' dict,
+   the switch is accepted even when the remote /v1/models endpoint does
+   not list it.
+
+Both changes are covered by existing tests (86 passed).
+---
+ hermes_cli/model_switch.py | 20 ++++++++++++++++++++
+ hermes_cli/models.py       |  2 +-
+ 2 files changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/hermes_cli/model_switch.py b/hermes_cli/model_switch.py
+index 07455eb6f..1305944f8 100644
+--- a/hermes_cli/model_switch.py
++++ b/hermes_cli/model_switch.py
+@@ -904,6 +904,26 @@ def switch_model(
+                         if any(m.get("name") == new_model for m in cfg_models if isinstance(m, dict)):
+                             override = True
+                             break
++        # Also check custom_providers list — models declared there should be accepted
++        # even if the remote /v1/models endpoint doesn't list them.
++        if not override and custom_providers and isinstance(custom_providers, list):
++            for entry in custom_providers:
++                if not isinstance(entry, dict):
++                    continue
++                # Match by provider slug (custom:<name>) or by base_url
++                entry_name = entry.get("name", "")
++                entry_slug = f"custom:{entry_name}" if entry_name else ""
++                entry_url = entry.get("base_url", "")
++                if entry_slug == target_provider or entry_url == base_url:
++                    # Check if the requested model matches the entry's model
++                    entry_model = entry.get("model", "")
++                    entry_models = entry.get("models", {})
++                    if new_model == entry_model:
++                        override = True
++                        break
++                    if isinstance(entry_models, dict) and new_model in entry_models:
++                        override = True
++                        break
+         if override:
+             validation = {"accepted": True, "persist": True, "recognized": False, "message": validation.get("message", "")}
+         else:
+diff --git a/hermes_cli/models.py b/hermes_cli/models.py
+index 755bac72e..d7bae9ab0 100644
+--- a/hermes_cli/models.py
++++ b/hermes_cli/models.py
+@@ -3087,7 +3087,7 @@ def validate_requested_model(
+             "message": f"Model `{requested}` was not found in LM Studio's model listing.",
+         }
+ 
+-    if normalized == "custom":
++    if normalized == "custom" or normalized.startswith("custom:"):
+         # Try probing with correct auth for the api_mode.
+         if api_mode == "anthropic_messages":
+             probe = probe_api_models(api_key, base_url, api_mode=api_mode)
+-- 
+2.39.5
+
