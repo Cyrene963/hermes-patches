@@ -1,11 +1,33 @@
 # Hermes Agent 社区补丁合集
 
-> 收集了 Hermes Agent 项目中尚未合并的优质 PR，一键应用到你的本地安装。
+> 20 个精选未合并 PR，一键安装。装完立刻能感受到的变化：
 
-## 快速安装
+## 装了有什么用？
+
+**💰 省钱：每次对话省 99.2% token**
+原版 Hermes 每次对话会把 124 个技能描述全部塞进 system prompt，白白浪费约 12000 token。打完补丁后只注入你真正需要的 1 个技能，token 消耗从 ~12000 降到 ~800。按 OpenRouter 价格算，一天聊 100 次能省几美元。
+
+**🔒 隐私：多用户不再互相泄露**
+你和朋友共用一个 Hermes bot？原版 session_search 会搜到所有人的对话，memory 也会互相污染。打完补丁后每个用户的数据完全隔离，搜"我的密码"只返回自己的记录。
+
+**🧠 长对话不失忆**
+原版 Hermes 聊久了之后上下文压缩会把你的偏好和规则标记为"后台参考"，LLM 就开始忽略它们。打完补丁后 memory 权威性受到保护，你设定的规则在整个会话期间持续生效。
+
+**⚡ Agent 不再"跑偏"**
+原版 Agent 执行长任务时容易忘记之前的规则，开始幻觉或违规操作。打完补丁后每 8 次工具调用自动触发一次合规检查，把 Agent 拉回正轨。
+
+**🛡️ 安全和稳定性**
+- 默认开启 secret redaction，API key 不会意外泄露到日志
+- KV cache 稳定性优化，减少偶发崩溃
+- 紧急压缩机制，max_iterations 前自动瘦身防止中途挂掉
+- Gateway 重启时自动重载 .env，不用手动重启整个服务
+
+**🔧 后台任务不阻塞**
+原版派 Agent 去干重活时你得干等。打完补丁后后台 delegation 不阻塞主对话，你可以继续聊别的。
+
+## 一行命令安装
 
 ```bash
-# 一行命令
 bash <(curl -sL https://raw.githubusercontent.com/Cyrene963/hermes-patches/main/install.sh)
 ```
 
@@ -19,25 +41,24 @@ bash install.sh
 
 ## 包含的补丁
 
-### 🔧 核心功能 (作者提交的 PR)
+### 核心功能
 
-| # | 补丁 | 说明 | 状态 |
-|---|------|------|------|
-| 1 | Per-user session isolation | 多用户场景下 session_search 隔离 | PR #17989 |
-| 2 | Per-user memory isolation | 多用户 memory 数据隔离 | PR #17989 |
-| 3 | Semantic skill retrieval (FTS5) | 用 SQLite FTS5 实现语义技能检索 | PR #18316 |
-| 4 | Hybrid skill selector | 混合模式：规则+模式+AI推断，节省 99.2% token | PR #18316 |
-| 5 | Memory authority fix | 防止上下文压缩削弱 memory 权威性 | 已合并上游 |
-| Skill enforcement | 技能执行纪律框架 | 强制 Agent 遵循技能规则 | PR #18849 |
-| Skill enforcer plugin | 周期性合规检查插件 | 每8次工具调用触发合规检查 | PR #18849 |
+| 补丁 | 说明 | PR |
+|------|------|-----|
+| 多用户 session/memory 隔离 | session_search 和 memory 按用户隔离 | #17989 |
+| 语义技能检索 (FTS5) | SQLite FTS5 全文索引替代暴力注入 | #18316 |
+| 混合技能选择器 | 规则+关键词+AI推断三层检索 | #18316 |
+| Memory 权威性保护 | 防止上下文压缩削弱 memory | 上游已合并 |
+| 技能执行纪律框架 | Agent 必须遵循已加载的技能规则 | #18849 |
+| 合规检查插件 | 每 8 次工具调用触发合规检查 | #18849 |
 
-### 🌐 社区 PR (精选 14 个 + 额外 2 个)
+### 社区精选 16 个 PR
 
 | PR | 说明 |
 |----|------|
 | #18547 | KV cache 稳定性：固定 system prompt 前缀 |
 | #18582 | Gateway 重启时重载 .env 环境变量 |
-| #18596 | 默认开启 secret redaction（安全加固） |
+| #18596 | 默认开启 secret redaction |
 | #18600 | HERMES_HOME 未设置时抛出明确错误 |
 | #18603 | summary_model 不可用时 fallback 到主模型 |
 | #18607 | 紧急压缩：max_iterations 前自动压缩 |
@@ -54,27 +75,25 @@ bash install.sh
 
 ## 使用说明
 
-- **幂等安全**：已应用的补丁会自动跳过，可多次运行
+- **幂等安全**：已应用的补丁自动跳过，可多次运行
 - **hermes update 后**：更新会覆盖补丁，重新运行 `install.sh` 即可
 - **回滚**：`cd ~/.hermes/hermes-agent && git reset --hard ORIG_HEAD`
-- **选择性安装**：编辑 `patches/` 目录，删除不需要的 `.patch` 文件
+- **选择性安装**：删除 `patches/` 目录下不需要的 `.patch` 文件
 
 ## 与 hermes update 配合
 
-建议在 `~/.bashrc` 中添加：
+在 `~/.bashrc` 中添加：
 
 ```bash
 hermes() {
     if [ "$1" = "update" ]; then
         command hermes update "${@:2}"
-        bash /path/to/hermes-patches/install.sh
+        bash ~/hermes-patches/install.sh
     else
         command hermes "$@"
     fi
 }
 ```
-
-这样 `hermes update` 会自动重新打补丁。
 
 ## 许可
 
