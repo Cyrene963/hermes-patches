@@ -16,9 +16,22 @@ echo ""
 
 # Check prerequisites
 if [ ! -d "$HERMES_DIR/.git" ]; then
-    echo "❌ 未找到 hermes-agent 仓库: $HERMES_DIR"
-    echo "   请先安装 Hermes Agent: pip install hermes-agent"
-    exit 1
+    # Try to find hermes-agent source via pip
+    PIP_SOURCE=$(python3 -c "import hermes_cli; import os; print(os.path.dirname(os.path.dirname(hermes_cli.__file__)))" 2>/dev/null || true)
+    if [ -n "$PIP_SOURCE" ] && [ -d "$PIP_SOURCE/.git" ]; then
+        HERMES_DIR="$PIP_SOURCE"
+        echo "📂 从 pip 安装路径找到: $HERMES_DIR"
+    else
+        # Auto-clone if not found
+        echo "⚠️  未找到 git 仓库，正在自动克隆..."
+        git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$HERMES_DIR" 2>/dev/null
+        if [ ! -d "$HERMES_DIR/.git" ]; then
+            echo "❌ 克隆失败，请手动安装:"
+            echo "   git clone https://github.com/NousResearch/hermes-agent.git ~/.hermes/hermes-agent"
+            exit 1
+        fi
+        echo "✅ 已克隆到 $HERMES_DIR"
+    fi
 fi
 
 if ! command -v git &>/dev/null; then
