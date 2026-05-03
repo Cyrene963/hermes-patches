@@ -30,8 +30,8 @@ find_hermes_source() {
         return 0
     fi
 
-    # 3. Try common alternative paths
-    for alt_path in "$HOME/hermes-agent" "$HOME/.hermes/hermes-agent" "/opt/hermes-agent" "$pip_source"; do
+    # 3. Try common alternative paths (including FHS root layout)
+    for alt_path in "$HOME/hermes-agent" "$HOME/.hermes/hermes-agent" "/usr/local/lib/hermes-agent" "/opt/hermes-agent" "$pip_source"; do
         if [ -n "$alt_path" ] && [ -d "$alt_path" ] && [ -f "$alt_path/run_agent.py" ]; then
             HERMES_DIR="$alt_path"
             # Initialize git if needed (pip install doesn't create .git)
