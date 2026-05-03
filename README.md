@@ -1,6 +1,6 @@
 # Hermes Agent 社区补丁合集
 
-> 21 个精选未合并 PR，一键安装。装完立刻能感受到的变化：
+> 22 个精选未合并 PR，一键安装。装完立刻能感受到的变化：
 
 ## 装了有什么用？
 
@@ -27,6 +27,9 @@
 
 **🔗 跨渠道记忆统一**
 你在 Telegram 和 CLI 上跟 Hermes 聊天，原版两边的记忆是分裂的。打完补丁后同用户的记忆自动互通，`auto-setup` 一键检测 owner 并设置好 symlink。
+
+**🧠 Agent 自动获取上下文**
+原版 Agent 需要自己决定要不要搜索历史记忆——它经常不搜，直接凭上下文瞎答。打完补丁后系统每轮自动搜索 hindsight + session 历史，把相关上下文以 system message 注入（注意力权重更高，不容易忽略），模型不再需要"记得去查"。
 
 ## 一行命令安装
 
@@ -56,6 +59,7 @@ bash install.sh
 | 技能执行纪律框架 | Agent 必须遵循已加载的技能规则 | [#18849](https://github.com/NousResearch/hermes-agent/pull/18849) |
 | 合规检查插件 | 每 8 次工具调用触发合规检查 | [#18849](https://github.com/NousResearch/hermes-agent/pull/18849) |
 | 跨渠道记忆统一 | 同用户 Telegram/CLI/Discord 记忆互通，支持自动检测 owner | [#19163](https://github.com/NousResearch/hermes-agent/pull/19163) |
+| 自动上下文检索 | 每轮自动搜索 hindsight + session 历史，system message 注入 | [#19200](https://github.com/NousResearch/hermes-agent/pull/19200) |
 
 ### 社区精选 16 个 PR（保持不变）
 
