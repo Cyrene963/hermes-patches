@@ -98,3 +98,6 @@ hermes() {
 ## 许可
 
 补丁来自 Hermes Agent 开源项目 (NousResearch/hermes-agent)，遵循原项目许可。
+- - - -
+友链：**[Linux Do](https://linux.do/)**
+本项目亦在Linux Do社区中发布相关帖子。感谢佬友雪中送炭的Token哈哈~
