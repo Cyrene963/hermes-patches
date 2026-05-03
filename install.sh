@@ -14,25 +14,70 @@ echo "║     Hermes Agent 社区补丁合集 v1.0       ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
-# Check prerequisites
-if [ ! -d "$HERMES_DIR/.git" ]; then
-    # Try to find hermes-agent source via pip
-    PIP_SOURCE=$(python3 -c "import hermes_cli; import os; print(os.path.dirname(os.path.dirname(hermes_cli.__file__)))" 2>/dev/null || true)
-    if [ -n "$PIP_SOURCE" ] && [ -d "$PIP_SOURCE/.git" ]; then
-        HERMES_DIR="$PIP_SOURCE"
-        echo "📂 从 pip 安装路径找到: $HERMES_DIR"
-    else
-        # Auto-clone if not found
-        echo "⚠️  未找到 git 仓库，正在自动克隆..."
-        git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$HERMES_DIR" 2>/dev/null
-        if [ ! -d "$HERMES_DIR/.git" ]; then
-            echo "❌ 克隆失败，请手动安装:"
-            echo "   git clone https://github.com/NousResearch/hermes-agent.git ~/.hermes/hermes-agent"
-            exit 1
-        fi
-        echo "✅ 已克隆到 $HERMES_DIR"
+# Check prerequisites - find hermes-agent source
+find_hermes_source() {
+    # 1. Check default path
+    if [ -d "$HERMES_DIR/.git" ]; then
+        return 0
     fi
+
+    # 2. Try pip-installed location
+    local pip_source
+    pip_source=$(python3 -c "import hermes_cli; import os; print(os.path.dirname(os.path.dirname(hermes_cli.__file__)))" 2>/dev/null || true)
+    if [ -n "$pip_source" ] && [ -d "$pip_source/.git" ]; then
+        HERMES_DIR="$pip_source"
+        echo "📂 从 pip 安装路径找到: $HERMES_DIR"
+        return 0
+    fi
+
+    # 3. Try common alternative paths
+    for alt_path in "$HOME/hermes-agent" "$HOME/.hermes/hermes-agent" "/opt/hermes-agent" "$pip_source"; do
+        if [ -n "$alt_path" ] && [ -d "$alt_path" ] && [ -f "$alt_path/run_agent.py" ]; then
+            HERMES_DIR="$alt_path"
+            # Initialize git if needed (pip install doesn't create .git)
+            if [ ! -d "$HERMES_DIR/.git" ]; then
+                echo "📂 找到 Hermes 源码: $HERMES_DIR (初始化 git...)"
+                cd "$HERMES_DIR"
+                git init -q
+                git add -A
+                git commit -q -m "Initial commit (auto-initialized for patching)"
+                cd - > /dev/null
+            fi
+            return 0
+        fi
+    done
+
+    # 4. Check if hermes command exists, try to find source from it
+    if command -v hermes &>/dev/null; then
+        local hermes_path
+        hermes_path=$(command -v hermes)
+        # hermes is usually a wrapper script, check its content
+        local source_dir
+        source_dir=$(grep -o 'HERMES_HOME=[^ ]*' "$hermes_path" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '"' || true)
+        if [ -n "$source_dir" ] && [ -d "$source_dir" ]; then
+            HERMES_DIR="$source_dir"
+            if [ ! -d "$HERMES_DIR/.git" ]; then
+                echo "📂 找到 Hermes: $HERMES_DIR (初始化 git...)"
+                cd "$HERMES_DIR"
+                git init -q
+                git add -A
+                git commit -q -m "Initial commit (auto-initialized for patching)"
+                cd - > /dev/null
+            fi
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+if ! find_hermes_source; then
+    echo "❌ 未找到 Hermes Agent 安装"
+    echo "   请先安装: pip install hermes-agent"
+    echo "   或克隆: git clone https://github.com/NousResearch/hermes-agent.git ~/.hermes/hermes-agent"
+    exit 1
 fi
+echo "✅ Hermes 路径: $HERMES_DIR"
 
 if ! command -v git &>/dev/null; then
     echo "❌ 需要 git"
