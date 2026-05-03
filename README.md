@@ -106,22 +106,3 @@ hermes() {
 - - - -
 友链：**[Linux Do](https://linux.do/)**
 本项目亦在Linux Do社区中发布相关帖子。感谢佬友雪中送炭的Token哈哈~
-
-## Patch #8: Cross-channel Memory Unification (user_mapper.py)
-
-**PR:** [#19163](https://github.com/NousResearch/hermes-agent/pull/19163)
-**Files:** `scripts/user_mapper.py`
-**Purpose:** Unifies same user's memories across channels (CLI, Telegram, Discord) via symlinks.
-
-When the same user accesses Hermes from different channels, each channel gets a separate memory directory. This script maps multiple chat_ids to a single user identity:
-
-```bash
-# Map channels to a user
-python3 user_mapper.py map --chat-id 7359770766 --user nitrogen
-python3 user_mapper.py map --chat-id CLI_CHAT_ID --user nitrogen
-
-# Migrate existing data
-python3 user_mapper.py migrate --chat-id 7359770766 --user nitrogen
-```
-
-Companion to Patch #2 (per-user isolation): #2 isolates different users, this unifies same user across channels.
