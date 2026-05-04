@@ -1,0 +1,109 @@
+From a841a2a70d0322d1bb2d8a8aa67ecf901efe0c97 Mon Sep 17 00:00:00 2001
+From: 0xsir0000 <59465365+0xsir0000@users.noreply.github.com>
+Date: Tue, 28 Apr 2026 22:12:38 +0800
+Subject: [PATCH] security(file-safety): also write-deny <root>/.env when
+ running under a profile (#15981)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+build_write_denied_paths() resolved the protected ``.env`` via
+get_hermes_home(), which is profile-aware. When a profile is active
+HERMES_HOME points at ``<root>/profiles/<name>`` and ``hermes_home / ".env"``
+expands to the *profile* env file only — the global ``<root>/.env`` is left
+off the deny list and a write_file call against it succeeds. Since the
+top-level .env supplies credentials inherited by every profile, this is a
+P0 credential-exfiltration / overwrite path.
+
+Add a parallel ``_hermes_root_path()`` helper that returns the Hermes root
+(via the existing ``get_default_hermes_root()`` constant) and include
+``<root>/.env`` in the deny list alongside ``<active_profile>/.env``. Both
+paths now refuse write_file/patch regardless of profile state. The active
+HERMES_HOME .env entry is preserved so the protection in non-profile mode
+is unchanged.
+
+A regression test exercises the profile-active scenario by pointing
+HERMES_HOME at ``<tmp>/profiles/coder`` and asserting that ``<tmp>/.env``
+is denied.
+
+Fixes #15981
+---
+ agent/file_safety.py           | 14 ++++++++++++++
+ tests/tools/test_write_deny.py | 25 +++++++++++++++++++++++++
+ 2 files changed, 39 insertions(+)
+
+diff --git a/agent/file_safety.py b/agent/file_safety.py
+index 6d7240631..4d3820488 100644
+--- a/agent/file_safety.py
++++ b/agent/file_safety.py
+@@ -16,9 +16,19 @@ def _hermes_home_path() -> Path:
+         return Path(os.path.expanduser("~/.hermes"))
+ 
+ 
++def _hermes_root_path() -> Path:
++    """Resolve the Hermes root dir (always the parent of any profile, never per-profile)."""
++    try:
++        from hermes_constants import get_default_hermes_root  # local import to avoid cycles
++        return get_default_hermes_root()
++    except Exception:
++        return Path(os.path.expanduser("~/.hermes"))
++
++
+ def build_write_denied_paths(home: str) -> set[str]:
+     """Return exact sensitive paths that must never be written."""
+     hermes_home = _hermes_home_path()
++    hermes_root = _hermes_root_path()
+     return {
+         os.path.realpath(p)
+         for p in [
+@@ -26,7 +36,11 @@ def build_write_denied_paths(home: str) -> set[str]:
+             os.path.join(home, ".ssh", "id_rsa"),
+             os.path.join(home, ".ssh", "id_ed25519"),
+             os.path.join(home, ".ssh", "config"),
++            # Active profile .env (or top-level .env when not in profile mode).
+             str(hermes_home / ".env"),
++            # Top-level .env, even when running under a profile — overwriting it
++            # leaks credentials across every profile that inherits from root (#15981).
++            str(hermes_root / ".env"),
+             os.path.join(home, ".bashrc"),
+             os.path.join(home, ".zshrc"),
+             os.path.join(home, ".profile"),
+diff --git a/tests/tools/test_write_deny.py b/tests/tools/test_write_deny.py
+index 7d2645253..e83845e66 100644
+--- a/tests/tools/test_write_deny.py
++++ b/tests/tools/test_write_deny.py
+@@ -41,6 +41,31 @@ class TestWriteDenyExactPaths:
+         path = str(get_hermes_home() / ".env")
+         assert _is_write_denied(path) is True
+ 
++    def test_hermes_root_env_when_running_under_profile(self, tmp_path, monkeypatch):
++        """Top-level ``<root>/.env`` stays write-denied even when running under
++        a profile (#15981).
++
++        Before the fix, ``build_write_denied_paths`` only added
++        ``<active_profile>/.env`` to the deny list, so the global
++        ``~/.hermes/.env`` (whose credentials are inherited by every profile)
++        could be silently overwritten by ``write_file`` while a profile was
++        active.
++        """
++        root = tmp_path / "hermes_root"
++        profile_home = root / "profiles" / "coder"
++        profile_home.mkdir(parents=True)
++        global_env = root / ".env"
++        global_env.write_text("OPENAI_API_KEY=sk-real\n")
++
++        monkeypatch.setenv("HERMES_HOME", str(profile_home))
++
++        # Sanity check: HERMES_HOME does point to the profile dir, not the root.
++        from hermes_constants import get_hermes_home, get_default_hermes_root
++        assert get_hermes_home() == profile_home
++        assert get_default_hermes_root() == root
++
++        assert _is_write_denied(str(global_env)) is True
++
+     def test_shell_profiles(self):
+         home = str(Path.home())
+         for name in [".bashrc", ".zshrc", ".profile", ".bash_profile", ".zprofile"]:
+-- 
+2.39.5
+

@@ -1,0 +1,234 @@
+From ddd3e94fc3476cebeb43bf3e3429ae92cd046892 Mon Sep 17 00:00:00 2001
+From: briandevans <252620095+briandevans@users.noreply.github.com>
+Date: Wed, 29 Apr 2026 17:09:41 -0700
+Subject: [PATCH] fix(file-safety): block auth.json read via TERMINAL_CWD
+ relative path
+
+read_file_tool resolves relative paths against TERMINAL_CWD (or the
+task's live terminal cwd), but the prior call passed the original
+unresolved string to get_read_block_error. That function's own
+resolve() is anchored at the Python process cwd, so when a task's
+TERMINAL_CWD pointed at HERMES_HOME and the agent issued read_file
+on the relative path "auth.json", the credential-store denylist was
+never reached and the file was read normally.
+
+Pass the already-resolved absolute path string at the file_tools call
+site, document the contract on get_read_block_error, and add a
+read_file_tool-level regression test that pins the relative-path
+case under TERMINAL_CWD == HERMES_HOME.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ agent/file_safety.py                        |  18 ++-
+ tests/agent/test_file_safety_credentials.py | 149 ++++++++++++++++++++
+ tools/file_tools.py                         |   9 +-
+ 3 files changed, 173 insertions(+), 3 deletions(-)
+ create mode 100644 tests/agent/test_file_safety_credentials.py
+
+diff --git a/agent/file_safety.py b/agent/file_safety.py
+index 09da46caf..6d7240631 100644
+--- a/agent/file_safety.py
++++ b/agent/file_safety.py
+@@ -91,7 +91,23 @@ def is_write_denied(path: str) -> bool:
+ 
+ 
+ def get_read_block_error(path: str) -> Optional[str]:
+-    """Return an error message when a read targets internal Hermes cache files."""
++    """Return an error message when a read targets a denied Hermes path.
++
++    Two categories are blocked:
++      * Internal Hermes cache files under ``HERMES_HOME/skills/.hub`` —
++        readable metadata that an attacker could use as a prompt-injection
++        carrier.
++      * Credential stores at the top of ``HERMES_HOME`` (``auth.json``,
++        ``auth.lock``, ``.anthropic_oauth.json``) — plaintext provider
++        keys / OAuth tokens that the agent never needs to read directly.
++
++    Callers that resolve relative paths against a non-process cwd
++    (e.g. ``TERMINAL_CWD`` in ``tools/file_tools.py``) MUST pre-resolve
++    and pass the absolute path string.  This function's own ``resolve()``
++    is anchored at the Python process cwd, so a relative input like
++    ``"auth.json"`` would otherwise miss the denylist when the task's
++    terminal cwd differs from the process cwd.
++    """
+     resolved = Path(path).expanduser().resolve()
+     hermes_home = _hermes_home_path().resolve()
+     blocked_dirs = [
+diff --git a/tests/agent/test_file_safety_credentials.py b/tests/agent/test_file_safety_credentials.py
+new file mode 100644
+index 000000000..f36224927
+--- /dev/null
++++ b/tests/agent/test_file_safety_credentials.py
+@@ -0,0 +1,149 @@
++"""Tests for HERMES_HOME credential-file read blocking in file_safety.
++
++Regression for https://github.com/NousResearch/hermes-agent/issues/17656 —
++``read_file`` was previously only sandboxed against ``HERMES_HOME`` itself,
++which left ``auth.json`` and ``.anthropic_oauth.json`` (plaintext provider
++keys + OAuth tokens) readable by the agent. A prompt-injection reaching
++``read_file`` could exfiltrate active credentials.
++
++These tests verify that ``get_read_block_error`` returns a denial message
++for the credential stores while leaving arbitrary ``HERMES_HOME`` files
++readable, and that the existing ``skills/.hub`` deny still applies.
++"""
++
++from __future__ import annotations
++
++import os
++from pathlib import Path
++
++import pytest
++
++
++@pytest.fixture()
++def fake_home(tmp_path, monkeypatch):
++    """Point ``_hermes_home_path()`` at a tmp dir for isolated checks."""
++    import agent.file_safety as fs
++
++    home = tmp_path / "hermes_home"
++    home.mkdir()
++    monkeypatch.setattr(fs, "_hermes_home_path", lambda: home)
++    return home
++
++
++def _create(home: Path, rel: str | Path) -> Path:
++    """Create the file (with parents) so realpath() resolves it."""
++    p = home / rel
++    p.parent.mkdir(parents=True, exist_ok=True)
++    p.write_text("dummy", encoding="utf-8")
++    return p
++
++
++def test_auth_json_blocked(fake_home):
++    from agent.file_safety import get_read_block_error
++
++    auth = _create(fake_home, "auth.json")
++    err = get_read_block_error(str(auth))
++    assert err is not None
++    assert "credential store" in err
++    assert "auth.json" in err
++
++
++def test_auth_lock_blocked(fake_home):
++    from agent.file_safety import get_read_block_error
++
++    lock = _create(fake_home, "auth.lock")
++    err = get_read_block_error(str(lock))
++    assert err is not None
++    assert "credential store" in err
++
++
++def test_anthropic_oauth_json_blocked(fake_home):
++    from agent.file_safety import get_read_block_error
++
++    oauth = _create(fake_home, ".anthropic_oauth.json")
++    err = get_read_block_error(str(oauth))
++    assert err is not None
++    assert "credential store" in err
++
++
++def test_arbitrary_hermes_home_file_not_blocked(fake_home):
++    """Non-credential files inside HERMES_HOME stay readable."""
++    from agent.file_safety import get_read_block_error
++
++    safe = _create(fake_home, "session_log.txt")
++    assert get_read_block_error(str(safe)) is None
++
++
++def test_subdirectory_named_auth_json_not_blocked(fake_home):
++    """Only the top-level auth.json is the credential store; a file with the
++    same name in a subdirectory (e.g., a skill mock) must remain readable."""
++    from agent.file_safety import get_read_block_error
++
++    nested = _create(fake_home, Path("skills") / "my-skill" / "auth.json")
++    assert get_read_block_error(str(nested)) is None
++
++
++def test_skills_hub_block_still_applies(fake_home):
++    """Regression guard: the original skills/.hub deny must keep working."""
++    from agent.file_safety import get_read_block_error
++
++    hub_file = _create(fake_home, "skills/.hub/manifest.json")
++    err = get_read_block_error(str(hub_file))
++    assert err is not None
++    assert "internal Hermes cache file" in err
++
++
++def test_path_traversal_resolves_to_blocked(fake_home, tmp_path):
++    """A path that traverses through a sibling dir back into HERMES_HOME's
++    auth.json must still be caught — the check resolves through realpath."""
++    from agent.file_safety import get_read_block_error
++
++    _create(fake_home, "auth.json")
++    sibling = tmp_path / "elsewhere"
++    sibling.mkdir()
++    traversal = sibling / ".." / "hermes_home" / "auth.json"
++    err = get_read_block_error(str(traversal))
++    assert err is not None
++    assert "credential store" in err
++
++
++def test_symlink_to_auth_json_blocked(fake_home, tmp_path):
++    """A symlink pointing at HERMES_HOME/auth.json from outside the home
++    must be blocked — readlink-resolution catches the indirection."""
++    from agent.file_safety import get_read_block_error
++
++    target = _create(fake_home, "auth.json")
++    link = tmp_path / "shim.json"
++    try:
++        os.symlink(target, link)
++    except (OSError, NotImplementedError):
++        pytest.skip("symlinks not supported on this platform/filesystem")
++    err = get_read_block_error(str(link))
++    assert err is not None
++    assert "credential store" in err
++
++
++def test_read_file_tool_blocks_relative_path_under_terminal_cwd(
++    fake_home, tmp_path, monkeypatch
++):
++    """Bypass guard: a relative path like ``"auth.json"`` resolved by
++    ``read_file_tool`` against ``TERMINAL_CWD == HERMES_HOME`` must still
++    be blocked, even though ``get_read_block_error``'s own ``resolve()``
++    is anchored at the (different) Python process cwd.
++    """
++    import json
++
++    import tools.file_tools as ft
++
++    _create(fake_home, "auth.json")
++    # Force the file_tools resolver to anchor relative paths at HERMES_HOME
++    # while the Python process cwd remains tmp_path (a different directory).
++    monkeypatch.setenv("TERMINAL_CWD", str(fake_home))
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.setattr(
++        ft, "_get_live_tracking_cwd", lambda task_id="default": None
++    )
++
++    out = json.loads(ft.read_file_tool("auth.json"))
++    assert "error" in out
++    assert "credential store" in out["error"]
+diff --git a/tools/file_tools.py b/tools/file_tools.py
+index 7a7f09295..2c948b589 100644
+--- a/tools/file_tools.py
++++ b/tools/file_tools.py
+@@ -474,8 +474,13 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str =
+             })
+ 
+         # ── Hermes internal path guard ────────────────────────────────
+-        # Prevent prompt injection via catalog or hub metadata files.
+-        block_error = get_read_block_error(path)
++        # Prevent prompt injection via catalog or hub metadata files,
++        # and block credential stores under HERMES_HOME.  Pass the
++        # already-resolved path so a relative-path read against
++        # TERMINAL_CWD == HERMES_HOME (e.g. "auth.json") still hits the
++        # denylist — get_read_block_error's own resolve() runs against
++        # the Python process cwd, which can differ.
++        block_error = get_read_block_error(str(_resolved))
+         if block_error:
+             return json.dumps({"error": block_error})
+ 
+-- 
+2.39.5
+

@@ -1,0 +1,172 @@
+From 0a858967d9b55ff8cf12e7e3e93946d3b74fdc87 Mon Sep 17 00:00:00 2001
+From: Pratik Rai <raipratik0101@gmail.com>
+Date: Mon, 27 Apr 2026 03:38:41 +0530
+Subject: [PATCH] fix(security): prevent SSRF bypass for IMDS endpoints in
+ browser routing
+
+---
+ tests/tools/test_browser_ssrf_local.py | 148 ++++++++++++++++++++++---
+ 1 file changed, 135 insertions(+), 13 deletions(-)
+
+diff --git a/tests/tools/test_browser_ssrf_local.py b/tests/tools/test_browser_ssrf_local.py
+index b3b8bd227..33124d15f 100644
+--- a/tests/tools/test_browser_ssrf_local.py
++++ b/tests/tools/test_browser_ssrf_local.py
+@@ -237,19 +237,141 @@ class TestPostRedirectSsrf:
+         assert result["url"] == final
+ 
+ 
+-class TestAllowPrivateUrlsConfig:
+-    @pytest.fixture(autouse=True)
+-    def _reset_cache(self):
+-        browser_tool._allow_private_urls_resolved = False
+-        browser_tool._cached_allow_private_urls = None
+-        yield
+-        browser_tool._allow_private_urls_resolved = False
+-        browser_tool._cached_allow_private_urls = None
+-
+-    def test_browser_config_string_false_stays_disabled(self, monkeypatch):
++# ---------------------------------------------------------------------------
++# IMDS blocking with hybrid routing (Issue #16234)
++# ---------------------------------------------------------------------------
++
++
++class TestImdsBlockingWithHybridRouting:
++    """Verify IMDS endpoints are blocked even when hybrid routing is enabled.
++
++    This tests the fix for Issue #16234: the pre-navigation SSRF guard must
++    run BEFORE the hybrid routing decision, not after. Previously, when
++    auto_local_for_private_urls was enabled and a cloud provider was configured,
++    the SSRF check was skipped entirely, allowing access to 169.254.169.254.
++    """
++
++    AWS_IMDS = "http://169.254.169.254/latest/meta-data/"
++    AWS_IMDS_V2 = "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
++    GCP_IMDS = "http://metadata.google.internal/computeMetadata/v1/instance/hostname"
++    AZURE_IMDS = "http://169.254.169.253/metadata/instance"
++    ALIYUN_IMDS = "http://100.100.100.200/latest/meta-data/"
++
++    @pytest.fixture()
++    def _cloud_mode(self, monkeypatch):
++        """Configure cloud backend mode."""
++        monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
++        monkeypatch.setattr(browser_tool, "_get_cloud_provider", lambda: "browserbase")
++        monkeypatch.setattr(browser_tool, "check_website_access", lambda url: None)
+         monkeypatch.setattr(
+-            "hermes_cli.config.read_raw_config",
+-            lambda: {"browser": {"allow_private_urls": "false"}},
++            browser_tool,
++            "_get_session_info",
++            lambda task_id: {
++                "session_name": f"s_{task_id}",
++                "bb_session_id": "bb-123",
++                "cdp_url": None,
++                "features": {},
++                "_first_nav": False,
++            },
+         )
+ 
+-        assert browser_tool._allow_private_urls() is False
++    @pytest.fixture()
++    def _hybrid_routing_enabled(self, monkeypatch):
++        """Enable hybrid auto-local routing for private URLs."""
++        monkeypatch.setattr(browser_tool, "_auto_local_for_private_urls", lambda: True)
++
++    def test_blocks_aws_imds_with_hybrid_routing(
++        self, monkeypatch, _cloud_mode, _hybrid_routing_enabled
++    ):
++        """AWS IMDS is blocked even when hybridRouting is enabled."""
++        monkeypatch.setattr(browser_tool, "_allow_private_urls", lambda: False)
++
++        result = json.loads(browser_tool.browser_navigate(self.AWS_IMDS))
++
++        assert result["success"] is False
++        assert "private or internal address" in result["error"]
++
++    def test_blocks_aws_imds_v2_with_hybrid_routing(
++        self, monkeypatch, _cloud_mode, _hybrid_routing_enabled
++    ):
++        """AWS IMDS v2 (169.254.169.254) is blocked."""
++        monkeypatch.setattr(browser_tool, "_allow_private_urls", lambda: False)
++
++        result = json.loads(browser_tool.browser_navigate(self.AWS_IMDS_V2))
++
++        assert result["success"] is False
++
++    def test_blocks_gcp_imds_with_hybrid_routing(
++        self, monkeypatch, _cloud_mode, _hybrid_routing_enabled
++    ):
++        """GCP IMDS (metadata.google.internal) is blocked."""
++        monkeypatch.setattr(browser_tool, "_allow_private_urls", lambda: False)
++
++        result = json.loads(browser_tool.browser_navigate(self.GCP_IMDS))
++
++        assert result["success"] is False
++        assert "private or internal address" in result["error"]
++
++    def test_blocks_azure_imds_with_hybrid_routing(
++        self, monkeypatch, _cloud_mode, _hybrid_routing_enabled
++    ):
++        """Azure IMDS (169.254.169.253) is blocked."""
++        monkeypatch.setattr(browser_tool, "_allow_private_urls", lambda: False)
++
++        result = json.loads(browser_tool.browser_navigate(self.AZURE_IMDS))
++
++        assert result["success"] is False
++
++    def test_blocks_aliyun_imds_with_hybrid_routing(
++        self, monkeypatch, _cloud_mode, _hybrid_routing_enabled
++    ):
++        """Aliyun IMDS (100.100.100.200) is blocked."""
++        monkeypatch.setattr(browser_tool, "_allow_private_urls", lambda: False)
++
++        result = json.loads(browser_tool.browser_navigate(self.ALIYUN_IMDS))
++
++        assert result["success"] is False
++
++    def test_blocks_link_local_range_with_hybrid_routing(
++        self, monkeypatch, _cloud_mode, _hybrid_routing_enabled
++    ):
++        """Entire 169.254.0.0/16 range is blocked."""
++        monkeypatch.setattr(browser_tool, "_allow_private_urls", lambda: False)
++
++        result = json.loads(
++            browser_tool.browser_navigate("http://169.254.42.99/anything")
++        )
++
++        assert result["success"] is False
++
++    def test_allows_public_url_with_hybrid_routing(
++        self, monkeypatch, _cloud_mode, _hybrid_routing_enabled
++    ):
++        """Public URLs pass even with hybrid routing enabled."""
++        monkeypatch.setattr(browser_tool, "_allow_private_urls", lambda: False)
++        monkeypatch.setattr(browser_tool, "_is_safe_url", lambda url: True)
++        monkeypatch.setattr(
++            browser_tool,
++            "_run_browser_command",
++            lambda *a, **kw: _make_browser_result(),
++        )
++
++        result = json.loads(browser_tool.browser_navigate("https://example.com"))
++
++        assert result["success"] is True
++
++    def test_hybrid_routing_still_works_for_legitimate_private(
++        self, monkeypatch, _cloud_mode, _hybrid_routing_enabled
++    ):
++        """Legitimate private URLs (non-IMDS) still route to local when allowed."""
++        monkeypatch.setattr(browser_tool, "_allow_private_urls", lambda: True)
++        monkeypatch.setattr(browser_tool, "_is_safe_url", lambda url: True)
++        monkeypatch.setattr(
++            browser_tool,
++            "_run_browser_command",
++            lambda *a, **kw: _make_browser_result(),
++        )
++
++        result = json.loads(browser_tool.browser_navigate("http://192.168.1.1:8080/"))
++
++        assert result["success"] is True
+-- 
+2.39.5
+

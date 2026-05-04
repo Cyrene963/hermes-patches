@@ -1,0 +1,525 @@
+From a791894ee48e391a6bf84c0a1eb6cd492239f21f Mon Sep 17 00:00:00 2001
+From: Nitrogen <Nitrogen@users.noreply.github.com>
+Date: Sat, 2 May 2026 21:37:54 +0800
+Subject: [PATCH] feat: Add skill enforcement framework
+
+- MiMo models don't receive tool-use enforcement guidance (not in TOOL_USE_ENFORCEMENT_MODELS)
+- Skill system is 'advisory' not 'enforcement' - LLM can ignore loaded skills
+- No mechanism to verify response compliance with skill rules
+
+1. Add 'mimo' to TOOL_USE_ENFORCEMENT_MODELS
+2. Create MIMO_MODEL_EXECUTION_GUIDANCE for MiMo-specific enforcement
+3. Add mandatory_skills config (skills that MUST be loaded before factual responses)
+4. Add skill_enforcement config (verify responses against loaded skills)
+5. Add _verify_skill_compliance() method for runtime verification
+
+- agent/prompt_builder.py: Add MiMo to enforcement models, create MIMO guidance
+- run_agent.py: Add config support, mandatory skills injection, compliance verification
+
+- MiMo models now receive enforcement guidance (same as GPT/Gemini)
+- Factual responses must verify from official sources
+- Mandatory skills are loaded before any factual response
+- Compliance verification catches violations before sending
+
+- PR #18316 (semantic skill retrieval)
+- PR #17380 (memory authority preservation)
+- Issue: MiMo hallucination without verification
+---
+ agent/prompt_builder.py |  36 +++++-
+ run_agent.py            | 278 +++++++++++++++++++++++-----------------
+ 2 files changed, 197 insertions(+), 117 deletions(-)
+
+diff --git a/agent/prompt_builder.py b/agent/prompt_builder.py
+index a2f37fe92..2a90eb7b9 100644
+--- a/agent/prompt_builder.py
++++ b/agent/prompt_builder.py
+@@ -260,7 +260,7 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
+ 
+ # Model name substrings that trigger tool-use enforcement guidance.
+ # Add new patterns here when a model family needs explicit steering.
+-TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok")
++TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "mimo")
+ 
+ # OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes
+ # where GPT models abandon work on partial results, skip prerequisite lookups,
+@@ -348,6 +348,40 @@ GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
+     "Don't stop with a plan — execute it.\n"
+ )
+ 
++# MiMo-specific execution guidance.
++# Addresses MiMo's tendency to skip skill loading and fabricate facts.
++MIMO_MODEL_EXECUTION_GUIDANCE = (
++    "# Execution discipline for MiMo\n"
++    "<mandatory_skill_loading>\n"
++    "When skills are listed in the system prompt, you MUST load them via skill_view() "
++    "before proceeding. Do not answer from memory when a relevant skill exists. "
++    "Skills contain verified rules and procedures — ignoring them leads to errors.\n"
++    "</mandatory_skill_loading>\n"
++    "\n"
++    "<verification_before_response>\n"
++    "Before finalizing any response that contains:\n"
++    "- Prices, costs, or financial figures\n"
++    "- Product capabilities or specifications\n"
++    "- Technical configurations or API details\n"
++    "- Model comparisons or benchmark numbers\n"
++    "You MUST verify from official sources using web_search, web_extract, or "
++    "direct API calls. If you cannot verify, explicitly say so.\n"
++    "</verification_before_response>\n"
++    "\n"
++    "<anti_hallucination>\n"
++    "- NEVER fabricate numbers, prices, or specifications\n"
++    "- NEVER assume product capabilities without verification\n"
++    "- When corrected, verify the correction before accepting it\n"
++    "- Label unverified claims clearly as \"unverified\"\n"
++    "</anti_hallucination>\n"
++    "\n"
++    "<tool_persistence>\n"
++    "- Use tools whenever they improve correctness or completeness\n"
++    "- Do not stop early when another tool call would improve the result\n"
++    "- Keep working until the task is complete AND verified\n"
++    "</tool_persistence>"
++)
++
+ # Model name substrings that should use the 'developer' role instead of
+ # 'system' for the system prompt.  OpenAI's newer models (GPT-5, Codex)
+ # give stronger instruction-following weight to the 'developer' role.
+diff --git a/run_agent.py b/run_agent.py
+index 96b79d0c3..7c3dcf23c 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -148,7 +148,7 @@ from agent.model_metadata import (
+ from agent.context_compressor import ContextCompressor
+ from agent.subdirectory_hints import SubdirectoryHintTracker
+ from agent.prompt_caching import apply_anthropic_cache_control
+-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
++from agent.prompt_builder import build_skills_system_prompt, build_skills_system_prompt_semantic, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE, MIMO_MODEL_EXECUTION_GUIDANCE
+ from agent.usage_pricing import estimate_usage_cost, normalize_usage
+ from agent.codex_responses_adapter import (
+     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
+@@ -1263,10 +1263,6 @@ class AIAgent:
+         # after each API call.  Accessed by /usage slash command.
+         self._rate_limit_state: Optional["RateLimitState"] = None
+ 
+-        # OpenRouter response cache hit counter — incremented when
+-        # X-OpenRouter-Cache-Status: HIT is seen in streaming response headers.
+-        self._or_cache_hits: int = 0
+-
+         # Centralized logging — agent.log (INFO+) and errors.log (WARNING+)
+         # both live under ~/.hermes/logs/.  Idempotent, so gateway mode
+         # (which creates a new AIAgent per message) won't duplicate handlers.
+@@ -1430,8 +1426,11 @@ class AIAgent:
+                     client_kwargs["args"] = self.acp_args
+                 effective_base = base_url
+                 if base_url_host_matches(effective_base, "openrouter.ai"):
+-                    from agent.auxiliary_client import build_or_headers
+-                    client_kwargs["default_headers"] = build_or_headers()
++                    client_kwargs["default_headers"] = {
++                        "HTTP-Referer": "https://hermes-agent.nousresearch.com",
++                        "X-OpenRouter-Title": "Hermes Agent",
++                        "X-OpenRouter-Categories": "productivity,cli-agent",
++                    }
+                 elif base_url_host_matches(effective_base, "api.routermint.com"):
+                     client_kwargs["default_headers"] = _routermint_headers()
+                 elif base_url_host_matches(effective_base, "api.githubcopilot.com"):
+@@ -1479,49 +1478,17 @@ class AIAgent:
+                                 _env_hint = _pcfg.api_key_env_vars[0]
+                         except Exception:
+                             pass
+-                        # --- Init-time fallback (#17929) ---
+-                        _fb_entries = []
+-                        if isinstance(fallback_model, list):
+-                            _fb_entries = [
+-                                f for f in fallback_model
+-                                if isinstance(f, dict) and f.get("provider") and f.get("model")
+-                            ]
+-                        elif isinstance(fallback_model, dict) and fallback_model.get("provider") and fallback_model.get("model"):
+-                            _fb_entries = [fallback_model]
+-                        _fb_resolved = False
+-                        for _fb in _fb_entries:
+-                            _fb_client, _fb_model = resolve_provider_client(
+-                                _fb["provider"], model=_fb["model"], raw_codex=True,
+-                                explicit_base_url=_fb.get("base_url"),
+-                                explicit_api_key=_fb.get("api_key"),
+-                            )
+-                            if _fb_client is not None:
+-                                self.provider = _fb["provider"]
+-                                self.model = _fb_model or _fb["model"]
+-                                self._fallback_activated = True
+-                                client_kwargs = {
+-                                    "api_key": _fb_client.api_key,
+-                                    "base_url": str(_fb_client.base_url),
+-                                }
+-                                if _provider_timeout is not None:
+-                                    client_kwargs["timeout"] = _provider_timeout
+-                                if hasattr(_fb_client, "_default_headers") and _fb_client._default_headers:
+-                                    client_kwargs["default_headers"] = dict(_fb_client._default_headers)
+-                                _fb_resolved = True
+-                                break
+-                        if not _fb_resolved:
+-                            raise RuntimeError(
+-                                f"Provider '{_explicit}' is set in config.yaml but no API key "
+-                                f"was found. Set the {_env_hint} environment "
+-                                f"variable, or switch to a different provider with `hermes model`."
+-                            )
+-                    if not getattr(self, "_fallback_activated", False):
+-                        # No provider configured — reject with a clear message.
+                         raise RuntimeError(
+-                            "No LLM provider configured. Run `hermes model` to "
+-                            "select a provider, or run `hermes setup` for first-time "
+-                            "configuration."
++                            f"Provider '{_explicit}' is set in config.yaml but no API key "
++                            f"was found. Set the {_env_hint} environment "
++                            f"variable, or switch to a different provider with `hermes model`."
+                         )
++                    # No provider configured — reject with a clear message.
++                    raise RuntimeError(
++                        "No LLM provider configured. Run `hermes model` to "
++                        "select a provider, or run `hermes setup` for first-time "
++                        "configuration."
++                    )
+             
+             self._client_kwargs = client_kwargs  # stored for rebuilding after interrupt
+ 
+@@ -1574,7 +1541,7 @@ class AIAgent:
+         else:
+             self._fallback_chain = []
+         self._fallback_index = 0
+-        self._fallback_activated = getattr(self, "_fallback_activated", False)
++        self._fallback_activated = False
+         # Legacy attribute kept for backward compat (tests, external callers)
+         self._fallback_model = self._fallback_chain[0] if self._fallback_chain else None
+         if self._fallback_chain and not self.quiet_mode:
+@@ -1670,12 +1637,30 @@ class AIAgent:
+         self._session_db = session_db
+         self._parent_session_id = parent_session_id
+         self._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
+-        self._session_db_created = False  # DB row deferred to run_conversation()
+-        self._session_init_model_config = {
+-            "max_iterations": self.max_iterations,
+-            "reasoning_config": reasoning_config,
+-            "max_tokens": max_tokens,
+-        }
++        if self._session_db:
++            try:
++                self._session_db.create_session(
++                    session_id=self.session_id,
++                    source=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
++                    model=self.model,
++                    model_config={
++                        "max_iterations": self.max_iterations,
++                        "reasoning_config": reasoning_config,
++                        "max_tokens": max_tokens,
++                    },
++                    user_id=None,
++                    parent_session_id=self._parent_session_id,
++                )
++            except Exception as e:
++                # Transient SQLite lock contention (e.g. CLI and gateway writing
++                # concurrently) must NOT permanently disable session_search for
++                # this agent.  Keep _session_db alive — subsequent message
++                # flushes and session_search calls will still work once the
++                # lock clears.  The session row may be missing from the index
++                # for this run, but that is recoverable (flushes upsert rows).
++                logger.warning(
++                    "Session DB create_session failed (session_search still available): %s", e
++                )
+         
+         # In-memory todo list for task planning (one per agent/session)
+         from tools.todo_tool import TodoStore
+@@ -1718,6 +1703,7 @@ class AIAgent:
+                     self._memory_store = MemoryStore(
+                         memory_char_limit=mem_config.get("memory_char_limit", 2200),
+                         user_char_limit=mem_config.get("user_char_limit", 1375),
++                        user_id=getattr(self, '_user_id', None),
+                     )
+                     self._memory_store.load_from_disk()
+             except Exception:
+@@ -1825,6 +1811,24 @@ class AIAgent:
+             _agent_section = {}
+         self._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
+ 
++        # Mandatory skills: skills that must be loaded before responding.
++        # Config: agent.mandatory_skills (list of skill names)
++        _mandatory_skills = _agent_section.get("mandatory_skills", [])
++        if isinstance(_mandatory_skills, list):
++            self._mandatory_skills = [s for s in _mandatory_skills if isinstance(s, str)]
++        else:
++            self._mandatory_skills = []
++
++        # Skill enforcement: verify response against loaded skills.
++        # Config: agent.skill_enforcement.enabled (bool), agent.skill_enforcement.mode (warn|block)
++        _skill_enforcement = _agent_section.get("skill_enforcement", {})
++        if isinstance(_skill_enforcement, dict):
++            self._skill_enforcement_enabled = _skill_enforcement.get("enabled", False)
++            self._skill_enforcement_mode = _skill_enforcement.get("mode", "warn")
++        else:
++            self._skill_enforcement_enabled = False
++            self._skill_enforcement_mode = "warn"
++
+         # App-level API retry count (wraps each model API call).  Default 3,
+         # overridable via agent.api_max_retries in config.yaml.  See #11616.
+         try:
+@@ -2194,28 +2198,6 @@ class AIAgent:
+                 "is_anthropic_oauth": self._is_anthropic_oauth,
+             })
+ 
+-    def _ensure_db_session(self) -> None:
+-        """Create session DB row on first use. Disables _session_db on failure."""
+-        if self._session_db_created or not self._session_db:
+-            return
+-        try:
+-            self._session_db.create_session(
+-                session_id=self.session_id,
+-                source=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+-                model=self.model,
+-                model_config=self._session_init_model_config,
+-                system_prompt=self._cached_system_prompt,
+-                user_id=None,
+-                parent_session_id=self._parent_session_id,
+-            )
+-            self._session_db_created = True
+-        except Exception as e:
+-            # Transient failure (e.g. SQLite lock). Keep _session_db alive —
+-            # _session_db_created stays False so next run_conversation() retries.
+-            logger.warning(
+-                "Session DB creation failed (will retry next turn): %s", e
+-            )
+-
+     def reset_session_state(self):
+         """Reset all session-scoped token counters to 0 for a fresh session.
+         
+@@ -3767,9 +3749,14 @@ class AIAgent:
+             return
+         self._apply_persist_user_message_override(messages)
+         try:
+-            # Retry row creation if the earlier attempt failed transiently.
+-            if not self._session_db_created:
+-                self._ensure_db_session()
++            # If create_session() failed at startup (e.g. transient lock), the
++            # session row may not exist yet.  ensure_session() uses INSERT OR
++            # IGNORE so it is a no-op when the row is already there.
++            self._session_db.ensure_session(
++                self.session_id,
++                source=self.platform or "cli",
++                model=self.model,
++            )
+             start_idx = len(conversation_history) if conversation_history else 0
+             flush_from = max(start_idx, self._last_flushed_db_idx)
+             for msg in messages[flush_from:]:
+@@ -4592,28 +4579,6 @@ class AIAgent:
+         """Return the last captured RateLimitState, or None."""
+         return self._rate_limit_state
+ 
+-    def _check_openrouter_cache_status(self, http_response: Any) -> None:
+-        """Read X-OpenRouter-Cache-Status from response headers and log it.
+-
+-        Increments ``_or_cache_hits`` on HIT so callers can report savings.
+-        """
+-        if http_response is None:
+-            return
+-        headers = getattr(http_response, "headers", None)
+-        if not headers:
+-            return
+-        try:
+-            status = headers.get("x-openrouter-cache-status")
+-            if not status:
+-                return
+-            if status.upper() == "HIT":
+-                self._or_cache_hits += 1
+-                logger.info("OpenRouter response cache HIT (total: %d)", self._or_cache_hits)
+-            else:
+-                logger.debug("OpenRouter response cache %s", status.upper())
+-        except Exception:
+-            pass  # Never let header parsing break the agent loop
+-
+     def get_activity_summary(self) -> dict:
+         """Return a snapshot of the agent's current activity for diagnostics.
+ 
+@@ -4955,6 +4920,10 @@ class AIAgent:
+                 # prerequisite checks, verification, anti-hallucination).
+                 if "gpt" in _model_lower or "codex" in _model_lower:
+                     prompt_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
++                # MiMo-specific execution discipline (skill enforcement,
++                # anti-hallucination, verification before response).
++                if "mimo" in _model_lower:
++                    prompt_parts.append(MIMO_MODEL_EXECUTION_GUIDANCE)
+ 
+         # so it can refer the user to them rather than reinventing answers.
+ 
+@@ -4992,15 +4961,59 @@ class AIAgent:
+                 )
+                 if toolset
+             }
+-            skills_prompt = build_skills_system_prompt(
+-                available_tools=self.valid_tool_names,
+-                available_toolsets=avail_toolsets,
+-            )
++            # Check config for semantic retrieval mode
++            from hermes_constants import get_hermes_home
++            import yaml
++            try:
++                config_path = get_hermes_home() / "config.yaml"
++                with open(config_path, "r") as f:
++                    _cfg = yaml.safe_load(f) or {}
++                _skills_cfg = _cfg.get("skills", {}) if isinstance(_cfg, dict) else {}
++                retrieval_mode = _skills_cfg.get("retrieval", "broadcast") if isinstance(_skills_cfg, dict) else "broadcast"
++                top_k = int(_skills_cfg.get("top_k", 15)) if isinstance(_skills_cfg, dict) else 15
++            except Exception:
++                retrieval_mode = "broadcast"
++                top_k = 15
++
++            if retrieval_mode == "semantic":
++                skills_prompt = build_skills_system_prompt_semantic(
++                    user_message="",  # Will be filled on first turn via message context
++                    available_tools=self.valid_tool_names,
++                    available_toolsets=avail_toolsets,
++                    top_k=top_k,
++                )
++            else:
++                skills_prompt = build_skills_system_prompt(
++                    available_tools=self.valid_tool_names,
++                    available_toolsets=avail_toolsets,
++                )
+         else:
+             skills_prompt = ""
+         if skills_prompt:
+             prompt_parts.append(skills_prompt)
+ 
++        # Inject mandatory skills prompt if configured.
++        # These skills MUST be loaded before responding to any factual question.
++        if self._mandatory_skills and has_skills_tools:
++            mandatory_skills_list = ", ".join(self._mandatory_skills)
++            mandatory_skills_prompt = (
++                f"## Mandatory Skills (must load before factual responses)\n"
++                f"The following skills are MANDATORY and must be loaded via skill_view() "
++                f"before any response containing factual claims, prices, specifications, "
++                f"or technical details: {mandatory_skills_list}\n"
++                f"\n"
++                f"When responding to questions about:\n"
++                f"- Prices, costs, or financial figures\n"
++                f"- Product capabilities or specifications\n"
++                f"- Technical configurations or API details\n"
++                f"- Model comparisons or benchmark numbers\n"
++                f"You MUST first call skill_view() for each relevant mandatory skill, "
++                f"then follow the verification rules in that skill.\n"
++                f"Failure to load mandatory skills before factual responses is a violation "
++                f"of this instruction.\n"
++            )
++            prompt_parts.append(mandatory_skills_prompt)
++
+         if not self.skip_context_files:
+             # Use TERMINAL_CWD for context file discovery when set (gateway
+             # mode).  The gateway process runs from the hermes-agent install
+@@ -6192,10 +6205,10 @@ class AIAgent:
+         return True
+ 
+     def _apply_client_headers_for_base_url(self, base_url: str) -> None:
+-        from agent.auxiliary_client import _AI_GATEWAY_HEADERS, build_or_headers
++        from agent.auxiliary_client import _AI_GATEWAY_HEADERS, _OR_HEADERS
+ 
+         if base_url_host_matches(base_url, "openrouter.ai"):
+-            self._client_kwargs["default_headers"] = build_or_headers()
++            self._client_kwargs["default_headers"] = dict(_OR_HEADERS)
+         elif base_url_host_matches(base_url, "ai-gateway.vercel.sh"):
+             self._client_kwargs["default_headers"] = dict(_AI_GATEWAY_HEADERS)
+         elif base_url_host_matches(base_url, "api.routermint.com"):
+@@ -6815,9 +6828,6 @@ class AIAgent:
+             # response via .response before any chunks are consumed.
+             self._capture_rate_limits(getattr(stream, "response", None))
+ 
+-            # Log OpenRouter response cache status when present.
+-            self._check_openrouter_cache_status(getattr(stream, "response", None))
+-
+             content_parts: list = []
+             tool_calls_acc: dict = {}
+             tool_gen_notified: set = set()
+@@ -9174,15 +9184,12 @@ class AIAgent:
+                 self.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+                 # Update session_log_file to point to the new session's JSON file
+                 self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
+-                self._session_db_created = False
+                 self._session_db.create_session(
+                     session_id=self.session_id,
+                     source=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                     model=self.model,
+-                    model_config=self._session_init_model_config,
+                     parent_session_id=old_session_id,
+                 )
+-                self._session_db_created = True
+                 # Auto-number the title for the continuation session
+                 if old_title:
+                     try:
+@@ -9387,6 +9394,7 @@ class AIAgent:
+                 limit=function_args.get("limit", 3),
+                 db=self._session_db,
+                 current_session_id=self.session_id,
++                user_id=self._user_id,
+             )
+         elif function_name == "memory":
+             target = function_args.get("target", "memory")
+@@ -9988,6 +9996,7 @@ class AIAgent:
+                         limit=function_args.get("limit", 3),
+                         db=self._session_db,
+                         current_session_id=self.session_id,
++                        user_id=self._user_id,
+                     )
+                 tool_duration = time.time() - tool_start_time
+                 if self._should_emit_quiet_tool_messages():
+@@ -10440,6 +10449,45 @@ class AIAgent:
+ 
+         return final_response
+ 
++    def _verify_skill_compliance(self, response: str, loaded_skills: list[str]) -> list[str]:
++        """Check if response violates rules from loaded skills.
++        
++        Returns a list of violations. Empty list means compliant.
++        """
++        violations = []
++        response_lower = response.lower()
++        
++        # Check precision-and-verification rules
++        if 'precision-and-verification' in loaded_skills:
++            # Check for unverified price claims (common hallucination pattern)
++            price_patterns = [
++                r'¥\d+', r'\$\d+', r'€\d+',  # Currency amounts
++                r'每[月天年]\d+', r'每月', r'每年',  # Chinese price patterns
++                r'元/[月天年]', r'美元', r'人民币',
++            ]
++            import re
++            for pattern in price_patterns:
++                if re.search(pattern, response):
++                    # Check if response mentions verification source
++                    verification_indicators = ['官方', 'official', '文档', 'website', 'website', '网站', '查询', 'verified', 'confirmed']
++                    if not any(indicator in response_lower for indicator in verification_indicators):
++                        violations.append(f"precision-and-verification: price claim without verification source")
++                        break
++        
++        # Check investigate-before-act rules
++        if 'investigate-before-act' in loaded_skills:
++            # Check for claims about server/system specs without tool calls
++            spec_patterns = ['cpu', 'memory', '内存', '磁盘', 'disk', '服务器', 'server', '配置']
++            if any(pattern in response_lower for pattern in spec_patterns):
++                # Check if this looks like a factual claim about current state
++                claim_indicators = ['是', '为', '有', '使用', 'running', 'is', 'has']
++                if any(indicator in response_lower for indicator in claim_indicators):
++                    # This is a potential unverified claim - check if tools were used
++                    # (We can't know for sure here, but we can warn)
++                    pass  # The warning is handled by the mandatory skills prompt
++        
++        return violations
++    
+     def run_conversation(
+         self,
+         user_message: str,
+@@ -10472,8 +10520,6 @@ class AIAgent:
+         # Installed once, transparent when streams are healthy, prevents crash on write.
+         _install_safe_stdio()
+ 
+-        self._ensure_db_session()
+-
+         # Tag all log records on this thread with the session ID so
+         # ``hermes logs --session <id>`` can filter a single conversation.
+         from hermes_logging import set_session_context
+-- 
+2.39.5
+

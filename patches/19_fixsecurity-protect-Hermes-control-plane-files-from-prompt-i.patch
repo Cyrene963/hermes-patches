@@ -1,0 +1,243 @@
+From 2e5db531eef26f563aadc0609d8e34b8a8812eee Mon Sep 17 00:00:00 2001
+From: Pratik Rai <raipratik0101@gmail.com>
+Date: Thu, 23 Apr 2026 02:29:22 +0530
+Subject: [PATCH] fix(security): protect Hermes control-plane files from prompt
+ injection
+
+---
+ agent/file_safety.py                | 28 ++++++++++-
+ tests/tools/test_file_operations.py | 72 +++++++++++++++++++++++++++--
+ 2 files changed, 95 insertions(+), 5 deletions(-)
+
+diff --git a/agent/file_safety.py b/agent/file_safety.py
+index 4d3820488..c21d21ecd 100644
+--- a/agent/file_safety.py
++++ b/agent/file_safety.py
+@@ -11,6 +11,7 @@ def _hermes_home_path() -> Path:
+     """Resolve the active HERMES_HOME (profile-aware) without circular imports."""
+     try:
+         from hermes_constants import get_hermes_home  # local import to avoid cycles
++
+         return get_hermes_home()
+     except Exception:
+         return Path(os.path.expanduser("~/.hermes"))
+@@ -97,8 +98,33 @@ def is_write_denied(path: str) -> bool:
+         if resolved.startswith(prefix):
+             return True
+ 
++    # New: Check for Hermes control files and mcp-tokens directory
++    hermes_home = _hermes_home_path()
++    hermes_home_real = os.path.realpath(hermes_home)
++
++    # Check for exact control files
++    hermes_control_files = [
++        os.path.join(hermes_home_real, "auth.json"),
++        os.path.join(hermes_home_real, "config.yaml"),
++        os.path.join(hermes_home_real, "webhook_subscriptions.json"),
++    ]
++    for control_file in hermes_control_files:
++        if resolved == os.path.realpath(control_file):
++            return True
++
++    # Check for anything inside mcp-tokens directory
++    mcp_tokens_dir = os.path.join(hermes_home_real, "mcp-tokens")
++    try:
++        mcp_tokens_dir_real = os.path.realpath(mcp_tokens_dir)
++        if resolved.startswith(mcp_tokens_dir_real + os.sep):
++            return True
++    except Exception:
++        pass
++
+     safe_root = get_safe_write_root()
+-    if safe_root and not (resolved == safe_root or resolved.startswith(safe_root + os.sep)):
++    if safe_root and not (
++        resolved == safe_root or resolved.startswith(safe_root + os.sep)
++    ):
+         return True
+ 
+     return False
+diff --git a/tests/tools/test_file_operations.py b/tests/tools/test_file_operations.py
+index 500cd6141..2c7c14bad 100644
+--- a/tests/tools/test_file_operations.py
++++ b/tests/tools/test_file_operations.py
+@@ -28,6 +28,7 @@ from tools.file_operations import (
+ # Write deny list
+ # =========================================================================
+ 
++
+ class TestIsWriteDenied:
+     def test_ssh_authorized_keys_denied(self):
+         path = os.path.join(str(Path.home()), ".ssh", "authorized_keys")
+@@ -59,17 +60,63 @@ class TestIsWriteDenied:
+     def test_tilde_expansion(self):
+         assert _is_write_denied("~/.ssh/authorized_keys") is True
+ 
++    @pytest.mark.parametrize(
++        "path",
++        [
++            "auth.json",
++            "config.yaml",
++            "webhook_subscriptions.json",
++            "mcp-tokens/token1.json",
++            "mcp-tokens/subdir/token2.json",
++        ],
++    )
++    def test_hermes_control_files_and_mcp_tokens_denied(self, path):
++        """Test that Hermes control files and mcp-tokens directory are denied."""
++        from hermes_constants import get_hermes_home
++
++        hermes_home = get_hermes_home()
++        full_path = str(hermes_home / path)
++        assert _is_write_denied(full_path) is True
++
++    @pytest.mark.parametrize(
++        "path",
++        [
++            "dummy/../config.yaml",
++            "./auth.json",
++            "mcp-tokens/../config.yaml",
++        ],
++    )
++    def test_hermes_control_files_traversal_denied(self, path):
++        """Test that traversal attempts to Hermes control files are denied."""
++        from hermes_constants import get_hermes_home
++
++        hermes_home = get_hermes_home()
++        full_path = str(hermes_home / path)
++        assert _is_write_denied(full_path) is True
++
++    @pytest.mark.parametrize(
++        "path",
++        [
++            "/tmp/standard_file.txt",
++            "~/projects/myapp/main.py",
++            "/var/log/app.log",
++        ],
++    )
++    def test_standard_paths_allowed(self, path):
++        """Test that standard paths are allowed."""
++        assert _is_write_denied(path) is False
+ 
+ 
+ # =========================================================================
+ # Result dataclasses
+ # =========================================================================
+ 
++
+ class TestReadResult:
+     def test_to_dict_omits_defaults(self):
+         r = ReadResult()
+         d = r.to_dict()
+-        assert "error" not in d    # None omitted
++        assert "error" not in d  # None omitted
+         assert "similar_files" not in d  # empty list omitted
+ 
+     def test_to_dict_preserves_empty_content(self):
+@@ -179,6 +226,7 @@ class TestLintResult:
+ # ShellFileOperations helpers
+ # =========================================================================
+ 
++
+ @pytest.fixture()
+ def mock_env():
+     """Create a mock terminal environment."""
+@@ -329,12 +377,14 @@ class TestSearchPathValidation:
+ 
+     def test_search_nonexistent_path_returns_error(self, mock_env):
+         """search() should return an error when the path doesn't exist."""
++
+         def side_effect(command, **kwargs):
+             if "test -e" in command:
+                 return {"output": "not_found", "returncode": 1}
+             if "command -v" in command:
+                 return {"output": "yes", "returncode": 0}
+             return {"output": "", "returncode": 0}
++
+         mock_env.execute.side_effect = side_effect
+         ops = ShellFileOperations(mock_env)
+         result = ops.search("pattern", path="/nonexistent/path")
+@@ -343,12 +393,14 @@ class TestSearchPathValidation:
+ 
+     def test_search_nonexistent_path_files_mode(self, mock_env):
+         """search(target='files') should also return error for bad paths."""
++
+         def side_effect(command, **kwargs):
+             if "test -e" in command:
+                 return {"output": "not_found", "returncode": 1}
+             if "command -v" in command:
+                 return {"output": "yes", "returncode": 0}
+             return {"output": "", "returncode": 0}
++
+         mock_env.execute.side_effect = side_effect
+         ops = ShellFileOperations(mock_env)
+         result = ops.search("*.py", path="/nonexistent/path", target="files")
+@@ -357,6 +409,7 @@ class TestSearchPathValidation:
+ 
+     def test_search_existing_path_proceeds(self, mock_env):
+         """search() should proceed normally when the path exists."""
++
+         def side_effect(command, **kwargs):
+             if "test -e" in command:
+                 return {"output": "exists", "returncode": 0}
+@@ -364,6 +417,7 @@ class TestSearchPathValidation:
+                 return {"output": "yes", "returncode": 0}
+             # rg returns exit 1 (no matches) with empty output
+             return {"output": "", "returncode": 1}
++
+         mock_env.execute.side_effect = side_effect
+         ops = ShellFileOperations(mock_env)
+         result = ops.search("pattern", path="/existing/path")
+@@ -373,6 +427,7 @@ class TestSearchPathValidation:
+     def test_search_rg_error_exit_code(self, mock_env):
+         """search() should report error when rg returns exit code 2."""
+         call_count = {"n": 0}
++
+         def side_effect(command, **kwargs):
+             call_count["n"] += 1
+             if "test -e" in command:
+@@ -381,6 +436,7 @@ class TestSearchPathValidation:
+                 return {"output": "yes", "returncode": 0}
+             # rg returns exit 2 (error) with empty output
+             return {"output": "", "returncode": 2}
++
+         mock_env.execute.side_effect = side_effect
+         ops = ShellFileOperations(mock_env)
+         result = ops.search("pattern", path="/some/path")
+@@ -415,7 +471,10 @@ class TestShellFileOpsWriteDenied:
+         assert "denied" in result.error.lower()
+ 
+     def test_move_file_failure_path(self, mock_env):
+-        mock_env.execute.return_value = {"output": "No such file or directory", "returncode": 1}
++        mock_env.execute.return_value = {
++            "output": "No such file or directory",
++            "returncode": 1,
++        }
+         ops = ShellFileOperations(mock_env)
+         result = ops.move_file("/tmp/nonexistent.txt", "/tmp/dest.txt")
+         assert result.error is not None
+@@ -450,7 +509,10 @@ class TestPatchReplacePostWriteVerification:
+             if command.startswith("wc -c"):
+                 for path in file_contents:
+                     if path in command:
+-                        return {"output": str(len(file_contents[path].encode())), "returncode": 0}
++                        return {
++                            "output": str(len(file_contents[path].encode())),
++                            "returncode": 0,
++                        }
+                 return {"output": "0", "returncode": 0}
+             # Everything else (including the write itself) pretends to succeed
+             # but DOESN'T update file_contents — simulates silent failure
+@@ -489,7 +551,9 @@ class TestPatchReplacePostWriteVerification:
+         result = ops.patch_replace("/tmp/test/a.py", "hello", "hi")
+         assert result.error is None, f"Unexpected error: {result.error}"
+         assert result.success is True
+-        assert state["content"] == "hi world\n", f"File not actually updated: {state['content']!r}"
++        assert state["content"] == "hi world\n", (
++            f"File not actually updated: {state['content']!r}"
++        )
+ 
+     def test_patch_replace_fails_when_verify_read_errors(self, mock_env):
+         """If the verify-read step itself fails (exit code != 0), return an error."""
+-- 
+2.39.5
+

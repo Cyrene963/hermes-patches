@@ -1,0 +1,196 @@
+From 9a6a7e674352d8854a92384c5ab302f077d48ad4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E9=98=BF=E6=B3=A5=E8=B1=86?= <1243352777@qq.com>
+Date: Sun, 3 May 2026 01:27:06 +0800
+Subject: [PATCH] test: use realistic fake keys to exercise mask format
+ verification
+
+Previous keys (e.g. sk-pro...r678) were too short to hit the real
+masking paths (>12 chars prefix...suffix, >18 chars 6+4). Now
+test_auth_header_masked_in_request_headers verifies the exact masked
+format (first 8 chars + ... + last 4 chars).
+---
+ .../test_dump_credential_sanitisation.py      | 172 ++++++++++++++++++
+ 1 file changed, 172 insertions(+)
+ create mode 100644 tests/run_agent/test_dump_credential_sanitisation.py
+
+diff --git a/tests/run_agent/test_dump_credential_sanitisation.py b/tests/run_agent/test_dump_credential_sanitisation.py
+new file mode 100644
+index 000000000..70f6f04ae
+--- /dev/null
++++ b/tests/run_agent/test_dump_credential_sanitisation.py
+@@ -0,0 +1,172 @@
++"""Tests for request debug dump credential sanitisation (#8518, #18707).
++
++Verify that _dump_api_request_debug never writes credential material to disk.
++"""
++import json
++from pathlib import Path
++from unittest.mock import MagicMock, patch
++
++import pytest
++
++from run_agent import AIAgent
++
++# Realistic-looking fake keys — long enough to exercise the masking logic
++# (_mask_api_key_for_logs: >12 chars -> prefix...suffix, >18 chars -> 6+4).
++_FAKE_OPENAI_KEY = "sk-proj-abc123def456ghi789jkl012mno345pqr678"
++_FAKE_XAI_KEY = "xai-ABCDefghIJKLmnopQRSTuvwxYZ1234567890abcd"
++_FAKE_ANTHROPIC_KEY = "sk-ant-api03-1234567890abcdef1234567890abcdef"
++
++
++@pytest.fixture()
++def agent(tmp_path):
++    """Minimal AIAgent with mocked client, logs_dir pointed at tmp_path."""
++    with (
++        patch("run_agent.get_tool_definitions", return_value=[]),
++        patch("run_agent.check_toolset_requirements", return_value={}),
++        patch("run_agent.OpenAI"),
++    ):
++        a = AIAgent(
++            api_key="test-key-1234567890",
++            base_url="https://api.openai.com/v1",
++            quiet_mode=True,
++            skip_context_files=True,
++            skip_memory=True,
++        )
++        a.client = MagicMock()
++        a.client.api_key = _FAKE_OPENAI_KEY
++        a.logs_dir = tmp_path
++        a.session_id = "test-dump-sanitise"
++        a.api_mode = "chat_completions"
++        return a
++
++
++class TestDumpCredentialSanitisation:
++    """Ensure no plaintext credentials leak into request_dump_*.json files."""
++
++    def _dump_and_read(self, agent, api_kwargs, *, reason="test", error=None):
++        path = agent._dump_api_request_debug(
++            api_kwargs, reason=reason, error=error
++        )
++        assert path is not None, "dump returned None"
++        assert path.exists(), f"dump file not created: {path}"
++        return json.loads(path.read_text(encoding="utf-8"))
++
++    def test_api_key_stripped_from_body(self, agent):
++        """api_key inside api_kwargs body must not appear in dump."""
++        payload = self._dump_and_read(
++            agent,
++            {
++                "model": "gpt-4",
++                "messages": [{"role": "user", "content": "hi"}],
++                "api_key": _FAKE_OPENAI_KEY,
++            },
++        )
++        body_text = json.dumps(payload["request"]["body"])
++        assert _FAKE_OPENAI_KEY not in body_text
++        assert "api_key" not in body_text
++
++    def test_x_api_key_stripped_from_body(self, agent):
++        """x_api_key inside api_kwargs body must not appear in dump."""
++        payload = self._dump_and_read(
++            agent,
++            {
++                "model": "grok-3",
++                "messages": [{"role": "user", "content": "hi"}],
++                "x_api_key": _FAKE_XAI_KEY,
++            },
++        )
++        body_text = json.dumps(payload["request"]["body"])
++        assert _FAKE_XAI_KEY not in body_text
++
++    def test_extra_headers_stripped_from_body(self, agent):
++        """extra_headers dict (may contain Authorization) must be removed."""
++        payload = self._dump_and_read(
++            agent,
++            {
++                "model": "claude-3",
++                "messages": [{"role": "user", "content": "hi"}],
++                "extra_headers": {
++                    "Authorization": f"Bearer {_FAKE_ANTHROPIC_KEY}",
++                    "X-API-Key": "some-key-value",
++                },
++            },
++        )
++        body_text = json.dumps(payload["request"]["body"])
++        assert "extra_headers" not in body_text
++        assert _FAKE_ANTHROPIC_KEY not in body_text
++        assert "some-key-value" not in body_text
++
++    def test_headers_dict_stripped_from_body(self, agent):
++        """Top-level headers dict in body must be removed."""
++        payload = self._dump_and_read(
++            agent,
++            {
++                "model": "test",
++                "messages": [{"role": "user", "content": "hi"}],
++                "headers": {"Authorization": f"Bearer {_FAKE_OPENAI_KEY}"},
++            },
++        )
++        body_text = json.dumps(payload["request"]["body"])
++        assert "headers" not in body_text
++        assert _FAKE_OPENAI_KEY not in body_text
++
++    def test_auth_header_masked_in_request_headers(self, agent):
++        """Authorization in the synthetic request headers must be masked.
++
++        _mask_api_key_for_logs preserves first 8 + last 4 chars for keys
++        > 12 chars. The full key must never appear.
++        """
++        payload = self._dump_and_read(
++            agent,
++            {"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
++        )
++        auth = payload["request"]["headers"].get("Authorization", "")
++        # Full key must not appear
++        assert _FAKE_OPENAI_KEY not in auth
++        # Masked format: first 8 chars + "..." + last 4 chars
++        if auth:
++            assert _FAKE_OPENAI_KEY[:8] in auth
++            assert _FAKE_OPENAI_KEY[-4:] in auth
++            assert "..." in auth
++
++    def test_no_timeout_in_body(self, agent):
++        """timeout is transport-only and must not appear in dump."""
++        payload = self._dump_and_read(
++            agent,
++            {"model": "gpt-4", "messages": [], "timeout": 120},
++        )
++        body_text = json.dumps(payload["request"]["body"])
++        assert "timeout" not in body_text
++
++    def test_normal_fields_preserved(self, agent):
++        """Non-sensitive fields (model, messages, temperature) must survive."""
++        payload = self._dump_and_read(
++            agent,
++            {
++                "model": "gpt-4-turbo",
++                "messages": [{"role": "user", "content": "hello world"}],
++                "temperature": 0.7,
++                "max_tokens": 4096,
++            },
++        )
++        body = payload["request"]["body"]
++        assert body["model"] == "gpt-4-turbo"
++        assert body["temperature"] == 0.7
++        assert body["max_tokens"] == 4096
++        assert body["messages"][0]["content"] == "hello world"
++
++    def test_full_serialised_dump_contains_no_secrets(self, agent):
++        """End-to-end: the entire serialised JSON must contain no raw secrets."""
++        payload = self._dump_and_read(
++            agent,
++            {
++                "model": "gpt-4",
++                "messages": [{"role": "user", "content": "hi"}],
++                "api_key": _FAKE_OPENAI_KEY,
++                "extra_headers": {"Authorization": f"Bearer {_FAKE_OPENAI_KEY}"},
++            },
++        )
++        full_text = json.dumps(payload)
++        assert _FAKE_OPENAI_KEY not in full_text, (
++            f"Raw secret found in dump"
++        )
+-- 
+2.39.5
+

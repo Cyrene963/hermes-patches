@@ -1,4 +1,4 @@
-From 7b5f80af478cd3242959c5bde80fe7375528f17d Mon Sep 17 00:00:00 2001
+From fc8cfca367ca6902123b1f756b8071c2da68e359 Mon Sep 17 00:00:00 2001
 From: Alan Chen <alanxchen@gmail.com>
 Date: Sun, 3 May 2026 22:42:24 +0800
 Subject: [PATCH] fix(auth): stop treating CLAUDE_CODE_OAUTH_TOKEN as Anthropic

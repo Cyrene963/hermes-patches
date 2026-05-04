@@ -1,0 +1,79 @@
+From 2a3166d5438df12a2adf548de237528e947f23ea Mon Sep 17 00:00:00 2001
+From: lichriszhang <lichriszhang@gmail.com>
+Date: Sun, 26 Apr 2026 15:13:01 +0800
+Subject: [PATCH] hermes-agent: Scrub provider creds from ACP child env
+
+---
+ agent/copilot_acp_client.py            | 14 +++++++++++
+ tests/agent/test_copilot_acp_client.py | 33 ++++++++++++++++++++++++++
+ 2 files changed, 47 insertions(+)
+
+diff --git a/agent/copilot_acp_client.py b/agent/copilot_acp_client.py
+index 027defa22..7ea719269 100644
+--- a/agent/copilot_acp_client.py
++++ b/agent/copilot_acp_client.py
+@@ -83,6 +83,20 @@ def _resolve_home_dir() -> str:
+ 
+ def _build_subprocess_env() -> dict[str, str]:
+     env = os.environ.copy()
++    try:
++        from tools.environments.local import (
++            _HERMES_PROVIDER_ENV_BLOCKLIST,
++            _HERMES_PROVIDER_ENV_FORCE_PREFIX,
++        )
++
++        env = {
++            key: value
++            for key, value in env.items()
++            if not key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX)
++            and key not in _HERMES_PROVIDER_ENV_BLOCKLIST
++        }
++    except Exception:
++        pass
+     env["HOME"] = _resolve_home_dir()
+     return env
+ 
+diff --git a/tests/agent/test_copilot_acp_client.py b/tests/agent/test_copilot_acp_client.py
+index dfc336b41..79ce110c1 100644
+--- a/tests/agent/test_copilot_acp_client.py
++++ b/tests/agent/test_copilot_acp_client.py
+@@ -205,3 +205,36 @@ def test_run_prompt_passes_home_when_parent_env_is_clean(monkeypatch, tmp_path):
+ 
+     assert "env" in captured["kwargs"]
+     assert captured["kwargs"]["env"]["HOME"]
++
++
++def test_run_prompt_strips_provider_credentials_from_child_env(monkeypatch, tmp_path):
++    from tools.environments.local import _HERMES_PROVIDER_ENV_BLOCKLIST
++
++    blocked_var = next(iter(_HERMES_PROVIDER_ENV_BLOCKLIST))
++    monkeypatch.setenv(blocked_var, "secret_value")
++    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
++
++    captured = {}
++    client = _make_home_client(tmp_path)
++
++    with _patch("agent.copilot_acp_client.subprocess.Popen", side_effect=_fake_popen_capture(captured)):
++        with pytest.raises(RuntimeError, match="Could not start Copilot ACP command"):
++            client._run_prompt("hello", timeout_seconds=1)
++
++    child_env = captured["kwargs"]["env"]
++    assert blocked_var not in child_env
++    assert "PATH" in child_env
++
++
++def test_run_prompt_strips_force_prefixed_env_from_child(monkeypatch, tmp_path):
++    monkeypatch.setenv("_HERMES_FORCE_OPENAI_API_KEY", "secret_value")
++
++    captured = {}
++    client = _make_home_client(tmp_path)
++
++    with _patch("agent.copilot_acp_client.subprocess.Popen", side_effect=_fake_popen_capture(captured)):
++        with pytest.raises(RuntimeError, match="Could not start Copilot ACP command"):
++            client._run_prompt("hello", timeout_seconds=1)
++
++    child_env = captured["kwargs"]["env"]
++    assert "_HERMES_FORCE_OPENAI_API_KEY" not in child_env
+-- 
+2.39.5
+

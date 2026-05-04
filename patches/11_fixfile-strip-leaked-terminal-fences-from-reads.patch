@@ -1,4 +1,4 @@
-From 05e63503c944bba346c11dd14e2c70a241f022c5 Mon Sep 17 00:00:00 2001
+From 77b034d1208c4d267688946074e7d7e809e32859 Mon Sep 17 00:00:00 2001
 From: LeonSGP43 <cine.dreamer.one@gmail.com>
 Date: Sun, 3 May 2026 22:59:04 +0800
 Subject: [PATCH] fix(file): strip leaked terminal fences from reads

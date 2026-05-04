@@ -1,4 +1,4 @@
-From 9ea7ce0a21917e0c3ee82ded4dff81ea500106d5 Mon Sep 17 00:00:00 2001
+From 336bca84c918bb053b61fb48f3c8b53739b0db0c Mon Sep 17 00:00:00 2001
 From: Cyrene963 <Nitrogen@users.noreply.github.com>
 Date: Sun, 3 May 2026 18:18:07 +0800
 Subject: [PATCH] feat: add auto-setup for owner detection + cross-channel

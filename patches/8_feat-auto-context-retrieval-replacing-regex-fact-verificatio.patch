@@ -1,0 +1,203 @@
+From fc89fee8109208b581cc7ade7ecda01c72ff21e5 Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Sun, 3 May 2026 18:37:57 +0800
+Subject: [PATCH] feat: auto-context retrieval replacing regex fact
+ verification gate
+
+- Remove regex-based fact_verification_gate (keyword matching)
+- Add auto session_search alongside hindsight prefetch
+- Inject retrieval results as system message (higher attention)
+- Config: agent.auto_context.enabled, .session_limit
+- Semantic search via hindsight embeddings, NOT keyword matching
+---
+ run_agent.py | 130 ++++++++++++++++++++++++---------------------------
+ 1 file changed, 61 insertions(+), 69 deletions(-)
+
+diff --git a/run_agent.py b/run_agent.py
+index 662044be8..2b5f3686b 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -1829,16 +1829,18 @@ class AIAgent:
+             self._skill_enforcement_enabled = False
+             self._skill_enforcement_mode = "warn"
+ 
+-        # Fact verification gate config
+-        _fact_ver = _agent_section.get("fact_verification", {})
+-        if isinstance(_fact_ver, dict):
+-            self._fact_verification_enabled = _fact_ver.get("enabled", True)
+-            self._fact_verification_cooldown = int(_fact_ver.get("cooldown", 3))
+-            self._fact_verification_mode = _fact_ver.get("mode", "block")
++        # Auto-context retrieval: automatically search hindsight + session
++        # history before each API call and inject results into the prompt.
++        # This is semantic (hindsight uses embeddings), NOT keyword matching.
++        # Config: agent.auto_context.enabled (bool, default True)
++        #         agent.auto_context.session_limit (int, default 3)
++        _auto_ctx = _agent_section.get("auto_context", {})
++        if isinstance(_auto_ctx, dict):
++            self._auto_context_enabled = _auto_ctx.get("enabled", True)
++            self._auto_context_session_limit = int(_auto_ctx.get("session_limit", 3))
+         else:
+-            self._fact_verification_enabled = True
+-            self._fact_verification_cooldown = 3
+-            self._fact_verification_mode = "block"
++            self._auto_context_enabled = True
++            self._auto_context_session_limit = 3
+ 
+         # App-level API retry count (wraps each model API call).  Default 3,
+         # overridable via agent.api_max_retries in config.yaml.  See #11616.
+@@ -10466,38 +10468,15 @@ class AIAgent:
+         return final_response
+ 
+     def _verify_skill_compliance(self, response: str, loaded_skills: list[str]) -> list[str]:
+-        """Check if response contains unverified factual claims.
+-        CODE-LEVEL check using regex heuristics.
++        """Placeholder — regex fact detection removed in favor of semantic auto-retrieval.
++        Returns empty list (no violations). Kept for backward compatibility.
+         """
+-        import re
+-        violations = []
+-        _strip = re.sub(r'<thinking>.*?</thinking>', '', response, flags=re.DOTALL).strip()
+-        if len(_strip) < 80:
+-            return []
+-        response_lower = response.lower()
+-        # Price/cost claims
+-        for p in [r'¥\s*\d+', r'\$\s*\d+', r'€\s*\d+', r'\d+\s*(块钱|元|美元|人民币|港币|美金)', r'每[月天年]\s*\d+', r'\d+\s*/\s*[月天年]', r'(free|免费|收费|付费|定价|pricing|cost)']:
+-            if re.search(p, response, re.IGNORECASE): violations.append("price_claim"); break
+-        # Number claims
+-        for p in [r'\d{1,3}(,\d{3})+\s*(token|请求|request|次)', r'\d+亿', r'\d+\.\d+%', r'(节省|减少|降低|提升|增加)\s*(了|约|近)?\s*\d+', r'\d+[KkMm]\s*(token|参数|param)']:
+-            if re.search(p, response, re.IGNORECASE): violations.append("number_claim"); break
+-        # Product/spec claims
+-        for p in [r'(模型|model)\s*(是|为|=|:)\s*\w+', r'(支持|support)\s*\d+\s*[KkMm]?(?:token|参数|上下文|context)', r'(版本|version)\s*(是|为|=|:)\s*[\d.]+']:
+-            if re.search(p, response, re.IGNORECASE): violations.append("product_claim"); break
+-        # Stat claims
+-        for p in [r'(第[一二三四五六七八九十\d]+|排名|位列)', r'(准确率|成功率|通过率)\s*(达到|为|是)\s*\d+']:
+-            if re.search(p, response, re.IGNORECASE): violations.append("stat_claim"); break
+-        return violations
++        return []
+ 
+     def _has_recent_verification(self, messages: list, lookback: int = 15) -> bool:
+-        """Check if verification tools were used in recent messages. CODE-LEVEL."""
+-        _vtools = {'web_search', 'web_extract', 'browser_navigate', 'hindsight_recall', 'session_search', 'skill_view', 'terminal', 'execute_code'}
+-        recent = messages[-lookback:] if len(messages) > lookback else messages
+-        for msg in recent:
+-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+-                for tc in msg["tool_calls"]:
+-                    if tc.get("function", {}).get("name", "") in _vtools: return True
+-        return False
++        """Placeholder — removed with regex fact detection. Kept for compatibility."""
++        return True
++
+     
+     def run_conversation(
+         self,
+@@ -10574,7 +10553,6 @@ class AIAgent:
+         self._last_content_tools_all_housekeeping = False
+         self._mute_post_response = False
+         self._unicode_sanitization_passes = 0
+-        self._fact_verification_last_fire = -999
+         self._tool_guardrails.reset_for_turn()
+         self._tool_guardrail_halt_decision = None
+ 
+@@ -10869,6 +10847,28 @@ class AIAgent:
+             except Exception:
+                 pass
+ 
++        # Auto-context: session search (hindsight is already prefetched above).
++        # This gives the model automatic access to relevant conversation history
++        # without needing to call session_search as a tool.
++        _auto_session_context = ""
++        if (self._session_db
++                and getattr(self, '_auto_context_enabled', True)
++                and isinstance(original_user_message, str)
++                and len(original_user_message.strip()) > 10):
++            try:
++                from tools.session_search_tool import session_search as _session_search
++                _ss_result = _session_search(
++                    query=original_user_message[:500],
++                    limit=getattr(self, '_auto_context_session_limit', 3),
++                    db=self._session_db,
++                    current_session_id=self.session_id,
++                    user_id=getattr(self, '_user_id', None),
++                )
++                if _ss_result and '"count": 0' not in _ss_result and '"count":0' not in _ss_result:
++                    _auto_session_context = _ss_result
++            except Exception as _ss_err:
++                logger.debug("Auto session_search failed (non-fatal): %s", _ss_err)
++
+         while (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) or self._budget_grace_call:
+             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
+             self._checkpoint_mgr.new_turn()
+@@ -11037,18 +11037,33 @@ class AIAgent:
+                 # with target="user_message" (the default).  Both are
+                 # API-call-time only — the original message in `messages` is
+                 # never mutated, so nothing leaks into session persistence.
++                # Inject auto-retrieved context (hindsight + session search)
++                # into a SYSTEM message for maximum attention weight.
++                # This replaces the old approach of appending to user message.
+                 if idx == current_turn_user_idx and msg.get("role") == "user":
+-                    _injections = []
++                    _auto_parts = []
+                     if _ext_prefetch_cache:
+                         _fenced = build_memory_context_block(_ext_prefetch_cache)
+                         if _fenced:
+-                            _injections.append(_fenced)
++                            _auto_parts.append(_fenced)
++                    if _auto_session_context:
++                        _auto_parts.append("[Relevant past sessions]\n" + _auto_session_context)
+                     if _plugin_user_context:
+-                        _injections.append(_plugin_user_context)
+-                    if _injections:
+-                        _base = api_msg.get("content", "")
+-                        if isinstance(_base, str):
+-                            api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
++                        _auto_parts.append(_plugin_user_context)
++                    if _auto_parts:
++                        _auto_block = (
++                            "<auto_retrieved_context>\n"
++                            "The following context was automatically retrieved from your "
++                            "memory and session history. Use it to inform your response. "
++                            "Do NOT ignore this context.\n\n"
++                            + "\n\n".join(_auto_parts)
++                            + "\n</auto_retrieved_context>"
++                        )
++                        # Insert as system message BEFORE the user message
++                        api_messages.insert(len(api_messages) - 1, {
++                            "role": "system",
++                            "content": _auto_block,
++                        })
+ 
+                 # For ALL assistant messages, pass reasoning back to the API
+                 # This ensures multi-turn reasoning context is preserved
+@@ -13789,29 +13804,6 @@ class AIAgent:
+                     
+                     final_msg = self._build_assistant_message(assistant_message, finish_reason)
+ 
+-                    # -- Fact verification gate v2 --
+-                    if (getattr(self, '_fact_verification_enabled', True)
+-                            and final_response
+-                            and self._has_content_after_think_block(final_response)
+-                            and api_call_count >= 2):
+-                        _cooldown = getattr(self, '_fact_verification_cooldown', 3)
+-                        _calls_since = api_call_count - getattr(self, '_fact_verification_last_fire', -999)
+-                        if _calls_since >= _cooldown:
+-                            violations = self._verify_skill_compliance(final_response, [])
+-                            if violations and not self._has_recent_verification(messages, 15):
+-                                self._fact_verification_last_fire = api_call_count
+-                                _mode = getattr(self, '_fact_verification_mode', 'block')
+-                                logger.info("Fact gate: %s violations=%s", _mode, violations)
+-                                if _mode == "block":
+-                                    self._emit_status(f"Unverified claims ({', '.join(violations)}) -- requiring verification")
+-                                    _am = self._build_assistant_message(assistant_message, finish_reason)
+-                                    _am["content"] = final_response
+-                                    messages.append(_am)
+-                                    messages.append({"role": "user", "content": f"VERIFICATION REQUIRED: Your response triggered detection: {', '.join(violations)}. You MUST call web_search/terminal/skill_view to verify before delivering."})
+-                                    self._session_messages = messages
+-                                    self._save_session_log(messages)
+-                                    continue
+-
+                     # Pop thinking-only prefill message(s) before appending
+                     # the final response.  This avoids consecutive assistant
+                     # messages which break strict-alternation providers
+-- 
+2.39.5
+

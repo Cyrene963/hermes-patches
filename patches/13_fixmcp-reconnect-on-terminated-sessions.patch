@@ -1,4 +1,4 @@
-From 1230a1d47a23d275ce2a91e1cf04e41f9cd38533 Mon Sep 17 00:00:00 2001
+From c199064bd789590ab3a83cefb3ec9bd547893daf Mon Sep 17 00:00:00 2001
 From: LeonSGP43 <cine.dreamer.one@gmail.com>
 Date: Sun, 3 May 2026 21:33:52 +0800
 Subject: [PATCH] fix(mcp): reconnect on terminated sessions

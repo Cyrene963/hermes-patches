@@ -1,4 +1,4 @@
-From ceb67500ed66162bef5ab987bc2faf040dc3837f Mon Sep 17 00:00:00 2001
+From a6e0ad955ec59d99b91b804ce0a3d2f6ca4cf5c1 Mon Sep 17 00:00:00 2001
 From: Nitrogen <Nitrogen@users.noreply.github.com>
 Date: Sat, 2 May 2026 15:07:42 +0800
 Subject: [PATCH] Apply 14 community PRs + fix session_search ordering
@@ -23,7 +23,7 @@ Fix: Add order_by_last_active=True to list_sessions_rich call
 (pre-existing commit 142b4bf3c code sync)
 ---
  DeepResearch_Log_ChinaAI.md                   |  43 +++
- agent/auxiliary_client.py                     |  15 +-
+ agent/auxiliary_client.py                     | 103 ++-----
  agent/context_compressor.py                   |  77 +++--
  agent/error_classifier.py                     |  22 ++
  agent/insights.py                             |   7 +-
@@ -32,7 +32,6 @@ Fix: Add order_by_last_active=True to list_sessions_rich call
  agent/transports/chat_completions.py          |   9 +-
  gateway/run.py                                |  28 +-
  hermes_cli/config.py                          |  14 +-
- hermes_constants.py                           |  24 +-
  output.txt                                    |  12 +
  parse_article.py                              |  18 ++
  run_agent.py                                  | 123 +++++++-
@@ -51,8 +50,8 @@ Fix: Add order_by_last_active=True to list_sessions_rich call
  tests/tools/test_session_search.py            |  84 ++++++
  tools/fuzzy_match.py                          |  21 +-
  tools/memory_tool.py                          |  14 +-
- tools/session_search_tool.py                  |  49 +++-
- 30 files changed, 1290 insertions(+), 69 deletions(-)
+ tools/session_search_tool.py                  |  55 +++-
+ 29 files changed, 1275 insertions(+), 154 deletions(-)
  create mode 100644 DeepResearch_Log_ChinaAI.md
  create mode 100644 output.txt
  create mode 100644 parse_article.py
@@ -110,15 +109,84 @@ index 000000000..b023bb9cb
 +    - **Paradigm Shift**: Transition from "Chat" to "Action" (Agentic AI) completed; Token consumption reached 30 trillion daily (June 2025).
 +- Verification: MIIT Jan 2026 Policy brief and Tsinghua "AGI-Next" Summit consensus.
 diff --git a/agent/auxiliary_client.py b/agent/auxiliary_client.py
-index df3fdeccc..716ff2b2d 100644
+index b86f78f8e..716ff2b2d 100644
 --- a/agent/auxiliary_client.py
 +++ b/agent/auxiliary_client.py
-@@ -1149,7 +1149,18 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
+@@ -259,68 +259,13 @@ _PROVIDERS_WITHOUT_VISION: frozenset = frozenset({
+     "kimi-coding-cn",
+ })
+ 
+-# OpenRouter app attribution headers (base — always sent)
+-_OR_HEADERS_BASE = {
++# OpenRouter app attribution headers
++_OR_HEADERS = {
+     "HTTP-Referer": "https://hermes-agent.nousresearch.com",
+     "X-OpenRouter-Title": "Hermes Agent",
+     "X-OpenRouter-Categories": "productivity,cli-agent",
+ }
+ 
+-# Truthy values for boolean env-var parsing.
+-_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+-
+-
+-def build_or_headers(or_config: dict | None = None) -> dict:
+-    """Build OpenRouter headers, optionally including response-cache headers.
+-
+-    Precedence for response cache: env var > config.yaml > default (enabled).
+-
+-    Environment variables:
+-        ``HERMES_OPENROUTER_CACHE`` — truthy (``1``/``true``/``yes``/``on``)
+-            enables caching; ``0``/``false``/``no``/``off`` disables.
+-            Overrides ``openrouter.response_cache`` in config.yaml.
+-        ``HERMES_OPENROUTER_CACHE_TTL`` — integer seconds (1-86400).
+-            Overrides ``openrouter.response_cache_ttl`` in config.yaml.
+-
+-    *or_config* is the ``openrouter`` section from config.yaml.  When *None*,
+-    falls back to reading config from disk via ``load_config()``.
+-    """
+-    headers = dict(_OR_HEADERS_BASE)
+-
+-    # Resolve config from disk if not provided.
+-    if or_config is None:
+-        try:
+-            from hermes_cli.config import load_config
+-            or_config = load_config().get("openrouter", {})
+-        except Exception:
+-            or_config = {}
+-
+-    # Determine cache enabled: env var overrides config.
+-    env_cache = os.environ.get("HERMES_OPENROUTER_CACHE", "").strip().lower()
+-    if env_cache:
+-        cache_enabled = env_cache in _TRUTHY_ENV_VALUES
+-    else:
+-        cache_enabled = or_config.get("response_cache", False)
+-
+-    if not cache_enabled:
+-        return headers
+-
+-    headers["X-OpenRouter-Cache"] = "true"
+-
+-    # Determine TTL: env var overrides config.
+-    env_ttl = os.environ.get("HERMES_OPENROUTER_CACHE_TTL", "").strip()
+-    if env_ttl:
+-        if env_ttl.isdigit():
+-            ttl = int(env_ttl)
+-            if 1 <= ttl <= 86400:
+-                headers["X-OpenRouter-Cache-TTL"] = str(ttl)
+-    else:
+-        ttl = or_config.get("response_cache_ttl", 300)
+-        if isinstance(ttl, (int, float)) and 1 <= ttl <= 86400:
+-            headers["X-OpenRouter-Cache-TTL"] = str(int(ttl))
+-
+-    return headers
+-
+ # Vercel AI Gateway app attribution headers. HTTP-Referer maps to
+ # referrerUrl and X-Title maps to appName in the gateway's analytics.
+ from hermes_cli import __version__ as _HERMES_VERSION
+@@ -1205,22 +1150,33 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
  
  
- 
--def _try_openrouter() -> Tuple[Optional[OpenAI], Optional[str]]:
-+def _try_openrouter(explicit_api_key: str = None) -> Tuple[Optional[OpenAI], Optional[str]]:
+ def _try_openrouter(explicit_api_key: str = None) -> Tuple[Optional[OpenAI], Optional[str]]:
 +    # If an explicit key was passed (e.g. from a credential pool via
 +    # resolve_provider_client), use it directly — bypass pool/env lookup.
 +    if explicit_api_key:
@@ -132,16 +200,73 @@ index df3fdeccc..716ff2b2d 100644
 +
      pool_present, entry = _select_pool_entry("openrouter")
      if pool_present:
-         or_key = _pool_runtime_api_key(entry)
-@@ -2055,7 +2066,7 @@ def resolve_provider_client(
+-        or_key = explicit_api_key or _pool_runtime_api_key(entry)
++        or_key = _pool_runtime_api_key(entry)
+         if not or_key:
+             return None, None
+         base_url = _pool_runtime_base_url(entry, OPENROUTER_BASE_URL) or OPENROUTER_BASE_URL
+         logger.debug("Auxiliary client: OpenRouter via pool")
+         return OpenAI(api_key=or_key, base_url=base_url,
+-                       default_headers=build_or_headers()), _OPENROUTER_MODEL
++                       default_headers=_OR_HEADERS), _OPENROUTER_MODEL
  
-     # ── OpenRouter ───────────────────────────────────────────────────
+-    or_key = explicit_api_key or os.getenv("OPENROUTER_API_KEY")
++    or_key = os.getenv("OPENROUTER_API_KEY")
+     if not or_key:
+         return None, None
+     logger.debug("Auxiliary client: OpenRouter")
+     return OpenAI(api_key=or_key, base_url=OPENROUTER_BASE_URL,
+-                   default_headers=build_or_headers()), _OPENROUTER_MODEL
++                   default_headers=_OR_HEADERS), _OPENROUTER_MODEL
+ 
+ 
+ def _describe_openrouter_unavailable() -> str:
+@@ -1966,7 +1922,7 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
+     }
+     sync_base_url = str(sync_client.base_url)
+     if base_url_host_matches(sync_base_url, "openrouter.ai"):
+-        async_kwargs["default_headers"] = build_or_headers()
++        async_kwargs["default_headers"] = dict(_OR_HEADERS)
+     elif base_url_host_matches(sync_base_url, "api.githubcopilot.com"):
+         from hermes_cli.copilot_auth import copilot_request_headers
+ 
+@@ -2108,7 +2064,7 @@ def resolve_provider_client(
+         return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
+                 else (client, final_model))
+ 
+-    # ── OpenRouter ───────────────────────────────────────────
++    # ── OpenRouter ───────────────────────────────────────────────────
      if provider == "openrouter":
--        client, default = _try_openrouter()
-+        client, default = _try_openrouter(explicit_api_key=explicit_api_key)
+         client, default = _try_openrouter(explicit_api_key=explicit_api_key)
          if client is None:
-             logger.warning(
-                 "resolve_provider_client: openrouter requested but %s",
+@@ -3292,26 +3248,7 @@ def _build_call_kwargs(
+             kwargs["max_tokens"] = max_tokens
+ 
+     if tools:
+-        # Defensive dedup: providers like Google Vertex, Azure, and Bedrock
+-        # reject requests with duplicate tool names (HTTP 400).  The upstream
+-        # injection paths (run_agent.py) already dedup, but this guard
+-        # converts a hard API failure into a warning if an upstream regression
+-        # reintroduces duplicates.  See: #18478
+-        _seen: set = set()
+-        _deduped: list = []
+-        for _t in tools:
+-            _tname = (_t.get("function") or {}).get("name", "")
+-            if _tname and _tname in _seen:
+-                logger.warning(
+-                    "_build_call_kwargs: duplicate tool name '%s' removed "
+-                    "(provider=%s model=%s)",
+-                    _tname, provider, model,
+-                )
+-                continue
+-            if _tname:
+-                _seen.add(_tname)
+-            _deduped.append(_t)
+-        kwargs["tools"] = _deduped
++        kwargs["tools"] = tools
+ 
+     # Provider-specific extra_body
+     merged_extra = dict(extra_body or {})
 diff --git a/agent/context_compressor.py b/agent/context_compressor.py
 index 9b4052970..1e128dba9 100644
 --- a/agent/context_compressor.py
@@ -457,10 +582,10 @@ index 9a115e454..8b25d710b 100644
  
      def convert_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 diff --git a/gateway/run.py b/gateway/run.py
-index 5a2d0a144..9698d9bd8 100644
+index aadb067dc..4e816da29 100644
 --- a/gateway/run.py
 +++ b/gateway/run.py
-@@ -252,13 +252,9 @@ from hermes_constants import get_hermes_home
+@@ -293,13 +293,9 @@ from hermes_constants import get_hermes_home
  from utils import atomic_json_write, atomic_yaml_write, base_url_host_matches, is_truthy_value
  _hermes_home = get_hermes_home()
  
@@ -476,10 +601,10 @@ index 5a2d0a144..9698d9bd8 100644
  
  _DOCKER_VOLUME_SPEC_RE = re.compile(r"^(?P<host>.+):(?P<container>/[^:]+?)(?::(?P<options>[^:]+))?$")
  _DOCKER_MEDIA_OUTPUT_CONTAINER_PATHS = {"/output", "/outputs"}
-@@ -2400,6 +2396,26 @@ class GatewayRunner:
-         """
-         logger.info("Starting Hermes Gateway...")
-         logger.info("Session storage: %s", self.config.sessions_dir)
+@@ -2612,6 +2608,26 @@ class GatewayRunner:
+             )
+         except Exception:
+             pass
 +        
 +        # Reload .env on every start so /restart picks up new keys without
 +        # requiring a full shell-level restart.
@@ -504,10 +629,10 @@ index 5a2d0a144..9698d9bd8 100644
              from hermes_cli.profiles import get_active_profile_name
              _profile = get_active_profile_name()
 diff --git a/hermes_cli/config.py b/hermes_cli/config.py
-index 720405935..59fab318a 100644
+index 25df4b3e2..581413f78 100644
 --- a/hermes_cli/config.py
 +++ b/hermes_cli/config.py
-@@ -1124,7 +1124,7 @@ DEFAULT_CONFIG = {
+@@ -1149,7 +1149,7 @@ DEFAULT_CONFIG = {
      # Pre-exec security scanning via tirith
      "security": {
          "allow_private_urls": False,  # Allow requests to private/internal IPs (for OpenWrt, proxies, VPNs)
@@ -516,7 +641,7 @@ index 720405935..59fab318a 100644
          "tirith_enabled": True,
          "tirith_path": "tirith",
          "tirith_timeout": 5,
-@@ -3887,10 +3887,10 @@ def load_config() -> Dict[str, Any]:
+@@ -3912,10 +3912,10 @@ def load_config() -> Dict[str, Any]:
  
  _SECURITY_COMMENT = """
  # ── Security ──────────────────────────────────────────────────────────
@@ -531,7 +656,7 @@ index 720405935..59fab318a 100644
  # tirith pre-exec scanning is enabled by default when the tirith binary
  # is available. Configure via security.tirith_* keys or env vars
  # (TIRITH_ENABLED, TIRITH_BIN, TIRITH_TIMEOUT, TIRITH_FAIL_OPEN).
-@@ -3929,8 +3929,8 @@ _FALLBACK_COMMENT = """
+@@ -3954,8 +3954,8 @@ _FALLBACK_COMMENT = """
  
  _COMMENTED_SECTIONS = """
  # ── Security ──────────────────────────────────────────────────────────
@@ -542,43 +667,6 @@ index 720405935..59fab318a 100644
  #
  # security:
  #   redact_secrets: true
-diff --git a/hermes_constants.py b/hermes_constants.py
-index 35dbf86ab..424a5d57f 100644
---- a/hermes_constants.py
-+++ b/hermes_constants.py
-@@ -13,9 +13,31 @@ def get_hermes_home() -> Path:
- 
-     Reads HERMES_HOME env var, falls back to ~/.hermes.
-     This is the single source of truth — all other copies should import this.
-+
-+    Raises ValueError when HERMES_HOME is unset but an ``active_profile``
-+    file indicates a non-default profile is active.  In that case the
-+    fallback to ``~/.hermes`` would silently corrupt the other profile's
-+    data — the caller must set HERMES_HOME explicitly.
-+    See https://github.com/NousResearch/hermes-agent/issues/18594.
-     """
-     val = os.environ.get("HERMES_HOME", "").strip()
--    return Path(val) if val else Path.home() / ".hermes"
-+    if not val:
-+        # Guard: if a non-default profile is active, falling back to
-+        # ~/.hermes would write into the wrong profile's data directory.
-+        active_profile_path = Path.home() / ".hermes" / "active_profile"
-+        try:
-+            active = active_profile_path.read_text().strip()
-+        except (FileNotFoundError, UnicodeDecodeError, OSError):
-+            active = ""
-+        if active and active != "default":
-+            raise ValueError(
-+                f"HERMES_HOME is not set, but active profile is '{active}'. "
-+                f"Profile mode requires HERMES_HOME to be set to the profile "
-+                f"directory (e.g. ~/.hermes/profiles/{active}). "
-+                f"This prevents silent cross-profile data corruption."
-+            )
-+        return Path.home() / ".hermes"
-+    return Path(val)
- 
- 
- def get_default_hermes_root() -> Path:
 diff --git a/output.txt b/output.txt
 new file mode 100644
 index 000000000..fd93386c9
@@ -622,7 +710,7 @@ index 000000000..e976ad27e
 +except Exception as e:
 +    print(e)
 diff --git a/run_agent.py b/run_agent.py
-index b3b338772..336be660a 100644
+index cfcd325eb..96b79d0c3 100644
 --- a/run_agent.py
 +++ b/run_agent.py
 @@ -302,6 +302,11 @@ class IterationBudget:
@@ -637,7 +725,7 @@ index b3b338772..336be660a 100644
      @property
      def used(self) -> int:
          return self._used
-@@ -2012,6 +2017,10 @@ class AIAgent:
+@@ -2026,6 +2031,10 @@ class AIAgent:
                  api_mode=self.api_mode,
              )
          self.compression_enabled = compression_enabled
@@ -648,7 +736,7 @@ index b3b338772..336be660a 100644
  
          # Reject models whose context window is below the minimum required
          # for reliable tool-calling workflows (64K tokens).
-@@ -2369,6 +2378,7 @@ class AIAgent:
+@@ -2405,6 +2414,7 @@ class AIAgent:
                  api_key=getattr(self, "api_key", ""),
                  provider=self.provider,
                  api_mode=self.api_mode,
@@ -656,7 +744,7 @@ index b3b338772..336be660a 100644
              )
  
          # ── Invalidate cached system prompt so it rebuilds next turn ──
-@@ -2391,6 +2401,7 @@ class AIAgent:
+@@ -2427,6 +2437,7 @@ class AIAgent:
              "compressor_provider": getattr(_cc, "provider", self.provider) if _cc else self.provider,
              "compressor_context_length": _cc.context_length if _cc else 0,
              "compressor_threshold_tokens": _cc.threshold_tokens if _cc else 0,
@@ -664,7 +752,7 @@ index b3b338772..336be660a 100644
          }
          if api_mode == "anthropic_messages":
              self._primary_runtime.update({
-@@ -4970,9 +4981,10 @@ class AIAgent:
+@@ -5001,9 +5012,10 @@ class AIAgent:
              if context_files_prompt:
                  prompt_parts.append(context_files_prompt)
  
@@ -678,7 +766,7 @@ index b3b338772..336be660a 100644
          if self.pass_session_id and self.session_id:
              timestamp_line += f"\nSession ID: {self.session_id}"
          if self.model:
-@@ -7635,6 +7647,7 @@ class AIAgent:
+@@ -7669,6 +7681,7 @@ class AIAgent:
                      base_url=self.base_url,
                      api_key=getattr(self, "api_key", ""),
                      provider=self.provider,
@@ -686,7 +774,7 @@ index b3b338772..336be660a 100644
                  )
  
              self._emit_status(
-@@ -7714,6 +7727,7 @@ class AIAgent:
+@@ -7748,6 +7761,7 @@ class AIAgent:
                  base_url=rt["compressor_base_url"],
                  api_key=rt["compressor_api_key"],
                  provider=rt["compressor_provider"],
@@ -694,7 +782,7 @@ index b3b338772..336be660a 100644
              )
  
              # ── Reset fallback chain for the new turn ──
-@@ -8861,17 +8875,20 @@ class AIAgent:
+@@ -8895,17 +8909,20 @@ class AIAgent:
          the internal message history — this method only modifies the outgoing
          API copy.
  
@@ -717,7 +805,7 @@ index b3b338772..336be660a 100644
          api_msg["tool_calls"] = [
              {k: v for k, v in tc.items() if k not in _STRIP_KEYS}
              if isinstance(tc, dict) else tc
-@@ -9001,6 +9018,50 @@ class AIAgent:
+@@ -9035,6 +9052,50 @@ class AIAgent:
          """
          return self.api_mode != "codex_responses"
  
@@ -768,7 +856,7 @@ index b3b338772..336be660a 100644
      def _compress_context(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default", focus_topic: str = None) -> tuple:
          """Compress conversation context and split the session in SQLite.
  
-@@ -10445,6 +10506,7 @@ class AIAgent:
+@@ -10482,6 +10543,7 @@ class AIAgent:
          # They are initialized in __init__ and must persist across run_conversation
          # calls so that nudge logic accumulates correctly in CLI mode.
          self.iteration_budget = IterationBudget(self.max_iterations)
@@ -776,7 +864,7 @@ index b3b338772..336be660a 100644
  
          # Log conversation turn start for debugging/observability
          _preview_text = _summarize_user_message_for_log(user_message)
-@@ -10723,7 +10785,37 @@ class AIAgent:
+@@ -10760,7 +10822,37 @@ class AIAgent:
                  if not self.quiet_mode:
                      self._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
                  break
@@ -815,7 +903,7 @@ index b3b338772..336be660a 100644
              api_call_count += 1
              self._api_call_count = api_call_count
              self._touch_activity(f"starting API call #{api_call_count}")
-@@ -12544,6 +12636,25 @@ class AIAgent:
+@@ -12581,6 +12673,25 @@ class AIAgent:
                                  "compression_exhausted": True,
                              }
  
@@ -842,10 +930,10 @@ index b3b338772..336be660a 100644
                      # already accounts for 413, 429, 529 (transient), context
                      # overflow, and generic-400 heuristics.  Local validation
 diff --git a/tests/agent/test_auxiliary_client.py b/tests/agent/test_auxiliary_client.py
-index 32290b061..cb29a5218 100644
+index c57a0b637..d889012ad 100644
 --- a/tests/agent/test_auxiliary_client.py
 +++ b/tests/agent/test_auxiliary_client.py
-@@ -495,6 +495,23 @@ class TestExplicitProviderRouting:
+@@ -496,6 +496,23 @@ class TestExplicitProviderRouting:
              for record in caplog.records
          )
  
@@ -1904,10 +1992,10 @@ index 9a922cd9b..522c81055 100644
      # No strategy found a match
      return content, 0, None, "Could not find a match for old_string in the file"
 diff --git a/tools/memory_tool.py b/tools/memory_tool.py
-index e11d72dd3..db4331c6a 100644
+index 0de12a64f..c8b516c6c 100644
 --- a/tools/memory_tool.py
 +++ b/tools/memory_tool.py
-@@ -399,19 +399,21 @@ class MemoryStore:
+@@ -391,19 +391,21 @@ class MemoryStore:
          return resp
  
      def _render_block(self, target: str, entries: List[str]) -> str:
@@ -1936,7 +2024,7 @@ index e11d72dd3..db4331c6a 100644
          separator = "═" * 46
          return f"{separator}\n{header}\n{separator}\n{content}"
 diff --git a/tools/session_search_tool.py b/tools/session_search_tool.py
-index 4f2f8a088..b139d5d87 100644
+index f770fe888..99b2cb603 100644
 --- a/tools/session_search_tool.py
 +++ b/tools/session_search_tool.py
 @@ -108,6 +108,37 @@ def _format_conversation(messages: List[Dict[str, Any]]) -> str:
@@ -2020,11 +2108,19 @@ index 4f2f8a088..b139d5d87 100644
          for t in terms:
              for m in re.finditer(re.escape(t), text_lower):
                  match_positions.append(m.start())
-@@ -266,7 +307,7 @@ _HIDDEN_SESSION_SOURCES = ("tool",)
- def _list_recent_sessions(db, limit: int, current_session_id: str = None, user_id: str = None) -> str:
+@@ -263,14 +304,10 @@ async def _summarize_session(
+ _HIDDEN_SESSION_SOURCES = ("tool",)
+ 
+ 
+-def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str:
++def _list_recent_sessions(db, limit: int, current_session_id: str = None, user_id: str = None) -> str:
      """Return metadata for the most recent sessions (no LLM calls)."""
      try:
--        sessions = db.list_sessions_rich(limit=limit + 5, exclude_sources=list(_HIDDEN_SESSION_SOURCES), user_id=user_id)  # fetch extra to skip current
+-        sessions = db.list_sessions_rich(
+-            limit=limit + 5,
+-            exclude_sources=list(_HIDDEN_SESSION_SOURCES),
+-            order_by_last_active=True,
+-        )  # fetch extra to skip current
 +        sessions = db.list_sessions_rich(limit=limit + 5, exclude_sources=list(_HIDDEN_SESSION_SOURCES), user_id=user_id, order_by_last_active=True)  # fetch extra to skip current
  
          # Resolve current session lineage to exclude it

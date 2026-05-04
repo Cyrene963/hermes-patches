@@ -1,0 +1,54 @@
+From 178bd3a1142c62214ae05b4f2a67fae9277ce634 Mon Sep 17 00:00:00 2001
+From: 0z! <162235745+0z1-ghb@users.noreply.github.com>
+Date: Sun, 3 May 2026 22:58:47 +0300
+Subject: [PATCH] fix: correct indentation in webhook auth validation
+
+---
+ gateway/platforms/webhook.py | 9 +++------
+ 1 file changed, 3 insertions(+), 6 deletions(-)
+
+diff --git a/gateway/platforms/webhook.py b/gateway/platforms/webhook.py
+index 34e2dfa2c..1ca1d687e 100644
+--- a/gateway/platforms/webhook.py
++++ b/gateway/platforms/webhook.py
+@@ -23,7 +23,6 @@ Security:
+   - Rate limiting per route (fixed-window, configurable)
+   - Idempotency cache prevents duplicate agent runs on webhook retries
+   - Body size limits checked before reading payload
+-  - Set secret to "INSECURE_NO_AUTH" to skip validation (testing only)
+ """
+ 
+ import asyncio
+@@ -56,7 +55,6 @@ logger = logging.getLogger(__name__)
+ 
+ DEFAULT_HOST = "0.0.0.0"
+ DEFAULT_PORT = 8644
+-_INSECURE_NO_AUTH = "INSECURE_NO_AUTH"
+ _DYNAMIC_ROUTES_FILENAME = "webhook_subscriptions.json"
+ 
+ 
+@@ -122,8 +120,7 @@ class WebhookAdapter(BasePlatformAdapter):
+             if not secret:
+                 raise ValueError(
+                     f"[webhook] Route '{name}' has no HMAC secret. "
+-                    f"Set 'secret' on the route or globally. "
+-                    f"For testing without auth, set secret to '{_INSECURE_NO_AUTH}'."
++                    f"Set 'secret' on the route or globally."
+                 )
+ 
+             # deliver_only routes bypass the agent — the POST body becomes a
+@@ -316,9 +313,9 @@ class WebhookAdapter(BasePlatformAdapter):
+             logger.error("[webhook] Failed to read body: %s", e)
+             return web.json_response({"error": "Bad request"}, status=400)
+ 
+-        # Validate HMAC signature FIRST (skip for INSECURE_NO_AUTH testing mode)
++        # Validate HMAC signature FIRST
+         secret = route_config.get("secret", self._global_secret)
+-        if secret and secret != _INSECURE_NO_AUTH:
++        if secret:
+             if not self._validate_signature(request, raw_body, secret):
+                 logger.warning(
+                     "[webhook] Invalid signature for route %s", route_name
+-- 
+2.39.5
+

@@ -1,4 +1,4 @@
-From e2c614d9377b7b94f6c7ebf997bda65440940fd0 Mon Sep 17 00:00:00 2001
+From 0681807c74167b6dbe8719422a2d058e7557793a Mon Sep 17 00:00:00 2001
 From: Nitrogen <Nitrogen@users.noreply.github.com>
 Date: Sat, 2 May 2026 14:02:25 +0800
 Subject: [PATCH] fix: preserve memory authority across context compaction

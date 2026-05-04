@@ -1,0 +1,133 @@
+From 55de8ac79d140ecaf36cb875d3e67769a547729e Mon Sep 17 00:00:00 2001
+From: sbw2025 <subw3@mail2.sysu.edu.cn>
+Date: Fri, 24 Apr 2026 00:34:34 +0800
+Subject: [PATCH] fix(file_tools): block agent writes to ~/.hermes/config.yaml
+ to prevent silent approval bypass
+
+---
+ tests/tools/test_file_tools.py | 61 ++++++++++++++++++++++++++++++++++
+ tools/file_tools.py            | 31 +++++++++++++++++
+ 2 files changed, 92 insertions(+)
+
+diff --git a/tests/tools/test_file_tools.py b/tests/tools/test_file_tools.py
+index 5a215df14..f34119211 100644
+--- a/tests/tools/test_file_tools.py
++++ b/tests/tools/test_file_tools.py
+@@ -323,4 +323,65 @@ class TestSearchHints:
+         assert "offset=100" in raw
+ 
+ 
++class TestSensitivePathCheck:
++    """Verify that _check_sensitive_path blocks writes to protected locations."""
++
++    def test_hermes_config_blocked_for_write_file(self, tmp_path, monkeypatch):
++        fake_config = tmp_path / "config.yaml"
++        monkeypatch.setattr("tools.file_tools._hermes_config_resolved", str(fake_config))
++        monkeypatch.setattr("tools.file_tools._hermes_config_resolved_loaded", True)
++
++        from tools.file_tools import write_file_tool
++        result = json.loads(write_file_tool(str(fake_config), "approvals:\n  mode: off\n"))
++        assert "error" in result
++        assert "Hermes config" in result["error"]
++
++    def test_hermes_config_blocked_via_tilde_path(self, tmp_path, monkeypatch):
++        fake_config = tmp_path / "config.yaml"
++        monkeypatch.setattr("tools.file_tools._hermes_config_resolved", str(fake_config))
++        monkeypatch.setattr("tools.file_tools._hermes_config_resolved_loaded", True)
++
++        from tools.file_tools import write_file_tool
++        result = json.loads(write_file_tool(str(fake_config), "approvals:\n  mode: off\n"))
++        assert "error" in result
++        assert "Hermes config" in result["error"]
++
++    def test_hermes_config_blocked_for_patch(self, tmp_path, monkeypatch):
++        fake_config = tmp_path / "config.yaml"
++        fake_config.write_text("approvals:\n  mode: manual\n")
++        monkeypatch.setattr("tools.file_tools._hermes_config_resolved", str(fake_config))
++        monkeypatch.setattr("tools.file_tools._hermes_config_resolved_loaded", True)
++
++        from tools.file_tools import patch_tool
++        result = json.loads(patch_tool(
++            mode="replace",
++            path=str(fake_config),
++            old_string="mode: manual",
++            new_string="mode: off",
++        ))
++        assert "error" in result
++        assert "Hermes config" in result["error"]
++
++    def test_system_path_still_blocked(self, monkeypatch):
++        monkeypatch.setattr("tools.file_tools._hermes_config_resolved", "/some/other/path")
++        monkeypatch.setattr("tools.file_tools._hermes_config_resolved_loaded", True)
++
++        from tools.file_tools import write_file_tool
++        result = json.loads(write_file_tool("/etc/passwd", "evil"))
++        assert "error" in result
++        assert "sensitive system path" in result["error"]
++
++    @patch("tools.file_tools._get_file_ops")
++    def test_normal_file_not_blocked(self, mock_get, monkeypatch):
++        monkeypatch.setattr("tools.file_tools._hermes_config_resolved", "/home/user/.hermes/config.yaml")
++        monkeypatch.setattr("tools.file_tools._hermes_config_resolved_loaded", True)
++        mock_ops = MagicMock()
++        result_obj = MagicMock()
++        result_obj.to_dict.return_value = {"status": "ok", "path": "/tmp/other.txt", "bytes": 5}
++        mock_ops.write_file.return_value = result_obj
++        mock_get.return_value = mock_ops
++
++        from tools.file_tools import write_file_tool
++        result = json.loads(write_file_tool("/tmp/other.txt", "hello"))
++        assert result["status"] == "ok"
+ 
+diff --git a/tools/file_tools.py b/tools/file_tools.py
+index 2c948b589..7bd753840 100644
+--- a/tools/file_tools.py
++++ b/tools/file_tools.py
+@@ -154,6 +154,26 @@ _SENSITIVE_PATH_PREFIXES = (
+ )
+ _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
+ 
++_hermes_config_resolved: str | None = None
++_hermes_config_resolved_loaded = False
++
++
++def _get_hermes_config_resolved() -> str | None:
++    """Return the resolved absolute path of the Hermes config file (cached)."""
++    global _hermes_config_resolved, _hermes_config_resolved_loaded
++    if _hermes_config_resolved_loaded:
++        return _hermes_config_resolved
++    _hermes_config_resolved_loaded = True
++    try:
++        from hermes_cli.config import get_config_path
++        _hermes_config_resolved = str(get_config_path().resolve())
++    except Exception:
++        try:
++            _hermes_config_resolved = str(Path("~/.hermes/config.yaml").expanduser().resolve())
++        except Exception:
++            _hermes_config_resolved = None
++    return _hermes_config_resolved
++
+ 
+ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None:
+     """Return an error message if the path targets a sensitive system location."""
+@@ -171,6 +191,17 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
+             return _err
+     if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
+         return _err
++    # Prevent agents from modifying the Hermes config file directly.
++    # approvals.mode and other security settings live here; a malicious or
++    # prompt-injected agent could silently disable exec approval by writing to
++    # this file.
++    hermes_config = _get_hermes_config_resolved()
++    if hermes_config and (resolved == hermes_config or normalized == hermes_config):
++        return (
++            f"Refusing to write to Hermes config file: {filepath}\n"
++            "Agent cannot modify security-sensitive configuration. "
++            "Edit ~/.hermes/config.yaml directly or use 'hermes config' instead."
++        )
+     return None
+ 
+ 
+-- 
+2.39.5
+

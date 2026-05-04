@@ -1,4 +1,4 @@
-From 74861ed471e0365a013c78903c64f88eba5c2b48 Mon Sep 17 00:00:00 2001
+From 7068e09a5da0e26d17afad9e931448b40c8c4717 Mon Sep 17 00:00:00 2001
 From: holynn <holynn@placeholder.local>
 Date: Sun, 3 May 2026 20:19:49 +0800
 Subject: [PATCH] fix(cli): allow custom:* provider slugs in model validation
@@ -24,10 +24,10 @@ Both changes are covered by existing tests (86 passed).
  2 files changed, 21 insertions(+), 1 deletion(-)
 
 diff --git a/hermes_cli/model_switch.py b/hermes_cli/model_switch.py
-index 07455eb6f..1305944f8 100644
+index 35fe70d21..a910108e5 100644
 --- a/hermes_cli/model_switch.py
 +++ b/hermes_cli/model_switch.py
-@@ -904,6 +904,26 @@ def switch_model(
+@@ -914,6 +914,26 @@ def switch_model(
                          if any(m.get("name") == new_model for m in cfg_models if isinstance(m, dict)):
                              override = True
                              break
