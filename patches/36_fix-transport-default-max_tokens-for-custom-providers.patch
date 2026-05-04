@@ -1,0 +1,39 @@
+From 46f0b55e410573429fc58ae1ed4f9aa39610ebf1 Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Mon, 4 May 2026 18:58:10 +0800
+Subject: [PATCH] fix(transport): add default max_tokens for custom providers
+ with tools
+
+When a custom OpenAI-compatible proxy forwards to Anthropic models,
+the request fails with HTTP 400 if tools are present but max_tokens
+is not set. Anthropic's Messages API requires max_tokens when tool
+schemas are included.
+
+Add a fallback: when provider is custom, tools are present, and no
+max_tokens is configured, default to 4096. This matches the Bedrock
+transport pattern (self.max_tokens or 4096).
+
+Fixes #19360
+---
+ agent/transports/chat_completions.py | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/agent/transports/chat_completions.py b/agent/transports/chat_completions.py
+index bd853e5a6..f28a5546f 100644
+--- a/agent/transports/chat_completions.py
++++ b/agent/transports/chat_completions.py
+@@ -291,6 +291,11 @@ class ChatCompletionsTransport(ProviderTransport):
+             api_kwargs.update(max_tokens_fn(32000))
+         elif anthropic_max_out is not None:
+             api_kwargs["max_tokens"] = anthropic_max_out
++        elif is_custom_provider and tools and max_tokens_fn:
++            # Custom proxies forwarding to Anthropic need max_tokens when
++            # tools are present — Anthropic's Messages API rejects requests
++            # without max_tokens when tool schemas are included (#19360).
++            api_kwargs.update(max_tokens_fn(4096))
+ 
+         # Kimi: top-level reasoning_effort (unless thinking disabled)
+         if is_kimi:
+-- 
+2.39.5
+

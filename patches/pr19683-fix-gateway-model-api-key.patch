@@ -1,0 +1,32 @@
+From 089290b75abd975ba211a5093cffa6b1c59a1ff3 Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Mon, 4 May 2026 18:47:09 +0800
+Subject: [PATCH] fix(gateway): read api_key from model config in /model
+ command handler
+
+The /model command handler in the messaging gateway read
+model.default, model.provider, and model.base_url from config
+but did not read model.api_key. This caused probe_api_models()
+to send unauthenticated requests to custom endpoints that
+require bearer tokens, resulting in 401 errors.
+
+Fixes #18681
+---
+ gateway/run.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/gateway/run.py b/gateway/run.py
+index 4ca4711cd..7789641fd 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -7473,6 +7473,7 @@ class GatewayRunner:
+                     current_model = model_cfg.get("default", "")
+                     current_provider = model_cfg.get("provider", current_provider)
+                     current_base_url = model_cfg.get("base_url", "")
++                    current_api_key = model_cfg.get("api_key", "")
+                 user_provs = cfg.get("providers")
+                 try:
+                     from hermes_cli.config import get_compatible_custom_providers
+-- 
+2.39.5
+

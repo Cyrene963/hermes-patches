@@ -1,0 +1,24 @@
+From cdb327b6a6a91d01bba1e487dfb37810992325b7 Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Mon, 4 May 2026 19:39:19 +0800
+Subject: [PATCH] fix: extract is_custom_provider from params before use
+
+---
+ agent/transports/chat_completions.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/agent/transports/chat_completions.py b/agent/transports/chat_completions.py
+index 8b25d710b..bd853e5a6 100644
+--- a/agent/transports/chat_completions.py
++++ b/agent/transports/chat_completions.py
+@@ -275,6 +275,7 @@ class ChatCompletionsTransport(ProviderTransport):
+         is_nvidia_nim = params.get("is_nvidia_nim", False)
+         is_kimi = params.get("is_kimi", False)
+         is_tokenhub = params.get("is_tokenhub", False)
++        is_custom_provider = params.get("is_custom_provider", False)
+         reasoning_config = params.get("reasoning_config")
+ 
+         if ephemeral is not None and max_tokens_fn:
+-- 
+2.39.5
+

@@ -1,6 +1,6 @@
 # Hermes Agent 社区补丁合集
 
-> 34 个精选未合并 PR，一键安装。装完立刻能感受到的变化：
+> 39 个精选未合并 PR，一键安装。装完立刻能感受到的变化：
 
 ## 装了有什么用？
 
@@ -61,6 +61,10 @@ bash install.sh
 | 合规检查插件 | 每 8 次工具调用触发合规检查 | [#18849](https://github.com/NousResearch/hermes-agent/pull/18849) |
 | 跨渠道记忆统一 | 同用户 Telegram/CLI/Discord 记忆互通，支持自动检测 owner | [#19163](https://github.com/NousResearch/hermes-agent/pull/19163) |
 | 自动上下文检索 | 每轮自动搜索 hindsight + session 历史，system message 注入 | [#19200](https://github.com/NousResearch/hermes-agent/pull/19200) |
+| Credential pool key 歧义修复 | custom provider 按名称匹配解决轮换池混乱 | [#19682](https://github.com/NousResearch/hermes-agent/pull/19682) |
+| Gateway /model api_key 修复 | /model 切换时正确读取 model config 中的 api_key | [#19683](https://github.com/NousResearch/hermes-agent/pull/19683) |
+| CLI base_url env 查找 | 使用 get_env_value 正确解析环境变量中的 base_url | [#19685](https://github.com/NousResearch/hermes-agent/pull/19685) |
+| Custom provider max_tokens 默认值 | Anthropic 后端的自定义代理自动设置 max_tokens 防止 400 错误 | [#19686](https://github.com/NousResearch/hermes-agent/pull/19686) |
 
 ### 社区精选 16 个 PR（保持不变）
 
