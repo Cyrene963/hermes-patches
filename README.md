@@ -1,6 +1,6 @@
 # Hermes Agent 社区补丁合集
 
-> 39 个精选未合并 PR，一键安装。装完立刻能感受到的变化：
+> 40 个精选未合并 PR，一键安装。装完立刻能感受到的变化：
 
 ## 装了有什么用？
 
@@ -65,6 +65,7 @@ bash install.sh
 | Gateway /model api_key 修复 | /model 切换时正确读取 model config 中的 api_key | [#19683](https://github.com/NousResearch/hermes-agent/pull/19683) |
 | CLI base_url env 查找 | 使用 get_env_value 正确解析环境变量中的 base_url | [#19685](https://github.com/NousResearch/hermes-agent/pull/19685) |
 | Custom provider max_tokens 默认值 | Anthropic 后端的自定义代理自动设置 max_tokens 防止 400 错误 | [#19686](https://github.com/NousResearch/hermes-agent/pull/19686) |
+| session_search 用户隔离 | search_messages/list_sessions_rich 按 user_id 过滤，多用户不再互相看到 | [#17989](https://github.com/NousResearch/hermes-agent/pull/17989) |
 
 ### 社区精选 16 个 PR（保持不变）
 
