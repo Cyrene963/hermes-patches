@@ -1,6 +1,6 @@
 # Hermes Agent 社区补丁合集
 
-> 27 个精选未合并 PR，一键安装。装完立刻能感受到的变化：
+> 28 个精选未合并 PR，一键安装。装完立刻能感受到的变化：
 
 ## 装了有什么用？
 
@@ -52,8 +52,9 @@ bash install.sh
 | 补丁 | 说明 | PR |
 |------|------|-----|
 | 多用户 session/memory 隔离 | session_search 和 memory 按用户隔离 | [#17989](https://github.com/NousResearch/hermes-agent/pull/17989) |
-| 语义技能检索 (FTS5) | SQLite FTS5 全文索引替代暴力注入 | [#18316](https://github.com/NousResearch/hermes-agent/pull/18316) |
-| 混合技能选择器 | 规则+关键词+AI推断三层检索 | [#18316](https://github.com/NousResearch/hermes-agent/pull/18316) |
+| 语义技能检索 (FTS5) | SQLite FTS5 全文索引替代暴力注入，157个skill索引 | [#18316](https://github.com/NousResearch/hermes-agent/pull/18316) |
+| 混合技能选择器 | 3层筛选(快速规则→任务模式→FTS5)，25种任务类型，零关键词匹配 | [#18316](https://github.com/NousResearch/hermes-agent/pull/18316) |
+| Skill Evaluation Gate | 代码强制agent在第一次action前评估skill，pre_tool_call hook阻断 | [#18316](https://github.com/NousResearch/hermes-agent/pull/18316) |
 | 修复轮换池丢弃 | /model 切换不再丢弃 credential pool，轮换机制正常工作 | [#19064](https://github.com/NousResearch/hermes-agent/pull/19064) |
 | Memory 权威性保护 | 防止上下文压缩削弱 memory | 上游已合并 |
 | 技能执行纪律框架 | Agent 必须遵循已加载的技能规则 | [#18849](https://github.com/NousResearch/hermes-agent/pull/18849) |
@@ -110,13 +111,3 @@ hermes() {
 - - - -
 友链：**[Linux Do](https://linux.do/)**
 本项目亦在Linux Do社区中发布相关帖子。感谢佬友雪中送炭的Token哈哈~
-### Patch #19: Skill Evaluation Gate + Hybrid Selector
-- **文件**: `pr18316-skill-evaluation-gate-hybrid-selector.patch`
-- **PR**: [#18316](https://github.com/NousResearch/hermes-agent/pull/18316)
-- **功能**: 
-  - Skill Evaluation Gate: 代码强制agent在第一次action tool call前评估skill
-  - Hybrid Selector: 3层筛选(快速规则→任务模式→FTS5)，25种任务类型
-  - FTS5语义检索: SQLite全文搜索，157个skill索引
-  - 零关键词匹配: LLM自己判断哪些skill相关
-- **测试**: Gate 16/16 ✅, Task Matching 25/25 ✅, FTS5 157 skills ✅
-- **Token节省**: ~97% vs broadcast模式
