@@ -1,0 +1,176 @@
+From a58ed34ca698675dd678c7302a8f1ad841cf95b5 Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Mon, 4 May 2026 23:51:08 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20add=20SkillDB=20(FTS5)=20+=20Skill=20Ev?=
+ =?UTF-8?q?aluation=20Gate=20=E2=80=94=20PR=20#18316=20complete?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- agent/skill_db.py: SQLite FTS5 skill index (353 lines)
+- agent/skill_eval_gate.py: code-enforced skill evaluation gate
+- run_agent.py: skill_eval_done flag + gate instruction injection
+- Resolves conflict by keeping hybrid selector on top of FTS5 base
+---
+ agent/skill_eval_gate.py | 70 ++++++++++++++++++++++++++++++++++++++++
+ run_agent.py             | 46 ++++++++++++++++++++++++++
+ 2 files changed, 116 insertions(+)
+ create mode 100644 agent/skill_eval_gate.py
+
+diff --git a/agent/skill_eval_gate.py b/agent/skill_eval_gate.py
+new file mode 100644
+index 000000000..11a6fdd14
+--- /dev/null
++++ b/agent/skill_eval_gate.py
+@@ -0,0 +1,70 @@
++"""
++Skill Evaluation Gate — forces the agent to evaluate and load relevant skills
++before taking any action.
++
++This is a code-level enforcement mechanism. It does NOT use keyword matching.
++The agent sees all skill names and descriptions in the system prompt (via
++build_skills_system_prompt), and uses its own semantic understanding to decide
++which skills are relevant.
++
++Enforcement:
++  - Before the first action tool call, the agent MUST call skill_view() for
++    at least one relevant skill, OR explicitly acknowledge no skills are needed.
++  - If the agent skips this step, the tool call is blocked with a reminder.
++  - After skill_view() is called once, the gate opens and all tools proceed.
++
++This replaces the keyword-based auto_inject approach with a universal,
++language-agnostic mechanism that works for any task in any language.
++"""
++from __future__ import annotations
++import logging
++
++logger = logging.getLogger(__name__)
++
++# The mandatory instruction injected into the system prompt.
++SKILL_EVAL_INSTRUCTION = """## Mandatory Skill Evaluation
++
++Before your FIRST action (any tool call beyond read-only tools like read_file,
++search_files, browser_snapshot, or hindsight_recall), you MUST:
++
++1. Review the skill index in your system prompt (listed above)
++2. Call `skill_view()` for any skills whose description matches the user's task
++3. If no skills match, proceed without loading — but you MUST have considered them
++
++This is code-enforced. Skipping this step will cause your tool calls to be blocked.
++The skill index contains names and descriptions — use your understanding of the
++user's task to determine relevance. This applies to ALL languages and task types."""
++
++# Tools that are allowed before skill evaluation (read-only / info tools)
++_READ_ONLY_TOOLS = frozenset({
++    "read_file",
++    "search_files",
++    "browser_snapshot",
++    "browser_get_images",
++    "browser_console",
++    "hindsight_recall",
++    "hindsight_reflect",
++    "session_search",
++    "skills_list",
++    "skill_view",       # Allow skill_view itself (this is what we want!)
++    "clarify",          # Asking user a question is always OK
++    "todo",             # Planning is OK
++    "memory",           # Memory read is OK
++    "send_message",     # Messaging is OK (for gateway)
++    "cronjob",          # Cron management is OK
++})
++
++
++def get_skill_eval_instruction() -> str:
++    """Return the mandatory instruction to inject into system prompt."""
++    return SKILL_EVAL_INSTRUCTION
++
++
++def should_block_tool(tool_name: str) -> bool:
++    """Check if a tool should be blocked pending skill evaluation."""
++    return tool_name not in _READ_ONLY_TOOLS
++
++
++def is_skill_view_call(tool_name: str) -> bool:
++    """Check if this tool call satisfies the skill evaluation requirement."""
++    return tool_name == "skill_view"
+diff --git a/run_agent.py b/run_agent.py
+index 7a8f3cd94..e3cde33f4 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -1692,6 +1692,7 @@ class AIAgent:
+         self._memory_nudge_interval = 10
+         self._turns_since_memory = 0
+         self._iters_since_skill = 0
++        self._skill_eval_done = False   # Skill Evaluation Gate: set True after first skill_view
+         if not skip_memory:
+             try:
+                 mem_config = _agent_cfg.get("memory", {})
+@@ -5031,6 +5032,16 @@ class AIAgent:
+         if skills_prompt:
+             prompt_parts.append(skills_prompt)
+ 
++        # Inject skill evaluation gate instruction.
++        # Forces the agent to evaluate and load relevant skills before taking any action.
++        # This is code-level enforcement — NOT keyword matching.
++        if has_skills_tools:
++            try:
++                from agent.skill_eval_gate import get_skill_eval_instruction
++                prompt_parts.append(get_skill_eval_instruction())
++            except ImportError:
++                pass
++
+         # Inject mandatory skills prompt if configured.
+         # These skills MUST be loaded before responding to any factual question.
+         if self._mandatory_skills and has_skills_tools:
+@@ -9413,6 +9424,23 @@ class AIAgent:
+                 )
+             except Exception:
+                 pass
++
++            # ── Skill Evaluation Gate (sequential path) ─────────────────
++            if block_message is None:
++                try:
++                    from agent.skill_eval_gate import should_block_tool, is_skill_view_call
++                    if is_skill_view_call(function_name):
++                        self._skill_eval_done = True
++                    elif not self._skill_eval_done and should_block_tool(function_name):
++                        block_message = (
++                            "SKILL EVALUATION REQUIRED: Before executing this tool, you MUST "
++                            "evaluate the skill index in your system prompt and call skill_view() "
++                            "for any skills relevant to this task. If no skills match, call "
++                            "skill_view(name='hermes-agent') as a minimal acknowledgment and proceed."
++                        )
++                except ImportError:
++                    pass
++
+         if block_message is not None:
+             return json.dumps({"error": block_message}, ensure_ascii=False)
+ 
+@@ -9567,6 +9595,24 @@ class AIAgent:
+ 
+             block_result = None
+             blocked_by_guardrail = False
++
++            # ── Skill Evaluation Gate ──────────────────────────────────
++            # Before the first action tool call, force the agent to evaluate
++            # and load relevant skills. This is code-level enforcement.
++            try:
++                from agent.skill_eval_gate import should_block_tool, is_skill_view_call
++                if is_skill_view_call(function_name):
++                    self._skill_eval_done = True
++                elif not self._skill_eval_done and should_block_tool(function_name):
++                    block_message = (
++                        "SKILL EVALUATION REQUIRED: Before executing this tool, you MUST "
++                        "evaluate the skill index in your system prompt and call skill_view() "
++                        "for any skills relevant to this task. If no skills match, call "
++                        "skill_view(name='hermes-agent') as a minimal acknowledgment and proceed."
++                    )
++            except ImportError:
++                pass
++
+             try:
+                 from hermes_cli.plugins import get_pre_tool_call_block_message
+                 block_message = get_pre_tool_call_block_message(
+-- 
+2.39.5
+
