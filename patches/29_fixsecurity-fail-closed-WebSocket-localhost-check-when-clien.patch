@@ -1,0 +1,31 @@
+From 559ac2a1c541a091deb38a30cebad17050584e19 Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Mon, 4 May 2026 17:47:20 +0800
+Subject: [PATCH] fix(security): fail-closed WebSocket localhost check when
+ client_host is empty
+
+When client_host is empty (proxy/unknown), reject the WebSocket connection
+rather than silently allowing it. This prevents potential SSRF via
+WebSocket connections when the client host cannot be determined.
+
+Refs: PR #15544
+---
+ hermes_cli/web_server.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/hermes_cli/web_server.py b/hermes_cli/web_server.py
+index 0e76c8928..b9abc1ab7 100644
+--- a/hermes_cli/web_server.py
++++ b/hermes_cli/web_server.py
+@@ -2898,7 +2898,7 @@ def _ws_client_is_allowed(ws: "WebSocket") -> bool:
+         return True
+     client_host = ws.client.host if ws.client else ""
+     if not client_host:
+-        return True
++        return False  # fail-closed: reject when client host is unknown
+     return client_host in _LOOPBACK_HOSTS
+ 
+ # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
+-- 
+2.39.5
+

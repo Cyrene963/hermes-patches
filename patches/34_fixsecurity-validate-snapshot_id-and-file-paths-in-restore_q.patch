@@ -1,0 +1,66 @@
+From 5129e4511a22db826fca8378e7028931b620b0cd Mon Sep 17 00:00:00 2001
+From: memosr <memosr_email@gmail.com>
+Date: Mon, 13 Apr 2026 23:42:03 +0300
+Subject: [PATCH] fix(security): validate snapshot_id and file paths in
+ restore_quick_snapshot to prevent path traversal
+
+---
+ hermes_cli/backup.py | 29 ++++++++++++++++++++++++++++-
+ 1 file changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/hermes_cli/backup.py b/hermes_cli/backup.py
+index 20ddb3c87..820d7e915 100644
+--- a/hermes_cli/backup.py
++++ b/hermes_cli/backup.py
+@@ -620,8 +620,22 @@ def restore_quick_snapshot(
+     """
+     home = hermes_home or get_hermes_home()
+     root = _quick_snapshot_root(home)
++
++    # Security: reject snapshot_id values that contain path separators or
++    # traversal sequences so that `root / snapshot_id` stays inside root.
++    if not snapshot_id or "/" in snapshot_id or "\\" in snapshot_id or snapshot_id in (".", ".."):
++        logger.error("Invalid snapshot_id: %s", snapshot_id)
++        return False
++
+     snap_dir = root / snapshot_id
+ 
++    # Confirm the resolved path is still inside root (handles symlinks etc.)
++    try:
++        snap_dir.resolve().relative_to(root.resolve())
++    except ValueError:
++        logger.error("Snapshot path traversal blocked for id: %s", snapshot_id)
++        return False
++
+     if not snap_dir.is_dir():
+         return False
+ 
+@@ -634,11 +648,24 @@ def restore_quick_snapshot(
+ 
+     restored = 0
+     for rel in meta.get("files", {}):
++        # Security: reject absolute paths and traversals in manifest entries
+         src = snap_dir / rel
+-        if not src.exists():
++        try:
++            src.resolve().relative_to(snap_dir.resolve())
++        except ValueError:
++            logger.error("Manifest path traversal blocked: %s", rel)
+             continue
+ 
+         dst = home / rel
++        try:
++            dst.resolve().relative_to(home.resolve())
++        except ValueError:
++            logger.error("Manifest path traversal blocked: %s", rel)
++            continue
++
++        if not src.exists():
++            continue
++
+         dst.parent.mkdir(parents=True, exist_ok=True)
+ 
+         try:
+-- 
+2.39.5
+

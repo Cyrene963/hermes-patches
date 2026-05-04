@@ -1,0 +1,59 @@
+From b656d92459f71880d824ff8420ea6cfc1dbb4455 Mon Sep 17 00:00:00 2001
+From: Vladimir Smirnov <vladimsmirnoff33@gmail.com>
+Date: Sat, 25 Apr 2026 23:14:24 +0300
+Subject: [PATCH] fix(agent): handle string context compression messages
+
+---
+ agent/context_compressor.py            |  6 +++++-
+ tests/agent/test_context_compressor.py | 18 ++++++++++++++++++
+ 2 files changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/agent/context_compressor.py b/agent/context_compressor.py
+index 1e128dba9..0e05d20fb 100644
+--- a/agent/context_compressor.py
++++ b/agent/context_compressor.py
+@@ -882,7 +882,11 @@ The user has requested that this compaction PRIORITISE preserving all informatio
+             if self.summary_model:
+                 call_kwargs["model"] = self.summary_model
+             response = call_llm(**call_kwargs)
+-            content = response.choices[0].message.content
++            message = response.choices[0].message
++            if isinstance(message, dict):
++                content = message.get("content")
++            else:
++                content = getattr(message, "content", message)
+             # Handle cases where content is not a string (e.g., dict from llama.cpp)
+             if not isinstance(content, str):
+                 content = str(content) if content else ""
+diff --git a/tests/agent/test_context_compressor.py b/tests/agent/test_context_compressor.py
+index 3b4bdf8d8..034d7e263 100644
+--- a/tests/agent/test_context_compressor.py
++++ b/tests/agent/test_context_compressor.py
+@@ -172,6 +172,24 @@ class TestNonStringContent:
+         assert summary is not None
+         assert summary == SUMMARY_PREFIX
+ 
++    def test_string_message_coerced_to_summary_content(self):
++        mock_response = MagicMock()
++        mock_response.choices = [MagicMock()]
++        mock_response.choices[0].message = "plain summary text"
++
++        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
++            c = ContextCompressor(model="test", quiet_mode=True)
++
++        messages = [
++            {"role": "user", "content": "do something"},
++            {"role": "assistant", "content": "ok"},
++        ]
++
++        with patch("agent.context_compressor.call_llm", return_value=mock_response):
++            summary = c._generate_summary(messages)
++
++        assert summary == f"{SUMMARY_PREFIX}\nplain summary text"
++
+     def test_summary_call_does_not_force_temperature(self):
+         mock_response = MagicMock()
+         mock_response.choices = [MagicMock()]
+-- 
+2.39.5
+

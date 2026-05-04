@@ -1,0 +1,253 @@
+From 5adec11327ab1776998e79b004b1545890fa3ed8 Mon Sep 17 00:00:00 2001
+From: sbw2025 <subw3@mail2.sysu.edu.cn>
+Date: Mon, 20 Apr 2026 17:25:33 +0800
+Subject: [PATCH] test(gateway): add unit tests for _is_authorized_media_path
+ security boundary
+
+---
+ .../gateway/test_media_path_authorization.py  | 233 ++++++++++++++++++
+ 1 file changed, 233 insertions(+)
+ create mode 100644 tests/gateway/test_media_path_authorization.py
+
+diff --git a/tests/gateway/test_media_path_authorization.py b/tests/gateway/test_media_path_authorization.py
+new file mode 100644
+index 000000000..7c9d80a96
+--- /dev/null
++++ b/tests/gateway/test_media_path_authorization.py
+@@ -0,0 +1,233 @@
++"""
++Tests for _is_authorized_media_path() — the security boundary that prevents
++prompt-injection attacks from exfiltrating arbitrary host files via the media
++delivery pipeline.
++
++Covers: authorized cache paths, unauthorized host paths, symlink traversal,
++and invalid/garbage inputs.
++"""
++
++import os
++from pathlib import Path
++from unittest.mock import patch
++
++import pytest
++
++from gateway.platforms.base import _is_authorized_media_path
++
++
++# ---------------------------------------------------------------------------
++# Helpers
++# ---------------------------------------------------------------------------
++
++def _with_media_dirs(tmp_dirs: tuple, fn):
++    """Run *fn* with _AUTHORIZED_MEDIA_DIRS patched to *tmp_dirs*."""
++    with patch("gateway.platforms.base._AUTHORIZED_MEDIA_DIRS", tmp_dirs):
++        return fn()
++
++
++# ---------------------------------------------------------------------------
++# Authorized paths pass
++# ---------------------------------------------------------------------------
++
++class TestAuthorizedPaths:
++
++    def test_file_inside_image_cache(self, tmp_path):
++        img_dir = tmp_path / "cache" / "images"
++        img_dir.mkdir(parents=True)
++        f = img_dir / "img_abc123.png"
++        f.write_bytes(b"")
++
++        assert _with_media_dirs((img_dir.resolve(),), lambda: _is_authorized_media_path(str(f)))
++
++    def test_file_inside_audio_cache(self, tmp_path):
++        audio_dir = tmp_path / "cache" / "audio"
++        audio_dir.mkdir(parents=True)
++        f = audio_dir / "tts_20240101.mp3"
++        f.write_bytes(b"")
++
++        assert _with_media_dirs((audio_dir.resolve(),), lambda: _is_authorized_media_path(str(f)))
++
++    def test_file_inside_document_cache(self, tmp_path):
++        doc_dir = tmp_path / "cache" / "documents"
++        doc_dir.mkdir(parents=True)
++        f = doc_dir / "doc_abc123_report.pdf"
++        f.write_bytes(b"")
++
++        assert _with_media_dirs((doc_dir.resolve(),), lambda: _is_authorized_media_path(str(f)))
++
++    def test_file_inside_screenshots_cache(self, tmp_path):
++        ss_dir = tmp_path / "cache" / "screenshots"
++        ss_dir.mkdir(parents=True)
++        f = ss_dir / "shot_abc123.png"
++        f.write_bytes(b"")
++
++        assert _with_media_dirs((ss_dir.resolve(),), lambda: _is_authorized_media_path(str(f)))
++
++    def test_nested_subdirectory_inside_authorized_dir(self, tmp_path):
++        """Files in subdirectories of an authorized dir are also allowed."""
++        img_dir = tmp_path / "cache" / "images"
++        sub = img_dir / "2024" / "01"
++        sub.mkdir(parents=True)
++        f = sub / "photo.jpg"
++        f.write_bytes(b"")
++
++        assert _with_media_dirs((img_dir.resolve(),), lambda: _is_authorized_media_path(str(f)))
++
++    def test_nonexistent_path_inside_authorized_dir(self, tmp_path):
++        """Path doesn't need to exist — authorization is purely about directory boundary."""
++        img_dir = tmp_path / "cache" / "images"
++        img_dir.mkdir(parents=True)
++        f = img_dir / "ghost.png"  # not created
++
++        assert _with_media_dirs((img_dir.resolve(),), lambda: _is_authorized_media_path(str(f)))
++
++
++# ---------------------------------------------------------------------------
++# Unauthorized paths fail
++# ---------------------------------------------------------------------------
++
++class TestUnauthorizedPaths:
++
++    def test_etc_passwd(self, tmp_path):
++        img_dir = tmp_path / "cache" / "images"
++        img_dir.mkdir(parents=True)
++
++        assert not _with_media_dirs(
++            (img_dir.resolve(),),
++            lambda: _is_authorized_media_path("/etc/passwd"),
++        )
++
++    def test_ssh_private_key(self, tmp_path):
++        img_dir = tmp_path / "cache" / "images"
++        img_dir.mkdir(parents=True)
++
++        assert not _with_media_dirs(
++            (img_dir.resolve(),),
++            lambda: _is_authorized_media_path("/home/pi/.ssh/id_rsa"),
++        )
++
++    def test_dot_env_file(self, tmp_path):
++        img_dir = tmp_path / "cache" / "images"
++        img_dir.mkdir(parents=True)
++
++        assert not _with_media_dirs(
++            (img_dir.resolve(),),
++            lambda: _is_authorized_media_path(str(tmp_path / ".env")),
++        )
++
++    def test_tmp_directory(self, tmp_path):
++        """Files placed in /tmp by an attacker are not authorized."""
++        img_dir = tmp_path / "cache" / "images"
++        img_dir.mkdir(parents=True)
++
++        assert not _with_media_dirs(
++            (img_dir.resolve(),),
++            lambda: _is_authorized_media_path("/tmp/exploit.png"),
++        )
++
++    def test_path_adjacent_to_authorized_dir(self, tmp_path):
++        """A path that shares the parent directory but isn't inside the authorized dir."""
++        img_dir = tmp_path / "cache" / "images"
++        img_dir.mkdir(parents=True)
++        sibling = tmp_path / "cache" / "secret.png"
++
++        assert not _with_media_dirs(
++            (img_dir.resolve(),),
++            lambda: _is_authorized_media_path(str(sibling)),
++        )
++
++
++# ---------------------------------------------------------------------------
++# Symlink traversal
++# ---------------------------------------------------------------------------
++
++class TestSymlinkTraversal:
++
++    def test_symlink_inside_authorized_dir_pointing_outside(self, tmp_path):
++        """A symlink inside the cache dir that resolves outside must be blocked."""
++        img_dir = tmp_path / "cache" / "images"
++        img_dir.mkdir(parents=True)
++        sensitive = tmp_path / "secret.txt"
++        sensitive.write_text("secret")
++
++        link = img_dir / "escape.png"
++        link.symlink_to(sensitive)
++
++        # resolve() follows symlinks, so link resolves to tmp_path/secret.txt
++        assert not _with_media_dirs(
++            (img_dir.resolve(),),
++            lambda: _is_authorized_media_path(str(link)),
++        )
++
++    def test_symlink_pointing_to_file_inside_authorized_dir(self, tmp_path):
++        """A symlink whose target is also inside the authorized dir is allowed."""
++        img_dir = tmp_path / "cache" / "images"
++        img_dir.mkdir(parents=True)
++        real_file = img_dir / "real.png"
++        real_file.write_bytes(b"")
++
++        link = img_dir / "alias.png"
++        link.symlink_to(real_file)
++
++        assert _with_media_dirs(
++            (img_dir.resolve(),),
++            lambda: _is_authorized_media_path(str(link)),
++        )
++
++
++# ---------------------------------------------------------------------------
++# Invalid / garbage inputs
++# ---------------------------------------------------------------------------
++
++class TestInvalidInputs:
++
++    def test_empty_string(self, tmp_path):
++        img_dir = tmp_path / "cache" / "images"
++        img_dir.mkdir(parents=True)
++
++        result = _with_media_dirs(
++            (img_dir.resolve(),),
++            lambda: _is_authorized_media_path(""),
++        )
++        assert result is False
++
++    def test_garbage_string(self, tmp_path):
++        img_dir = tmp_path / "cache" / "images"
++        img_dir.mkdir(parents=True)
++
++        result = _with_media_dirs(
++            (img_dir.resolve(),),
++            lambda: _is_authorized_media_path("\x00\xff/not/a/path.png"),
++        )
++        assert result is False
++
++    def test_relative_path(self, tmp_path):
++        img_dir = tmp_path / "cache" / "images"
++        img_dir.mkdir(parents=True)
++
++        result = _with_media_dirs(
++            (img_dir.resolve(),),
++            lambda: _is_authorized_media_path("../../etc/passwd"),
++        )
++        assert result is False
++
++    def test_does_not_raise_on_oserror(self, tmp_path, monkeypatch):
++        """OSError during resolve() must be caught and return False."""
++        img_dir = tmp_path / "cache" / "images"
++        img_dir.mkdir(parents=True)
++        authorized = (img_dir.resolve(),)  # resolve before patching
++
++        def bad_resolve(self):
++            raise OSError("permission denied")
++
++        monkeypatch.setattr(Path, "resolve", bad_resolve)
++        result = _with_media_dirs(
++            authorized,
++            lambda: _is_authorized_media_path("/some/path.png"),
++        )
++        assert result is False
++
++
++if __name__ == "__main__":
++    pytest.main([__file__, "-v"])
+-- 
+2.39.5
+
