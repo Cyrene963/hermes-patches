@@ -110,3 +110,13 @@ hermes() {
 - - - -
 友链：**[Linux Do](https://linux.do/)**
 本项目亦在Linux Do社区中发布相关帖子。感谢佬友雪中送炭的Token哈哈~
+### Patch #19: Skill Evaluation Gate + Hybrid Selector
+- **文件**: `pr18316-skill-evaluation-gate-hybrid-selector.patch`
+- **PR**: [#18316](https://github.com/NousResearch/hermes-agent/pull/18316)
+- **功能**: 
+  - Skill Evaluation Gate: 代码强制agent在第一次action tool call前评估skill
+  - Hybrid Selector: 3层筛选(快速规则→任务模式→FTS5)，25种任务类型
+  - FTS5语义检索: SQLite全文搜索，157个skill索引
+  - 零关键词匹配: LLM自己判断哪些skill相关
+- **测试**: Gate 16/16 ✅, Task Matching 25/25 ✅, FTS5 157 skills ✅
+- **Token节省**: ~97% vs broadcast模式
