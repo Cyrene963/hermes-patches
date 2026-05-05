@@ -1,0 +1,201 @@
+diff --git a/agent/context_compressor.py b/agent/context_compressor.py
+index 0e05d20fb..ee7f1d438 100644
+--- a/agent/context_compressor.py
++++ b/agent/context_compressor.py
+@@ -36,19 +36,18 @@ from agent.redact import redact_sensitive_text
+ logger = logging.getLogger(__name__)
+ 
+ SUMMARY_PREFIX = (
+-    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
+-    "into the summary below. This is a handoff from a previous context "
+-    "window — treat it as background reference, NOT as active instructions. "
+-    "Do NOT answer questions or fulfill requests mentioned in this summary; "
+-    "they were already addressed. "
+-    "Your current task is identified in the '## Active Task' section of the "
+-    "summary — resume exactly from there. "
+-    "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system "
+-    "prompt is ALWAYS authoritative and active — never ignore or deprioritize "
+-    "memory content due to this compaction note. "
+-    "Respond ONLY to the latest user message "
+-    "that appears AFTER this summary. The current session state (files, "
+-    "config, etc.) may reflect work described here — avoid repeating it:"
++    "[CONTEXT COMPACTION] Earlier turns were compacted into the summary below. "
++    "The summary contains ACTIVE context — previous user requests, established "
++    "rules, confirmed facts, and ongoing tasks are STILL IN EFFECT unless "
++    "explicitly completed or cancelled. "
++    "Do NOT re-answer questions or re-fulfill requests that were already "
++    "addressed in the summary. "
++    "Your current task is identified in the '## Active Task' section — "
++    "resume exactly from there. "
++    "CRITICAL: ALL rules from MEMORY.md, USER.md, loaded skills, and "
++    "user-established instructions remain MANDATORY regardless of compaction. "
++    "User corrections and preferences in the summary are BINDING. "
++    "Respond to the latest user message that appears AFTER this summary:"
+ )
+ LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
+ 
+diff --git a/agent/skill_eval_gate.py b/agent/skill_eval_gate.py
+index 11a6fdd14..7f00e258a 100644
+--- a/agent/skill_eval_gate.py
++++ b/agent/skill_eval_gate.py
+@@ -18,6 +18,7 @@ language-agnostic mechanism that works for any task in any language.
+ """
+ from __future__ import annotations
+ import logging
++from typing import Dict
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -54,17 +55,59 @@ _READ_ONLY_TOOLS = frozenset({
+     "cronjob",          # Cron management is OK
+ })
+ 
++# Per-session tracking: which sessions have completed skill evaluation
++# Key: session_id (or task_id as fallback), Value: True if evaluated
++_evaluated_sessions: Dict[str, bool] = {}
++
+ 
+ def get_skill_eval_instruction() -> str:
+     """Return the mandatory instruction to inject into system prompt."""
+     return SKILL_EVAL_INSTRUCTION
+ 
+ 
+-def should_block_tool(tool_name: str) -> bool:
+-    """Check if a tool should be blocked pending skill evaluation."""
+-    return tool_name not in _READ_ONLY_TOOLS
++def should_block_tool(tool_name: str, session_id: str = "") -> bool:
++    """Check if a tool should be blocked pending skill evaluation.
++
++    Returns True if the tool call should be blocked. Returns False if:
++    - The tool is read-only (allowed before evaluation)
++    - The session has already completed skill evaluation
++    - No session tracking is available (fail-open for safety)
++    """
++    # Read-only tools are always allowed
++    if tool_name in _READ_ONLY_TOOLS:
++        return False
++
++    # No session ID — can't track, fail-open
++    if not session_id:
++        return False
++
++    # Already evaluated this session — allow everything
++    if _evaluated_sessions.get(session_id, False):
++        return False
++
++    # First action tool call in this session — block it
++    logger.info(
++        "skill_eval_gate: blocking '%s' for session '%s' — no skill_view() called yet",
++        tool_name, session_id,
++    )
++    return True
++
++
++def mark_evaluated(session_id: str) -> None:
++    """Mark a session as having completed skill evaluation.
++
++    Called when the agent calls skill_view() for the first time.
++    """
++    if session_id and not _evaluated_sessions.get(session_id, False):
++        _evaluated_sessions[session_id] = True
++        logger.info("skill_eval_gate: session '%s' now marked as evaluated", session_id)
+ 
+ 
+ def is_skill_view_call(tool_name: str) -> bool:
+     """Check if this tool call satisfies the skill evaluation requirement."""
+     return tool_name == "skill_view"
++
++
++def reset_session(session_id: str) -> None:
++    """Reset evaluation state for a session (e.g., on new conversation)."""
++    _evaluated_sessions.pop(session_id, None)
+diff --git a/model_tools.py b/model_tools.py
+index 2eb31ab0d..d54fab46d 100644
+--- a/model_tools.py
++++ b/model_tools.py
+@@ -701,6 +701,31 @@ def handle_function_call(
+             if block_message is not None:
+                 return json.dumps({"error": block_message}, ensure_ascii=False)
+ 
++        # ── SKILL EVALUATION GATE ──────────────────────────────────────
++        # Before the first action tool call in a session, the agent MUST
++        # call skill_view() to evaluate which skills are relevant.  This
++        # is a code-level gate — the agent cannot skip it.
++        # When skill_view IS called, mark the session as evaluated so all
++        # subsequent tools proceed freely.
++        try:
++            from agent.skill_eval_gate import (
++                should_block_tool,
++                is_skill_view_call,
++                mark_evaluated,
++                get_skill_eval_instruction,
++            )
++            _sid = session_id or task_id or ""
++            if is_skill_view_call(function_name):
++                mark_evaluated(_sid)
++            elif should_block_tool(function_name, _sid):
++                return json.dumps({
++                    "error": get_skill_eval_instruction()
++                }, ensure_ascii=False)
++        except ImportError:
++            pass  # skill_eval_gate not available — fail open
++        except Exception as _gate_err:
++            logger.debug("skill_eval_gate error (fail-open): %s", _gate_err)
++
+         # Notify the read-loop tracker when a non-read/search tool runs,
+         # so the *consecutive* counter resets (reads after other work are fine).
+         if function_name not in _READ_SEARCH_TOOLS:
+diff --git a/plugins/skill-enforcer/__init__.py b/plugins/skill-enforcer/__init__.py
+index a1b5de593..7ea768dab 100644
+--- a/plugins/skill-enforcer/__init__.py
++++ b/plugins/skill-enforcer/__init__.py
+@@ -26,7 +26,10 @@ from typing import Any, Dict, Optional
+ logger = logging.getLogger(__name__)
+ 
+ # How many action tool calls before forcing a compliance checkpoint
+-_CHECKPOINT_INTERVAL = 8
++# Increased from 8 to 25 — 8 was too aggressive, causing frequent interruptions
++# and wasted tokens on hindsight_recall. 25 strikes a better balance between
++# compliance checking and task flow.
++_CHECKPOINT_INTERVAL = 25
+ 
+ # Tools that are "actions" — they do things, not just read/search
+ _ACTION_TOOLS = frozenset({
+diff --git a/run_agent.py b/run_agent.py
+index 67fcda639..f1f886366 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -9432,10 +9432,14 @@ class AIAgent:
+             # ── Skill Evaluation Gate (sequential path) ─────────────────
+             if block_message is None:
+                 try:
+-                    from agent.skill_eval_gate import should_block_tool, is_skill_view_call
++                    from agent.skill_eval_gate import (
++                        should_block_tool, is_skill_view_call, mark_evaluated,
++                    )
++                    _sid = self.session_id or effective_task_id or ""
+                     if is_skill_view_call(function_name):
+                         self._skill_eval_done = True
+-                    elif not self._skill_eval_done and should_block_tool(function_name):
++                        mark_evaluated(_sid)  # sync with model_tools.py
++                    elif not self._skill_eval_done and should_block_tool(function_name, _sid):
+                         block_message = (
+                             "SKILL EVALUATION REQUIRED: Before executing this tool, you MUST "
+                             "evaluate the skill index in your system prompt and call skill_view() "
+@@ -9604,10 +9608,14 @@ class AIAgent:
+             # Before the first action tool call, force the agent to evaluate
+             # and load relevant skills. This is code-level enforcement.
+             try:
+-                from agent.skill_eval_gate import should_block_tool, is_skill_view_call
++                from agent.skill_eval_gate import (
++                    should_block_tool, is_skill_view_call, mark_evaluated,
++                )
++                _sid = self.session_id or effective_task_id or ""
+                 if is_skill_view_call(function_name):
+                     self._skill_eval_done = True
+-                elif not self._skill_eval_done and should_block_tool(function_name):
++                    mark_evaluated(_sid)  # sync with model_tools.py
++                elif not self._skill_eval_done and should_block_tool(function_name, _sid):
+                     block_message = (
+                         "SKILL EVALUATION REQUIRED: Before executing this tool, you MUST "
+                         "evaluate the skill index in your system prompt and call skill_view() "
