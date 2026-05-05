@@ -1,39 +1,292 @@
-diff --git a/agent/context_compressor.py b/agent/context_compressor.py
-index 0e05d20fb..ee7f1d438 100644
---- a/agent/context_compressor.py
-+++ b/agent/context_compressor.py
-@@ -36,19 +36,18 @@ from agent.redact import redact_sensitive_text
+diff --git a/agent/hybrid_skill_selector.py b/agent/hybrid_skill_selector.py
+index 705c5f902..b884d81f9 100644
+--- a/agent/hybrid_skill_selector.py
++++ b/agent/hybrid_skill_selector.py
+@@ -1,152 +1,84 @@
+ #!/usr/bin/env python3
+-"""Hybrid skill selector - combines rules, keyword matching, and AI inference."""
++"""Hybrid skill selector — semantic-only, no regex/keyword matching.
++
++Layer 1: Fast greeting detection (skip skills for "hi"/"hello")
++Layer 2: FTS5 semantic search (SkillDB full-text search)
++Layer 3: Broadcast fallback (if SkillDB empty)
++
++NO regex patterns. NO keyword matching. The model decides what's relevant
++by seeing skill names and descriptions in the system prompt. This module
++only handles the INDEX (which skills to show), not the SELECTION (which
++to load — that's the model's job via skill_eval_gate).
++"""
+ 
+ import re
+ import logging
+-from typing import List, Dict, Any, Optional
++from typing import List, Dict, Any
+ 
  logger = logging.getLogger(__name__)
  
- SUMMARY_PREFIX = (
--    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
--    "into the summary below. This is a handoff from a previous context "
--    "window — treat it as background reference, NOT as active instructions. "
--    "Do NOT answer questions or fulfill requests mentioned in this summary; "
--    "they were already addressed. "
--    "Your current task is identified in the '## Active Task' section of the "
--    "summary — resume exactly from there. "
--    "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system "
--    "prompt is ALWAYS authoritative and active — never ignore or deprioritize "
--    "memory content due to this compaction note. "
--    "Respond ONLY to the latest user message "
--    "that appears AFTER this summary. The current session state (files, "
--    "config, etc.) may reflect work described here — avoid repeating it:"
-+    "[CONTEXT COMPACTION] Earlier turns were compacted into the summary below. "
-+    "The summary contains ACTIVE context — previous user requests, established "
-+    "rules, confirmed facts, and ongoing tasks are STILL IN EFFECT unless "
-+    "explicitly completed or cancelled. "
-+    "Do NOT re-answer questions or re-fulfill requests that were already "
-+    "addressed in the summary. "
-+    "Your current task is identified in the '## Active Task' section — "
-+    "resume exactly from there. "
-+    "CRITICAL: ALL rules from MEMORY.md, USER.md, loaded skills, and "
-+    "user-established instructions remain MANDATORY regardless of compaction. "
-+    "User corrections and preferences in the summary are BINDING. "
-+    "Respond to the latest user message that appears AFTER this summary:"
- )
- LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
+-# Layer 1: Fast rules (0 token cost, <10ms)
+-FAST_RULES = {
+-    # Greetings and simple exchanges
+-    r'^(hi|hello|hey|你好|嗨|谢谢|感谢|bye|再见)$': [],
+-    r'^(good morning|good afternoon|good evening|早上好|下午好|晚上好)$': [],
+-    r'^(ok|好的|嗯|啊|哦|知道了|收到)$': [],
+-    r'^(what|how|why|who|where|when|什么|怎么|为什么|谁|哪里|何时)\\??$': [],  # Simple questions
+-}
+-
+-# Layer 2: High confidence task patterns (0 token cost, <50ms)
+-TASK_PATTERNS = {
+-    # Debugging tasks
+-    r'(debug|调试|错误|exception|error|traceback|crash|内存泄漏|memory leak|segmentation fault)': 
+-        ['python-debugpy', 'debugging-hermes-tui-commands', 'test-driven-development'],
+-    
+-    # GitHub operations  
+-    r'(github|pull request|pr|merge|commit|git|仓库|repository|branch)':
+-        ['github-pr-workflow', 'github-code-review', 'requesting-code-review'],
+-    
+-    # System administration
+-    r'(systemd|gateway|restart|service|process|kill|port|config|配置|系统)':
+-        ['hermes-agent', 'cron-management', 'gateway-troubleshooting'],
+-    
+-    # Research tasks
+-    r'(research|研究|web search|scrape|crawl|cloudflare|bypass|数据|data|信息|information)':
+-        ['research-workflows', 'deep-research-v4'],
+-    
+-    # Skill management
+-    r'(skill|技能|add skill|create skill|update skill|skill factory)':
+-        ['hermes-skill-factory', 'skill-authoring'],
+-    
+-    # Testing
+-    r'(test|测试|pytest|unit test|integration test|coverage|assert)':
+-        ['test-driven-development', 'pytest-parallel'],
+-    
+-    # AI model/cost
+-    r'(model|模型|provider|api|key|token|credit|pricing|cost|成本|费用)':
+-        ['token-cost-analysis', 'model-provider-setup'],
+-}
+-
+-# Layer 3: Complex task indicators (may need AI inference)
+-COMPLEX_INDICATORS = [
+-    '设计', '架构', '优化', '重构', '实现', '分析', '规划', '部署',
+-    'design', 'architecture', 'optimize', 'refactor', 'implement', 'analyze', 'plan', 'deploy'
+-]
++# Layer 1: Greeting detection — only used to SKIP skills entirely
++# This is NOT skill selection. It's "don't waste tokens on 'hi'".
++_GREETING_PATTERN = re.compile(
++    r'^(hi|hello|hey|你好|嗨|谢谢|感谢|bye|再见|'
++    r'good morning|good afternoon|good evening|早上好|下午好|晚上好|'
++    r'ok|好的|嗯|啊|哦|知道了|收到)\s*[!！。.？?]*$',
++    re.IGNORECASE
++)
++
  
+ def is_greeting(text: str) -> bool:
+     """Check if text is a simple greeting or acknowledgment."""
+-    text_lower = text.lower().strip()
+-    for pattern in FAST_RULES.keys():
+-        if re.match(pattern, text_lower):
+-            return True
+-    return False
+-
+-def get_task_skills(text: str) -> List[str]:
+-    """Get skills based on high-confidence task patterns."""
+-    text_lower = text.lower()
+-    for pattern, skills in TASK_PATTERNS.items():
+-        if re.search(pattern, text_lower):
+-            return skills[:3]  # Return top 3 for this category
+-    return []
+-
+-def is_complex_task(text: str) -> bool:
+-    """Check if task is complex and may need AI reasoning."""
+-    text_lower = text.lower()
+-    # Check for complex indicators
+-    for indicator in COMPLEX_INDICATORS:
+-        if indicator in text_lower:
+-            return True
+-    # Check for long, detailed requests (>50 chars)
+-    if len(text) > 50:
+-        return True
+-    return False
++    return bool(_GREETING_PATTERN.match(text.strip()))
++
++
++def should_skip_skills(user_message: str) -> bool:
++    """Quick check if skills should be skipped entirely."""
++    return is_greeting(user_message)
++
+ 
+ def ai_inference_select(user_message: str, context: str = "", max_skills: int = 5) -> List[str]:
+-    """
+-    AI inference layer: use SkillDB FTS5 search for intelligent skill selection.
+-    This is a "smart" search that extracts key concepts from the user message.
+-    
+-    Args:
+-        user_message: User's message
+-        context: Recent conversation context
+-        max_skills: Maximum number of skills to return
+-        
+-    Returns:
+-        List of skill names
++    """Semantic skill selection via FTS5 full-text search.
++
++    No regex. No keyword matching. Pure database search.
+     """
+     try:
+         from agent.skill_db import SkillDB
+-        
+-        # Get SkillDB instance
++
+         db = SkillDB()
+-        
+-        # Check if DB has any skills
+         if db.get_skill_count() == 0:
+-            logger.debug("SkillDB empty, AI inference cannot work")
++            logger.debug("SkillDB empty, cannot select skills")
+             return []
+-        
+-        # Extract key concepts from user message
+-        # Simple approach: use the message itself as query
+-        # For better results, we could extract keywords or use NLP
++
+         query = user_message.strip()
+-        
+         if not query:
+             return []
+-        
+-        # Search using FTS5 with boosted recent usage
+-        results = db.search(
+-            query=query,
+-            limit=max_skills,
+-            boost_recent=True
+-        )
+-        
+-        # Extract skill names
++
++        results = db.search(query=query, limit=max_skills, boost_recent=True)
+         skill_names = [skill["name"] for skill in results]
+-        
++
+         logger.debug(
+-            "AI inference selected %d skills for query: %r",
+-            len(skill_names),
+-            query[:50]
++            "FTS5 selected %d skills for query: %r",
++            len(skill_names), query[:50]
+         )
+-        
+         return skill_names
+-        
++
+     except ImportError:
+-        logger.debug("SkillDB not available, AI inference failed")
++        logger.debug("SkillDB not available")
+         return []
+     except Exception as e:
+-        logger.warning("AI inference failed: %s", e)
++        logger.warning("FTS5 search failed: %s", e)
+         return []
+ 
++
+ def hybrid_skill_select(user_message: str, context: str = "") -> Dict[str, Any]:
+-    """
+-    Hybrid skill selection with three layers.
+-    
++    """Skill selection with two layers: greeting skip + FTS5 semantic search.
++
+     Returns:
+         {
+             "selected_skills": List[str],
+-            "method": "fast_rule" | "task_pattern" | "ai_inference" | "fts5_fallback",
+-            "confidence": float  # 0.0 to 1.0
++            "method": "fast_rule" | "ai_inference" | "fts5_fallback",
++            "confidence": float
+         }
+     """
+     result = {
+@@ -154,65 +86,31 @@ def hybrid_skill_select(user_message: str, context: str = "") -> Dict[str, Any]:
+         "method": "fast_rule",
+         "confidence": 1.0
+     }
+-    
+-    # Layer 1: Fast rules (greetings, simple questions)
++
++    # Layer 1: Greeting detection — skip skills for simple messages
+     if is_greeting(user_message):
+         result["method"] = "fast_rule"
+         result["confidence"] = 0.95
+         return result
+-    
+-    # Layer 2: High confidence task patterns
+-    task_skills = get_task_skills(user_message)
+-    if task_skills:
+-        result["selected_skills"] = task_skills
+-        result["method"] = "task_pattern"
+-        result["confidence"] = 0.85
+-        return result
+-    
+-    # Layer 3: Complex task detection -> AI inference
+-    if is_complex_task(user_message):
+-        selected_skills = ai_inference_select(user_message, context)
+-        if selected_skills:
+-            result["selected_skills"] = selected_skills
+-            result["method"] = "ai_inference"
+-            result["confidence"] = 0.75
+-        else:
+-            # AI inference didn't find skills, fall back to FTS5
+-            result["method"] = "fts5_fallback"
+-            result["confidence"] = 0.6
+-        return result
+-    
+-    # Default: needs FTS5 search
+-    result["method"] = "fts5_fallback"
+-    result["confidence"] = 0.7
++
++    # Layer 2: FTS5 semantic search
++    selected_skills = ai_inference_select(user_message, context)
++    if selected_skills:
++        result["selected_skills"] = selected_skills
++        result["method"] = "ai_inference"
++        result["confidence"] = 0.75
++    else:
++        result["method"] = "fts5_fallback"
++        result["confidence"] = 0.6
++
+     return result
+ 
+-def should_skip_skills(user_message: str) -> bool:
+-    """Quick check if skills should be skipped entirely."""
+-    return is_greeting(user_message)
+ 
+ def get_skills_for_message(user_message: str, context: str = "", use_ai: bool = True) -> List[str]:
+-    """
+-    Main entry point for hybrid skill selection.
+-    
+-    Args:
+-        user_message: Current user message
+-        context: Recent conversation context
+-        use_ai: Whether to use AI inference for complex tasks (default True)
+-    
+-    Returns:
+-        List of skill names to load
+-    """
++    """Main entry point. Returns skill names to inject into system prompt."""
+     selection = hybrid_skill_select(user_message, context)
+-    
++
+     if selection["method"] == "fast_rule":
+-        return []  # No skills needed
+-    
+-    if selection["method"] == "task_pattern":
+-        return selection["selected_skills"]
+-    
+-    if selection["method"] == "ai_inference":
+-        return selection["selected_skills"]
+-    
+-    # Default: empty list, let FTS5 handle it
+-    return []
+\ No newline at end of file
++        return []
++
++    return selection["selected_skills"]
 diff --git a/agent/skill_eval_gate.py b/agent/skill_eval_gate.py
 index 11a6fdd14..7f00e258a 100644
 --- a/agent/skill_eval_gate.py
@@ -145,26 +398,19 @@ index 2eb31ab0d..d54fab46d 100644
          # Notify the read-loop tracker when a non-read/search tool runs,
          # so the *consecutive* counter resets (reads after other work are fine).
          if function_name not in _READ_SEARCH_TOOLS:
-diff --git a/plugins/skill-enforcer/__init__.py b/plugins/skill-enforcer/__init__.py
-index a1b5de593..7ea768dab 100644
---- a/plugins/skill-enforcer/__init__.py
-+++ b/plugins/skill-enforcer/__init__.py
-@@ -26,7 +26,10 @@ from typing import Any, Dict, Optional
- logger = logging.getLogger(__name__)
- 
- # How many action tool calls before forcing a compliance checkpoint
--_CHECKPOINT_INTERVAL = 8
-+# Increased from 8 to 25 — 8 was too aggressive, causing frequent interruptions
-+# and wasted tokens on hindsight_recall. 25 strikes a better balance between
-+# compliance checking and task flow.
-+_CHECKPOINT_INTERVAL = 25
- 
- # Tools that are "actions" — they do things, not just read/search
- _ACTION_TOOLS = frozenset({
 diff --git a/run_agent.py b/run_agent.py
-index 67fcda639..f1f886366 100644
+index 67fcda639..9da68df48 100644
 --- a/run_agent.py
 +++ b/run_agent.py
+@@ -5082,7 +5082,7 @@ class AIAgent:
+         # Use session_start timestamp for stability across turns within the same session.
+         # Regenerating the timestamp on every API call would invalidate the KV cache
+         # prefix even though the session hasn't actually started at a different time.
+-        timestamp_line = f"Conversation started: {self.session_start.strftime('%A, %B %d, %Y %I:%M %p')}"
++        timestamp_line = f"Session started: {self.session_start.strftime('%A, %B %d, %Y %I:%M %p')}"
+         if self.pass_session_id and self.session_id:
+             timestamp_line += f"\nSession ID: {self.session_id}"
+         if self.model:
 @@ -9432,10 +9432,14 @@ class AIAgent:
              # ── Skill Evaluation Gate (sequential path) ─────────────────
              if block_message is None:
@@ -199,3 +445,101 @@ index 67fcda639..f1f886366 100644
                      block_message = (
                          "SKILL EVALUATION REQUIRED: Before executing this tool, you MUST "
                          "evaluate the skill index in your system prompt and call skill_view() "
+@@ -10356,7 +10364,19 @@ class AIAgent:
+             "Please provide a final response summarizing what you've found and accomplished so far, "
+             "without calling any more tools."
+         )
+-        messages.append({"role": "user", "content": summary_request})
++        # Append current time so the agent has accurate sense of "now" even in recovery path
++        _time_prefix = ""
++        try:
++            from hermes_time import now as _ht_now, get_timezone_name as _get_tz
++            _current = _ht_now()
++            _time_prefix = f"[Current time: {_current.strftime('%A, %B %d, %Y %I:%M %p')}"
++            _tz = _get_tz()
++            if _tz:
++                _time_prefix += f" ({_tz})"
++            _time_prefix += "]\n\n"
++        except Exception:
++            pass
++        messages.append({"role": "user", "content": _time_prefix + summary_request})
+ 
+         try:
+             # Build API messages, stripping internal-only fields
+@@ -10868,6 +10888,32 @@ class AIAgent:
+         except Exception as exc:
+             logger.warning("pre_llm_call hook failed: %s", exc)
+ 
++        # ── Built-in current-time injection ──
++        # The system prompt contains the *session start* time (frozen for
++        # cache stability).  To prevent the agent from treating a stale
++        # timestamp as "now", we inject the actual current time into the
++        # user message on every turn — same mechanism that plugins use,
++        # so the system prompt cache prefix is preserved.
++        _time_ctx_parts: list[str] = []
++        try:
++            from hermes_time import now as _ht_now, get_timezone_name as _get_tz
++            _current = _ht_now()
++            _time_ctx_parts.append(
++                f"Current time: {_current.strftime('%A, %B %d, %Y %I:%M %p')}"
++            )
++            _tz = _get_tz()
++            if _tz:
++                _time_ctx_parts.append(f"Timezone: {_tz}")
++        except Exception:
++            pass  # non-critical; agent can fall back to ``date`` command
++        if _time_ctx_parts:
++            _time_block = "\n".join(_time_ctx_parts)
++            _plugin_user_context = (
++                f"{_time_block}\n\n{_plugin_user_context}"
++                if _plugin_user_context
++                else _time_block
++            )
++
+         # Main conversation loop
+         api_call_count = 0
+         final_response = None
+@@ -11529,6 +11575,43 @@ class AIAgent:
+                             else:
+                                 error_details.append("response.choices is empty")
+ 
++                        # Guard: valid choice list but the first choice has no
++                        # usable payload (empty content, no reasoning, no tool
++                        # calls, finish_reason is stop or absent).  Some providers
++                        # (notably Ollama-hosted GLM / reasoning models) return
++                        # these "silent-empty" responses sporadically.  Without
++                        # this guard they slip through as blank replies.
++                        if (
++                            not response_invalid
++                            and response is not None
++                            and hasattr(response, "choices")
++                            and response.choices
++                        ):
++                            _choice = response.choices[0]
++                            _msg = getattr(_choice, "message", None)
++                            _content = getattr(_msg, "content", None) if _msg else None
++                            _reasoning = (
++                                getattr(_msg, "reasoning_content", None)
++                                or getattr(_msg, "reasoning", None)
++                            ) if _msg else None
++                            _tool_calls = getattr(_msg, "tool_calls", None) if _msg else None
++                            _fr = getattr(_choice, "finish_reason", None)
++                            _content_empty = (
++                                _content is None
++                                or (isinstance(_content, str) and not _content.strip())
++                            )
++                            if (
++                                _content_empty
++                                and not _reasoning
++                                and not _tool_calls
++                                and _fr in (None, "stop")
++                            ):
++                                response_invalid = True
++                                error_details.append(
++                                    "response choice has no usable content, "
++                                    "reasoning, or tool calls (silent-empty)"
++                                )
++
+                     if response_invalid:
+                         # Stop spinner before printing error messages
+                         if thinking_spinner:
