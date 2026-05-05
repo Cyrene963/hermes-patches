@@ -1,0 +1,316 @@
+From 814700f2982def9e4fe956503f8b9ab59ef35419 Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Tue, 5 May 2026 21:41:39 +0800
+Subject: [PATCH] feat: session platform filter + compactor/enforcer
+ improvements
+
+- Add platform source filter dropdown to Sessions page (WebUI)
+- New /api/sessions/sources endpoint for distinct sources
+- /api/sessions accepts source/exclude_source params
+- Fix: dropdown overflow-hidden clipping in page header
+- Improve context compaction summary (authoritative memory emphasis)
+- Relax skill-enforcer checkpoint interval (8 -> 25)
+---
+ agent/context_compressor.py        | 25 +++++++++---------
+ hermes_cli/web_server.py           | 40 +++++++++++++++++++++++++---
+ plugins/skill-enforcer/__init__.py |  5 +++-
+ web/src/i18n/en.ts                 |  2 ++
+ web/src/i18n/types.ts              |  2 ++
+ web/src/i18n/zh.ts                 |  2 ++
+ web/src/lib/api.ts                 | 18 +++++++++++--
+ web/src/pages/SessionsPage.tsx     | 42 +++++++++++++++++++++++++++---
+ 8 files changed, 113 insertions(+), 23 deletions(-)
+
+diff --git a/agent/context_compressor.py b/agent/context_compressor.py
+index 0e05d20fb..ee7f1d438 100644
+--- a/agent/context_compressor.py
++++ b/agent/context_compressor.py
+@@ -36,19 +36,18 @@ from agent.redact import redact_sensitive_text
+ logger = logging.getLogger(__name__)
+ 
+ SUMMARY_PREFIX = (
+-    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
+-    "into the summary below. This is a handoff from a previous context "
+-    "window — treat it as background reference, NOT as active instructions. "
+-    "Do NOT answer questions or fulfill requests mentioned in this summary; "
+-    "they were already addressed. "
+-    "Your current task is identified in the '## Active Task' section of the "
+-    "summary — resume exactly from there. "
+-    "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system "
+-    "prompt is ALWAYS authoritative and active — never ignore or deprioritize "
+-    "memory content due to this compaction note. "
+-    "Respond ONLY to the latest user message "
+-    "that appears AFTER this summary. The current session state (files, "
+-    "config, etc.) may reflect work described here — avoid repeating it:"
++    "[CONTEXT COMPACTION] Earlier turns were compacted into the summary below. "
++    "The summary contains ACTIVE context — previous user requests, established "
++    "rules, confirmed facts, and ongoing tasks are STILL IN EFFECT unless "
++    "explicitly completed or cancelled. "
++    "Do NOT re-answer questions or re-fulfill requests that were already "
++    "addressed in the summary. "
++    "Your current task is identified in the '## Active Task' section — "
++    "resume exactly from there. "
++    "CRITICAL: ALL rules from MEMORY.md, USER.md, loaded skills, and "
++    "user-established instructions remain MANDATORY regardless of compaction. "
++    "User corrections and preferences in the summary are BINDING. "
++    "Respond to the latest user message that appears AFTER this summary:"
+ )
+ LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
+ 
+diff --git a/hermes_cli/web_server.py b/hermes_cli/web_server.py
+index b9abc1ab7..874e4b1df 100644
+--- a/hermes_cli/web_server.py
++++ b/hermes_cli/web_server.py
+@@ -746,13 +746,24 @@ async def get_action_status(name: str, lines: int = 200):
+ 
+ 
+ @app.get("/api/sessions")
+-async def get_sessions(limit: int = 20, offset: int = 0):
++async def get_sessions(
++    limit: int = 20,
++    offset: int = 0,
++    source: Optional[str] = None,
++    exclude_source: Optional[str] = None,
++):
+     try:
+         from hermes_state import SessionDB
+         db = SessionDB()
+         try:
+-            sessions = db.list_sessions_rich(limit=limit, offset=offset)
+-            total = db.session_count()
++            exclude_sources = [s.strip() for s in exclude_source.split(",") if s.strip()] if exclude_source else None
++            sessions = db.list_sessions_rich(
++                limit=limit,
++                offset=offset,
++                source=source,
++                exclude_sources=exclude_sources,
++            )
++            total = db.session_count(source=source)
+             now = time.time()
+             for s in sessions:
+                 s["is_active"] = (
+@@ -767,6 +778,29 @@ async def get_sessions(limit: int = 20, offset: int = 0):
+         raise HTTPException(status_code=500, detail="Internal server error")
+ 
+ 
++@app.get("/api/sessions/sources")
++async def get_session_sources():
++    """Return distinct session sources (platforms) with counts."""
++    try:
++        from hermes_state import SessionDB
++        db = SessionDB()
++        try:
++            cursor = db._conn.execute(
++                "SELECT source, COUNT(*) as cnt FROM sessions "
++                "GROUP BY source ORDER BY cnt DESC"
++            )
++            sources = [
++                {"source": row["source"] or "local", "count": row["cnt"]}
++                for row in cursor.fetchall()
++            ]
++            return {"sources": sources}
++        finally:
++            db.close()
++    except Exception:
++        _log.exception("GET /api/sessions/sources failed")
++        raise HTTPException(status_code=500, detail="Internal server error")
++
++
+ @app.get("/api/sessions/search")
+ async def search_sessions(q: str = "", limit: int = 20):
+     """Full-text search across session message content using FTS5."""
+diff --git a/plugins/skill-enforcer/__init__.py b/plugins/skill-enforcer/__init__.py
+index a1b5de593..7ea768dab 100644
+--- a/plugins/skill-enforcer/__init__.py
++++ b/plugins/skill-enforcer/__init__.py
+@@ -26,7 +26,10 @@ from typing import Any, Dict, Optional
+ logger = logging.getLogger(__name__)
+ 
+ # How many action tool calls before forcing a compliance checkpoint
+-_CHECKPOINT_INTERVAL = 8
++# Increased from 8 to 25 — 8 was too aggressive, causing frequent interruptions
++# and wasted tokens on hindsight_recall. 25 strikes a better balance between
++# compliance checking and task flow.
++_CHECKPOINT_INTERVAL = 25
+ 
+ # Tools that are "actions" — they do things, not just read/search
+ _ACTION_TOOLS = frozenset({
+diff --git a/web/src/i18n/en.ts b/web/src/i18n/en.ts
+index 55e3267b1..4f397d83c 100644
+--- a/web/src/i18n/en.ts
++++ b/web/src/i18n/en.ts
+@@ -142,6 +142,8 @@ export const en: Translations = {
+     resumeInChat: "Resume in Chat",
+     previousPage: "Previous page",
+     nextPage: "Next page",
++    allPlatforms: "All platforms",
++    filterByPlatform: "Filter by platform",
+     roles: {
+       user: "User",
+       assistant: "Assistant",
+diff --git a/web/src/i18n/types.ts b/web/src/i18n/types.ts
+index d93260d26..9478ac4b2 100644
+--- a/web/src/i18n/types.ts
++++ b/web/src/i18n/types.ts
+@@ -143,6 +143,8 @@ export interface Translations {
+     resumeInChat: string;
+     previousPage: string;
+     nextPage: string;
++    allPlatforms: string;
++    filterByPlatform: string;
+     roles: {
+       user: string;
+       assistant: string;
+diff --git a/web/src/i18n/zh.ts b/web/src/i18n/zh.ts
+index b64de0661..b40dad1dc 100644
+--- a/web/src/i18n/zh.ts
++++ b/web/src/i18n/zh.ts
+@@ -140,6 +140,8 @@ export const zh: Translations = {
+     resumeInChat: "在对话中继续",
+     previousPage: "上一页",
+     nextPage: "下一页",
++    allPlatforms: "全部平台",
++    filterByPlatform: "按平台筛选",
+     roles: {
+       user: "用户",
+       assistant: "助手",
+diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
+index 8fed70976..88be910ed 100644
+--- a/web/src/lib/api.ts
++++ b/web/src/lib/api.ts
+@@ -45,8 +45,13 @@ async function getSessionToken(): Promise<string> {
+ 
+ export const api = {
+   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
+-  getSessions: (limit = 20, offset = 0) =>
+-    fetchJSON<PaginatedSessions>(`/api/sessions?limit=${limit}&offset=${offset}`),
++  getSessions: (limit = 20, offset = 0, source?: string) => {
++    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
++    if (source) params.set("source", source);
++    return fetchJSON<PaginatedSessions>(`/api/sessions?${params.toString()}`);
++  },
++  getSessionSources: () =>
++    fetchJSON<SessionSourcesResponse>("/api/sessions/sources"),
+   getSessionMessages: (id: string) =>
+     fetchJSON<SessionMessagesResponse>(`/api/sessions/${encodeURIComponent(id)}/messages`),
+   deleteSession: (id: string) =>
+@@ -382,6 +387,15 @@ export interface PaginatedSessions {
+   offset: number;
+ }
+ 
++export interface SessionSourceInfo {
++  source: string;
++  count: number;
++}
++
++export interface SessionSourcesResponse {
++  sources: SessionSourceInfo[];
++}
++
+ export interface EnvVarInfo {
+   is_set: boolean;
+   redacted_value: string | null;
+diff --git a/web/src/pages/SessionsPage.tsx b/web/src/pages/SessionsPage.tsx
+index dd2ad6b23..8cc3e4dca 100644
+--- a/web/src/pages/SessionsPage.tsx
++++ b/web/src/pages/SessionsPage.tsx
+@@ -29,6 +29,7 @@ import type {
+   SessionInfo,
+   SessionMessage,
+   SessionSearchResult,
++  SessionSourceInfo,
+   StatusResponse,
+ } from "@/lib/api";
+ import { timeAgo } from "@/lib/utils";
+@@ -43,6 +44,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+ import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
+ import { useConfirmDelete } from "@/hooks/useConfirmDelete";
+ import { Input } from "@/components/ui/input";
++import { Select, SelectOption } from "@nous-research/ui/ui/components/select";
+ import { useSystemActions } from "@/contexts/useSystemActions";
+ import { useToast } from "@/hooks/useToast";
+ import { useI18n } from "@/i18n";
+@@ -425,6 +427,8 @@ export default function SessionsPage() {
+   const logScrollRef = useRef<HTMLPreElement | null>(null);
+   const [status, setStatus] = useState<StatusResponse | null>(null);
+   const [overviewSessions, setOverviewSessions] = useState<SessionInfo[]>([]);
++  const [sourceFilter, setSourceFilter] = useState<string>("");
++  const [sources, setSources] = useState<SessionSourceInfo[]>([]);
+   const { toast, showToast } = useToast();
+   const { t } = useI18n();
+   const { setAfterTitle, setEnd } = usePageHeader();
+@@ -483,22 +487,31 @@ export default function SessionsPage() {
+     total,
+   ]);
+ 
+-  const loadSessions = useCallback((p: number) => {
++  const loadSessions = useCallback((p: number, src?: string) => {
+     setLoading(true);
++    const source = src !== undefined ? src : sourceFilter;
+     api
+-      .getSessions(PAGE_SIZE, p * PAGE_SIZE)
++      .getSessions(PAGE_SIZE, p * PAGE_SIZE, source || undefined)
+       .then((resp) => {
+         setSessions(resp.sessions);
+         setTotal(resp.total);
+       })
+       .catch(() => {})
+       .finally(() => setLoading(false));
+-  }, []);
++  }, [sourceFilter]);
+ 
+   useEffect(() => {
+     loadSessions(page);
+   }, [loadSessions, page]);
+ 
++  // Fetch available sources on mount
++  useEffect(() => {
++    api
++      .getSessionSources()
++      .then((r) => setSources(r.sources))
++      .catch(() => {});
++  }, []);
++
+   useEffect(() => {
+     const loadOverview = () => {
+       api
+@@ -506,7 +519,7 @@ export default function SessionsPage() {
+         .then(setStatus)
+         .catch(() => {});
+       api
+-        .getSessions(50)
++        .getSessions(50, 0, sourceFilter || undefined)
+         .then((r) => setOverviewSessions(r.sessions))
+         .catch(() => {});
+     };
+@@ -781,6 +794,27 @@ export default function SessionsPage() {
+         </Card>
+       )}
+ 
++      <div className="flex items-center gap-2">
++        <Select
++          value={sourceFilter}
++          onValueChange={(v) => {
++            setSourceFilter(v);
++            setPage(0);
++          }}
++          className="w-48"
++        >
++          <SelectOption value="">{t.sessions.allPlatforms}</SelectOption>
++          {sources.map((s) => (
++            <SelectOption key={s.source} value={s.source}>
++              {s.source} ({s.count})
++            </SelectOption>
++          ))}
++        </Select>
++        <span className="text-xs text-muted-foreground">
++          {t.sessions.filterByPlatform}
++        </span>
++      </div>
++
+       {filtered.length === 0 ? (
+         <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
+           <Clock className="h-8 w-8 mb-3 opacity-40" />
+-- 
+2.39.5
+
