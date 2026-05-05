@@ -1,0 +1,1029 @@
+From 427383a0ed6e97dbf0ed29e79f2e23a7a98d363f Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Wed, 6 May 2026 00:50:04 +0800
+Subject: [PATCH 1/3] fix(agent): detect silent-empty responses from reasoning
+ models (#18139)
+
+Some OpenAI-compatible providers (Ollama-hosted GLM 5.1 and other reasoning
+models) occasionally return a structurally valid but content-empty response.
+This adds detection and automatic retry for such cases.
+---
+ run_agent.py                              |  37 +++++
+ tests/agent/test_silent_empty_response.py | 188 ++++++++++++++++++++++
+ 2 files changed, 225 insertions(+)
+ create mode 100644 tests/agent/test_silent_empty_response.py
+
+diff --git a/run_agent.py b/run_agent.py
+index f1f886366..b1936ac12 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -11537,6 +11537,43 @@ class AIAgent:
+                             else:
+                                 error_details.append("response.choices is empty")
+ 
++                        # Guard: valid choice list but the first choice has no
++                        # usable payload (empty content, no reasoning, no tool
++                        # calls, finish_reason is stop or absent).  Some providers
++                        # (notably Ollama-hosted GLM / reasoning models) return
++                        # these "silent-empty" responses sporadically.  Without
++                        # this guard they slip through as blank replies.
++                        if (
++                            not response_invalid
++                            and response is not None
++                            and hasattr(response, "choices")
++                            and response.choices
++                        ):
++                            _choice = response.choices[0]
++                            _msg = getattr(_choice, "message", None)
++                            _content = getattr(_msg, "content", None) if _msg else None
++                            _reasoning = (
++                                getattr(_msg, "reasoning_content", None)
++                                or getattr(_msg, "reasoning", None)
++                            ) if _msg else None
++                            _tool_calls = getattr(_msg, "tool_calls", None) if _msg else None
++                            _fr = getattr(_choice, "finish_reason", None)
++                            _content_empty = (
++                                _content is None
++                                or (isinstance(_content, str) and not _content.strip())
++                            )
++                            if (
++                                _content_empty
++                                and not _reasoning
++                                and not _tool_calls
++                                and _fr in (None, "stop")
++                            ):
++                                response_invalid = True
++                                error_details.append(
++                                    "response choice has no usable content, "
++                                    "reasoning, or tool calls (silent-empty)"
++                                )
++
+                     if response_invalid:
+                         # Stop spinner before printing error messages
+                         if thinking_spinner:
+diff --git a/tests/agent/test_silent_empty_response.py b/tests/agent/test_silent_empty_response.py
+new file mode 100644
+index 000000000..c046f8b1d
+--- /dev/null
++++ b/tests/agent/test_silent_empty_response.py
+@@ -0,0 +1,188 @@
++"""Regression tests for silent-empty response detection in ``AIAgent``.
++
++Issue: #18066 — some OpenAI-compatible providers (notably Ollama-hosted
++GLM / reasoning models) occasionally return a structurally valid choice
++that's logically empty:
++
++  * ``message.content`` is ``None`` or whitespace-only
++  * ``message.reasoning_content`` is ``None`` or whitespace-only
++  * ``message.tool_calls`` is empty / ``None``
++  * ``finish_reason`` is ``"stop"`` (or absent)
++
++The existing ``validate_response`` only checks that ``choices`` is non-empty,
++so these silent-empty turns slipped through as blank replies with no retry.
++
++Fix: an additional guard in ``run_agent.py`` after the validation block that
++detects "valid choice list, but the first choice has no usable payload" and
++sets ``response_invalid = True`` so the existing retry/fallback machinery
++kicks in.
++"""
++
++import types
++import pytest
++
++
++# ---------------------------------------------------------------------------
++# Helpers — lightweight mock objects that mimic the OpenAI response shape
++# ---------------------------------------------------------------------------
++
++def _make_message(content=None, reasoning_content=None, reasoning=None,
++                  tool_calls=None):
++    msg = types.SimpleNamespace()
++    msg.content = content
++    msg.reasoning_content = reasoning_content
++    msg.reasoning = reasoning
++    msg.tool_calls = tool_calls
++    return msg
++
++
++def _make_choice(message=None, finish_reason="stop"):
++    choice = types.SimpleNamespace()
++    choice.message = message or _make_message()
++    choice.finish_reason = finish_reason
++    return choice
++
++
++def _make_response(choices):
++    resp = types.SimpleNamespace()
++    resp.choices = choices
++    resp.model = "test-model"
++    resp.usage = types.SimpleNamespace(
++        prompt_tokens=10, completion_tokens=0, total_tokens=10,
++    )
++    return resp
++
++
++# ---------------------------------------------------------------------------
++# The guard logic extracted for unit testing (mirrors run_agent.py)
++# ---------------------------------------------------------------------------
++
++def _is_silent_empty(response):
++    """Return True if the response passes ``validate_response`` but has no
++    usable content, reasoning, or tool calls in the first choice."""
++    if response is None:
++        return False
++    if not hasattr(response, "choices") or not response.choices:
++        return False
++
++    choice = response.choices[0]
++    msg = getattr(choice, "message", None)
++    content = getattr(msg, "content", None) if msg else None
++    reasoning = (
++        getattr(msg, "reasoning_content", None)
++        or getattr(msg, "reasoning", None)
++    ) if msg else None
++    tool_calls = getattr(msg, "tool_calls", None) if msg else None
++    fr = getattr(choice, "finish_reason", None)
++
++    content_empty = (
++        content is None
++        or (isinstance(content, str) and not content.strip())
++    )
++    return (
++        content_empty
++        and not reasoning
++        and not tool_calls
++        and fr in (None, "stop")
++    )
++
++
++# ---------------------------------------------------------------------------
++# Tests
++# ---------------------------------------------------------------------------
++
++class TestSilentEmptyDetection:
++    """Responses that should be flagged as silent-empty."""
++
++    def test_none_content_no_reasoning_no_tools_stop(self):
++        """Classic silent-empty: content=None, finish_reason='stop'."""
++        msg = _make_message(content=None, tool_calls=None)
++        resp = _make_response([_make_choice(message=msg, finish_reason="stop")])
++        assert _is_silent_empty(resp) is True
++
++    def test_whitespace_content_no_reasoning_no_tools_stop(self):
++        """Whitespace-only content is treated as empty."""
++        msg = _make_message(content="   \n\t  ", tool_calls=None)
++        resp = _make_response([_make_choice(message=msg, finish_reason="stop")])
++        assert _is_silent_empty(resp) is True
++
++    def test_empty_string_content_no_reasoning_no_tools_stop(self):
++        """Empty string content."""
++        msg = _make_message(content="", tool_calls=None)
++        resp = _make_response([_make_choice(message=msg, finish_reason="stop")])
++        assert _is_silent_empty(resp) is True
++
++    def test_none_finish_reason(self):
++        """finish_reason=None (absent) is also detected."""
++        msg = _make_message(content=None, tool_calls=None)
++        resp = _make_response([_make_choice(message=msg, finish_reason=None)])
++        assert _is_silent_empty(resp) is True
++
++    def test_none_message_object(self):
++        """choice.message is None."""
++        resp = _make_response([_make_choice(message=None, finish_reason="stop")])
++        assert _is_silent_empty(resp) is True
++
++
++class TestNotSilentEmpty:
++    """Responses that should NOT be flagged as silent-empty."""
++
++    def test_valid_content(self):
++        """Normal response with text content."""
++        msg = _make_message(content="Hello, world!")
++        resp = _make_response([_make_choice(message=msg)])
++        assert _is_silent_empty(resp) is False
++
++    def test_reasoning_content_present(self):
++        """Model returned reasoning but no visible text — not empty."""
++        msg = _make_message(
++            content=None,
++            reasoning_content="Let me think about this...",
++        )
++        resp = _make_response([_make_choice(message=msg)])
++        assert _is_silent_empty(resp) is False
++
++    def test_reasoning_field_present(self):
++        """Some providers use 'reasoning' instead of 'reasoning_content'."""
++        msg = _make_message(content=None, reasoning="Thinking...")
++        resp = _make_response([_make_choice(message=msg)])
++        assert _is_silent_empty(resp) is False
++
++    def test_tool_calls_present(self):
++        """Tool-call-only response (content=None is normal here)."""
++        msg = _make_message(
++            content=None,
++            tool_calls=[types.SimpleNamespace(id="call_1")],
++        )
++        resp = _make_response([_make_choice(message=msg)])
++        assert _is_silent_empty(resp) is False
++
++    def test_finish_reason_length(self):
++        """finish_reason='length' (truncation) is not silent-empty."""
++        msg = _make_message(content=None)
++        resp = _make_response([_make_choice(message=msg, finish_reason="length")])
++        assert _is_silent_empty(resp) is False
++
++    def test_finish_reason_tool_calls(self):
++        """finish_reason='tool_calls' is not silent-empty."""
++        msg = _make_message(content=None)
++        resp = _make_response([_make_choice(message=msg, finish_reason="tool_calls")])
++        assert _is_silent_empty(resp) is False
++
++    def test_empty_choices_list(self):
++        """No choices at all — handled by existing validation, not this guard."""
++        resp = _make_response([])
++        assert _is_silent_empty(resp) is False
++
++    def test_none_response(self):
++        """None response — handled by existing validation."""
++        assert _is_silent_empty(None) is False
++
++    def test_content_with_think_blocks_only(self):
++        """Content has only <think> blocks.  The guard does NOT strip think blocks
++        (that's the thinking-prefill path's job), so raw content is non-empty."""
++        msg = _make_message(content="<think>reasoning here</think>")
++        resp = _make_response([_make_choice(message=msg)])
++        # Raw content is non-empty (has <think> tags), so guard does not flag it.
++        # The separate thinking-prefill retry path handles this case.
++        assert _is_silent_empty(resp) is False
+-- 
+2.39.5
+
+
+From e244763e1856d0fd09f06510d6ea8f09070cdf5f Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Wed, 6 May 2026 00:50:14 +0800
+Subject: [PATCH 2/3] fix(tools): auto-quote hyphenated tokens in fact_store
+ FTS5 queries (#14794)
+
+FTS5 unicode61 tokenizer treats hyphens as separators, so queries like
+'pve-01' fail. This adds auto-quoting for hyphenated tokens.
+---
+ plugins/memory/holographic/retrieval.py       |  29 ++++
+ .../memory/test_fts5_hyphen_sanitizer.py      | 147 ++++++++++++++++++
+ 2 files changed, 176 insertions(+)
+ create mode 100644 tests/plugins/memory/test_fts5_hyphen_sanitizer.py
+
+diff --git a/plugins/memory/holographic/retrieval.py b/plugins/memory/holographic/retrieval.py
+index a673dcef8..15f77ad07 100644
+--- a/plugins/memory/holographic/retrieval.py
++++ b/plugins/memory/holographic/retrieval.py
+@@ -7,6 +7,7 @@ Jaccard similarity reranking and trust-weighted scoring.
+ from __future__ import annotations
+ 
+ import math
++import re
+ from datetime import datetime, timezone
+ from typing import TYPE_CHECKING
+ 
+@@ -19,6 +20,33 @@ except ImportError:
+     import holographic as hrr  # type: ignore[no-redef]
+ 
+ 
++# FTS5 operators that must not be quoted
++_FTS5_OPERATORS = frozenset({"AND", "OR", "NOT", "NEAR"})
++
++# Matches unquoted tokens containing at least one hyphen (e.g., pve-01, lxc-103)
++_HYPHENATED_TOKEN_RE = re.compile(r'(?<!")\b(\w+(?:-\w+)+)\b(?!")')
++
++
++def _sanitize_fts5_query(query: str) -> str:
++    """Wrap unquoted hyphenated tokens in double quotes for FTS5.
++
++    FTS5's default unicode61 tokenizer treats ``-`` as a separator, so a
++    bare ``pve-01`` is parsed as *column* ``pve`` *operator* ``01`` and
++    raises ``OperationalError: no such column: 01``.  Quoting the token
++    (``"pve-01"``) turns it into a phrase query that works correctly.
++
++    Already-quoted phrases and FTS5 boolean operators (AND, OR, NOT, NEAR)
++    are preserved.
++    """
++    def _maybe_quote(m: re.Match) -> str:
++        token = m.group(1)
++        if token.upper() in _FTS5_OPERATORS:
++            return token
++        return f'"{token}"'
++
++    return _HYPHENATED_TOKEN_RE.sub(_maybe_quote, query)
++
++
+ class FactRetriever:
+     """Multi-strategy fact retrieval with trust-weighted scoring."""
+ 
+@@ -496,6 +524,7 @@ class FactRetriever:
+         # We need to join facts_fts with facts to get all columns
+         params: list = []
+         where_clauses = ["facts_fts MATCH ?"]
++        query = _sanitize_fts5_query(query)
+         params.append(query)
+ 
+         if category:
+diff --git a/tests/plugins/memory/test_fts5_hyphen_sanitizer.py b/tests/plugins/memory/test_fts5_hyphen_sanitizer.py
+new file mode 100644
+index 000000000..a9558be66
+--- /dev/null
++++ b/tests/plugins/memory/test_fts5_hyphen_sanitizer.py
+@@ -0,0 +1,147 @@
++"""Tests for FTS5 hyphenated query sanitization in holographic retrieval."""
++
++import sqlite3
++import pytest
++
++from plugins.memory.holographic.retrieval import _sanitize_fts5_query
++
++
++class TestSanitizeFTS5Query:
++    """Unit tests for the _sanitize_fts5_query helper."""
++
++    def test_hyphenated_token_quoted(self):
++        assert _sanitize_fts5_query("pve-01") == '"pve-01"'
++
++    def test_multiple_hyphenated_tokens(self):
++        result = _sanitize_fts5_query("lxc-103 AND pve-01")
++        assert '"lxc-103"' in result
++        assert '"pve-01"' in result
++        assert "AND" in result
++
++    def test_already_quoted_preserved(self):
++        assert _sanitize_fts5_query('"pve-01"') == '"pve-01"'
++
++    def test_no_hyphens_unchanged(self):
++        assert _sanitize_fts5_query("hello world") == "hello world"
++
++    def test_single_word_unchanged(self):
++        assert _sanitize_fts5_query("hello") == "hello"
++
++    def test_fts5_operators_preserved(self):
++        result = _sanitize_fts5_query("pve-01 NOT lxc-103")
++        assert "NOT" in result
++        assert '"pve-01"' in result
++        assert '"lxc-103"' in result
++
++    def test_or_operator_preserved(self):
++        result = _sanitize_fts5_query("pve-01 OR pve-02")
++        assert "OR" in result
++
++    def test_multi_hyphen_token(self):
++        assert _sanitize_fts5_query("my-multi-part-name") == '"my-multi-part-name"'
++
++    def test_mixed_plain_and_hyphenated(self):
++        result = _sanitize_fts5_query("server pve-01 hardware")
++        assert result == 'server "pve-01" hardware'
++
++    def test_empty_string(self):
++        assert _sanitize_fts5_query("") == ""
++
++
++class TestFTS5Integration:
++    """Integration tests using real SQLite FTS5 to verify queries don't crash."""
++
++    @pytest.fixture()
++    def fts_conn(self):
++        conn = sqlite3.connect(":memory:")
++        conn.execute(
++            "CREATE VIRTUAL TABLE test_fts USING fts5(content, tags)"
++        )
++        conn.execute(
++            "INSERT INTO test_fts(content, tags) VALUES (?, ?)",
++            ("PVE-01 hardware: i5-13500T, IP 10.20.90.00", "pve-01,homelab"),
++        )
++        conn.execute(
++            "INSERT INTO test_fts(content, tags) VALUES (?, ?)",
++            ("LXC-103 running pihole DNS", "lxc-103,dns"),
++        )
++        conn.commit()
++        yield conn
++        conn.close()
++
++    def test_raw_hyphen_raises(self, fts_conn):
++        """The raw (unsanitized) query MUST fail — this is the bug."""
++        with pytest.raises(sqlite3.OperationalError, match="no such column"):
++            fts_conn.execute(
++                "SELECT * FROM test_fts WHERE test_fts MATCH ?", ("pve-01",)
++            )
++
++    def test_sanitized_hyphen_succeeds(self, fts_conn):
++        sanitized = _sanitize_fts5_query("pve-01")
++        rows = fts_conn.execute(
++            "SELECT * FROM test_fts WHERE test_fts MATCH ?", (sanitized,)
++        ).fetchall()
++        assert len(rows) >= 1
++        assert "PVE-01" in rows[0][0]
++
++    def test_sanitized_multiple_tokens(self, fts_conn):
++        sanitized = _sanitize_fts5_query("lxc-103")
++        rows = fts_conn.execute(
++            "SELECT * FROM test_fts WHERE test_fts MATCH ?", (sanitized,)
++        ).fetchall()
++        assert len(rows) >= 1
++
++    def test_plain_query_still_works(self, fts_conn):
++        rows = fts_conn.execute(
++            "SELECT * FROM test_fts WHERE test_fts MATCH ?", ("hardware",)
++        ).fetchall()
++        assert len(rows) >= 1
++
++    @pytest.mark.parametrize(
++        "dash_char",
++        [
++            "‐",  # HYPHEN
++            "‑",  # NON-BREAKING HYPHEN
++            "–",  # EN DASH
++            "—",  # EM DASH
++            "−",  # MINUS SIGN
++            "­",  # SOFT HYPHEN
++            "﹣",  # SMALL HYPHEN-MINUS
++            "－",  # FULLWIDTH HYPHEN-MINUS
++            "⁃",  # HYPHEN BULLET
++        ],
++        ids=[
++            "U+2010-HYPHEN",
++            "U+2011-NON-BREAKING-HYPHEN",
++            "U+2013-EN-DASH",
++            "U+2014-EM-DASH",
++            "U+2212-MINUS-SIGN",
++            "U+00AD-SOFT-HYPHEN",
++            "U+FE63-SMALL-HYPHEN-MINUS",
++            "U+FF0D-FULLWIDTH-HYPHEN-MINUS",
++            "U+2043-HYPHEN-BULLET",
++        ],
++    )
++    def test_unicode_dash_unsanitized_does_not_raise(self, fts_conn, dash_char):
++        """Lock down current FTS5 behavior: bare Unicode-dash queries do NOT
++        trigger the ``no such column`` parser path that ASCII ``-`` hits.
++
++        The sanitizer is intentionally ASCII-only because only U+002D is
++        FTS5's NOT-operator prefix.  If a future SQLite/unicode61 update
++        starts treating any of these dashes as operator prefixes, this test
++        fails — alerting us before we ship a silent regression.
++        """
++        query = f"pve{dash_char}01"
++        # No ``pytest.raises`` — any exception fails the test.
++        fts_conn.execute(
++            "SELECT * FROM test_fts WHERE test_fts MATCH ?", (query,)
++        ).fetchall()
++
++    def test_mixed_ascii_hyphen_and_unicode_dash(self, fts_conn):
++        """``pve-01–02`` sanitizes to ``"pve-01"–02`` (ASCII portion quoted,
++        en-dash passes through) and parses cleanly in FTS5."""
++        sanitized = _sanitize_fts5_query("pve-01–02")
++        assert sanitized == '"pve-01"–02'
++        fts_conn.execute(
++            "SELECT * FROM test_fts WHERE test_fts MATCH ?", (sanitized,)
++        ).fetchall()
+-- 
+2.39.5
+
+
+From 33857c6124a97dc1c3e93d6f3537dbbe118412cf Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Wed, 6 May 2026 00:54:22 +0800
+Subject: [PATCH 3/3] fix(pricing): resolve provider/model aliases in usage
+ cost estimation (#18340)
+
+- Add Google/DeepSeek provider routing for cost estimation
+- Match unversioned model aliases (e.g. 'claude-sonnet-4' -> 'claude-sonnet-4-20250514')
+- Fixes estimated_cost_usd always showing 0 for custom providers
+---
+ agent/hybrid_skill_selector.py    | 232 +++++++++---------------------
+ agent/memory_manager.py           |  11 ++
+ agent/usage_pricing.py            |  17 ++-
+ hermes_time.py                    |  42 ++++++
+ run_agent.py                      |  42 +++++-
+ tests/agent/test_usage_pricing.py |  41 ++++++
+ 6 files changed, 215 insertions(+), 170 deletions(-)
+
+diff --git a/agent/hybrid_skill_selector.py b/agent/hybrid_skill_selector.py
+index 705c5f902..b884d81f9 100644
+--- a/agent/hybrid_skill_selector.py
++++ b/agent/hybrid_skill_selector.py
+@@ -1,152 +1,84 @@
+ #!/usr/bin/env python3
+-"""Hybrid skill selector - combines rules, keyword matching, and AI inference."""
++"""Hybrid skill selector — semantic-only, no regex/keyword matching.
++
++Layer 1: Fast greeting detection (skip skills for "hi"/"hello")
++Layer 2: FTS5 semantic search (SkillDB full-text search)
++Layer 3: Broadcast fallback (if SkillDB empty)
++
++NO regex patterns. NO keyword matching. The model decides what's relevant
++by seeing skill names and descriptions in the system prompt. This module
++only handles the INDEX (which skills to show), not the SELECTION (which
++to load — that's the model's job via skill_eval_gate).
++"""
+ 
+ import re
+ import logging
+-from typing import List, Dict, Any, Optional
++from typing import List, Dict, Any
+ 
+ logger = logging.getLogger(__name__)
+ 
+-# Layer 1: Fast rules (0 token cost, <10ms)
+-FAST_RULES = {
+-    # Greetings and simple exchanges
+-    r'^(hi|hello|hey|你好|嗨|谢谢|感谢|bye|再见)$': [],
+-    r'^(good morning|good afternoon|good evening|早上好|下午好|晚上好)$': [],
+-    r'^(ok|好的|嗯|啊|哦|知道了|收到)$': [],
+-    r'^(what|how|why|who|where|when|什么|怎么|为什么|谁|哪里|何时)\\??$': [],  # Simple questions
+-}
+-
+-# Layer 2: High confidence task patterns (0 token cost, <50ms)
+-TASK_PATTERNS = {
+-    # Debugging tasks
+-    r'(debug|调试|错误|exception|error|traceback|crash|内存泄漏|memory leak|segmentation fault)': 
+-        ['python-debugpy', 'debugging-hermes-tui-commands', 'test-driven-development'],
+-    
+-    # GitHub operations  
+-    r'(github|pull request|pr|merge|commit|git|仓库|repository|branch)':
+-        ['github-pr-workflow', 'github-code-review', 'requesting-code-review'],
+-    
+-    # System administration
+-    r'(systemd|gateway|restart|service|process|kill|port|config|配置|系统)':
+-        ['hermes-agent', 'cron-management', 'gateway-troubleshooting'],
+-    
+-    # Research tasks
+-    r'(research|研究|web search|scrape|crawl|cloudflare|bypass|数据|data|信息|information)':
+-        ['research-workflows', 'deep-research-v4'],
+-    
+-    # Skill management
+-    r'(skill|技能|add skill|create skill|update skill|skill factory)':
+-        ['hermes-skill-factory', 'skill-authoring'],
+-    
+-    # Testing
+-    r'(test|测试|pytest|unit test|integration test|coverage|assert)':
+-        ['test-driven-development', 'pytest-parallel'],
+-    
+-    # AI model/cost
+-    r'(model|模型|provider|api|key|token|credit|pricing|cost|成本|费用)':
+-        ['token-cost-analysis', 'model-provider-setup'],
+-}
+-
+-# Layer 3: Complex task indicators (may need AI inference)
+-COMPLEX_INDICATORS = [
+-    '设计', '架构', '优化', '重构', '实现', '分析', '规划', '部署',
+-    'design', 'architecture', 'optimize', 'refactor', 'implement', 'analyze', 'plan', 'deploy'
+-]
++# Layer 1: Greeting detection — only used to SKIP skills entirely
++# This is NOT skill selection. It's "don't waste tokens on 'hi'".
++_GREETING_PATTERN = re.compile(
++    r'^(hi|hello|hey|你好|嗨|谢谢|感谢|bye|再见|'
++    r'good morning|good afternoon|good evening|早上好|下午好|晚上好|'
++    r'ok|好的|嗯|啊|哦|知道了|收到)\s*[!！。.？?]*$',
++    re.IGNORECASE
++)
++
+ 
+ def is_greeting(text: str) -> bool:
+     """Check if text is a simple greeting or acknowledgment."""
+-    text_lower = text.lower().strip()
+-    for pattern in FAST_RULES.keys():
+-        if re.match(pattern, text_lower):
+-            return True
+-    return False
+-
+-def get_task_skills(text: str) -> List[str]:
+-    """Get skills based on high-confidence task patterns."""
+-    text_lower = text.lower()
+-    for pattern, skills in TASK_PATTERNS.items():
+-        if re.search(pattern, text_lower):
+-            return skills[:3]  # Return top 3 for this category
+-    return []
+-
+-def is_complex_task(text: str) -> bool:
+-    """Check if task is complex and may need AI reasoning."""
+-    text_lower = text.lower()
+-    # Check for complex indicators
+-    for indicator in COMPLEX_INDICATORS:
+-        if indicator in text_lower:
+-            return True
+-    # Check for long, detailed requests (>50 chars)
+-    if len(text) > 50:
+-        return True
+-    return False
++    return bool(_GREETING_PATTERN.match(text.strip()))
++
++
++def should_skip_skills(user_message: str) -> bool:
++    """Quick check if skills should be skipped entirely."""
++    return is_greeting(user_message)
++
+ 
+ def ai_inference_select(user_message: str, context: str = "", max_skills: int = 5) -> List[str]:
+-    """
+-    AI inference layer: use SkillDB FTS5 search for intelligent skill selection.
+-    This is a "smart" search that extracts key concepts from the user message.
+-    
+-    Args:
+-        user_message: User's message
+-        context: Recent conversation context
+-        max_skills: Maximum number of skills to return
+-        
+-    Returns:
+-        List of skill names
++    """Semantic skill selection via FTS5 full-text search.
++
++    No regex. No keyword matching. Pure database search.
+     """
+     try:
+         from agent.skill_db import SkillDB
+-        
+-        # Get SkillDB instance
++
+         db = SkillDB()
+-        
+-        # Check if DB has any skills
+         if db.get_skill_count() == 0:
+-            logger.debug("SkillDB empty, AI inference cannot work")
++            logger.debug("SkillDB empty, cannot select skills")
+             return []
+-        
+-        # Extract key concepts from user message
+-        # Simple approach: use the message itself as query
+-        # For better results, we could extract keywords or use NLP
++
+         query = user_message.strip()
+-        
+         if not query:
+             return []
+-        
+-        # Search using FTS5 with boosted recent usage
+-        results = db.search(
+-            query=query,
+-            limit=max_skills,
+-            boost_recent=True
+-        )
+-        
+-        # Extract skill names
++
++        results = db.search(query=query, limit=max_skills, boost_recent=True)
+         skill_names = [skill["name"] for skill in results]
+-        
++
+         logger.debug(
+-            "AI inference selected %d skills for query: %r",
+-            len(skill_names),
+-            query[:50]
++            "FTS5 selected %d skills for query: %r",
++            len(skill_names), query[:50]
+         )
+-        
+         return skill_names
+-        
++
+     except ImportError:
+-        logger.debug("SkillDB not available, AI inference failed")
++        logger.debug("SkillDB not available")
+         return []
+     except Exception as e:
+-        logger.warning("AI inference failed: %s", e)
++        logger.warning("FTS5 search failed: %s", e)
+         return []
+ 
++
+ def hybrid_skill_select(user_message: str, context: str = "") -> Dict[str, Any]:
+-    """
+-    Hybrid skill selection with three layers.
+-    
++    """Skill selection with two layers: greeting skip + FTS5 semantic search.
++
+     Returns:
+         {
+             "selected_skills": List[str],
+-            "method": "fast_rule" | "task_pattern" | "ai_inference" | "fts5_fallback",
+-            "confidence": float  # 0.0 to 1.0
++            "method": "fast_rule" | "ai_inference" | "fts5_fallback",
++            "confidence": float
+         }
+     """
+     result = {
+@@ -154,65 +86,31 @@ def hybrid_skill_select(user_message: str, context: str = "") -> Dict[str, Any]:
+         "method": "fast_rule",
+         "confidence": 1.0
+     }
+-    
+-    # Layer 1: Fast rules (greetings, simple questions)
++
++    # Layer 1: Greeting detection — skip skills for simple messages
+     if is_greeting(user_message):
+         result["method"] = "fast_rule"
+         result["confidence"] = 0.95
+         return result
+-    
+-    # Layer 2: High confidence task patterns
+-    task_skills = get_task_skills(user_message)
+-    if task_skills:
+-        result["selected_skills"] = task_skills
+-        result["method"] = "task_pattern"
+-        result["confidence"] = 0.85
+-        return result
+-    
+-    # Layer 3: Complex task detection -> AI inference
+-    if is_complex_task(user_message):
+-        selected_skills = ai_inference_select(user_message, context)
+-        if selected_skills:
+-            result["selected_skills"] = selected_skills
+-            result["method"] = "ai_inference"
+-            result["confidence"] = 0.75
+-        else:
+-            # AI inference didn't find skills, fall back to FTS5
+-            result["method"] = "fts5_fallback"
+-            result["confidence"] = 0.6
+-        return result
+-    
+-    # Default: needs FTS5 search
+-    result["method"] = "fts5_fallback"
+-    result["confidence"] = 0.7
++
++    # Layer 2: FTS5 semantic search
++    selected_skills = ai_inference_select(user_message, context)
++    if selected_skills:
++        result["selected_skills"] = selected_skills
++        result["method"] = "ai_inference"
++        result["confidence"] = 0.75
++    else:
++        result["method"] = "fts5_fallback"
++        result["confidence"] = 0.6
++
+     return result
+ 
+-def should_skip_skills(user_message: str) -> bool:
+-    """Quick check if skills should be skipped entirely."""
+-    return is_greeting(user_message)
+ 
+ def get_skills_for_message(user_message: str, context: str = "", use_ai: bool = True) -> List[str]:
+-    """
+-    Main entry point for hybrid skill selection.
+-    
+-    Args:
+-        user_message: Current user message
+-        context: Recent conversation context
+-        use_ai: Whether to use AI inference for complex tasks (default True)
+-    
+-    Returns:
+-        List of skill names to load
+-    """
++    """Main entry point. Returns skill names to inject into system prompt."""
+     selection = hybrid_skill_select(user_message, context)
+-    
++
+     if selection["method"] == "fast_rule":
+-        return []  # No skills needed
+-    
+-    if selection["method"] == "task_pattern":
+-        return selection["selected_skills"]
+-    
+-    if selection["method"] == "ai_inference":
+-        return selection["selected_skills"]
+-    
+-    # Default: empty list, let FTS5 handle it
+-    return []
+\ No newline at end of file
++        return []
++
++    return selection["selected_skills"]
+diff --git a/agent/memory_manager.py b/agent/memory_manager.py
+index 1fce0c6f4..75aa042ea 100644
+--- a/agent/memory_manager.py
++++ b/agent/memory_manager.py
+@@ -52,6 +52,13 @@ _INTERNAL_NOTE_RE = re.compile(
+     r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*Treat as (?:informational background data|authoritative reference data[^\]]*)\.\]\s*',
+     re.IGNORECASE,
+ )
++# Tags that could influence LLM prompt parsing if injected via memory
++# provider output.  These are stripped as a defense-in-depth measure
++# against prompt injection from compromised memory backends.
++_PROMPT_STRUCTURE_TAG_RE = re.compile(
++    r'</?\s*(?:system|instructions|tool_use|tool_result|mandatory_tool_use|human|assistant|function_call)\b[^>]*>',
++    re.IGNORECASE,
++)
+ 
+ 
+ def sanitize_context(text: str) -> str:
+@@ -180,6 +187,10 @@ def build_memory_context_block(raw_context: str) -> str:
+     clean = sanitize_context(raw_context)
+     if clean != raw_context:
+         logger.warning("memory provider returned pre-wrapped context; stripped")
++    # Strip prompt-structuring tags only from memory provider output.
++    # These tags (<system>, <assistant>, <tool_use>, etc.) could be
++    # injected by a compromised memory backend to manipulate prompt parsing.
++    clean = _PROMPT_STRUCTURE_TAG_RE.sub('', clean)
+     return (
+         "<memory-context>\n"
+         "[System note: The following is recalled memory context, "
+diff --git a/agent/usage_pricing.py b/agent/usage_pricing.py
+index 746f96209..9e5d1501a 100644
+--- a/agent/usage_pricing.py
++++ b/agent/usage_pricing.py
+@@ -419,6 +419,10 @@ def resolve_billing_route(
+         return BillingRoute(provider="anthropic", model=model.split("/")[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
+     if provider_name == "openai":
+         return BillingRoute(provider="openai", model=model.split("/")[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
++    if provider_name in {"gemini", "google", "google-gemini", "google-ai-studio"}:
++        return BillingRoute(provider="google", model=model.split("/")[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
++    if provider_name == "deepseek" or base_url_host_matches(base_url or "", "api.deepseek.com"):
++        return BillingRoute(provider="deepseek", model=model.split("/")[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
+     if provider_name in {"minimax", "minimax-cn"}:
+         return BillingRoute(provider=provider_name, model=model.split("/")[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
+     if provider_name in {"custom", "local"} or (base and "localhost" in base):
+@@ -427,7 +431,18 @@ def resolve_billing_route(
+ 
+ 
+ def _lookup_official_docs_pricing(route: BillingRoute) -> Optional[PricingEntry]:
+-    return _OFFICIAL_DOCS_PRICING.get((route.provider, route.model.lower()))
++    key = (route.provider, route.model.lower())
++    entry = _OFFICIAL_DOCS_PRICING.get(key)
++    if entry is not None:
++        return entry
++    # Fallback: match unversioned model aliases (e.g. "claude-sonnet-4"
++    # matches "claude-sonnet-4-20250514").  Only consider entries for the
++    # same provider whose canonical name starts with the requested model.
++    model_lower = route.model.lower()
++    for (p, m), candidate in _OFFICIAL_DOCS_PRICING.items():
++        if p == route.provider and m.startswith(model_lower + "-"):
++            return candidate
++    return None
+ 
+ 
+ def _openrouter_pricing_entry(route: BillingRoute) -> Optional[PricingEntry]:
+diff --git a/hermes_time.py b/hermes_time.py
+index 9f172d28f..da4a4852c 100644
+--- a/hermes_time.py
++++ b/hermes_time.py
+@@ -88,6 +88,48 @@ def get_timezone() -> Optional[ZoneInfo]:
+     return _cached_tz
+ 
+ 
++def get_timezone_name() -> Optional[str]:
++    """Return the configured IANA timezone name (e.g. ``'Asia/Hong_Kong'``).
++
++    Returns ``None`` when no timezone is explicitly configured (server-local
++    mode).  Useful for including in prompts so the agent knows *which* zone
++    the timestamps refer to.
++    """
++    get_timezone()  # ensure cache is populated
++    return _cached_tz_name or None
++
++
++def format_current_time_context(current: Optional[datetime] = None) -> str:
++    """Return the standard per-turn current-time context string.
++
++    This is the single source of truth for how "current time" is formatted
++    when injected into the user message each turn.  Keeping it in one place
++    ensures the format is consistent across injection sites (main loop,
++    ``_handle_max_iterations`` recovery, codex path) and aligned with
++    PR #10061's timezone format.
++
++    Returns a multi-line string like::
++
++        Current time: Sunday, April 26, 2026 11:08 AM
++        Timezone: Asia/Hong_Kong (UTC+08:00)
++
++    When no timezone is configured, the ``Timezone:`` line is omitted and
++    only ``Current time:`` is returned.
++    """
++    current = current or now()
++    parts = [f"Current time: {current.strftime('%A, %B %d, %Y %I:%M %p')}"]
++    tz_name = get_timezone_name()
++    if tz_name:
++        offset = current.utcoffset()
++        offset_hours = int(offset.total_seconds() // 3600) if offset else 0
++        offset_minutes = int((offset.total_seconds() % 3600) // 60) if offset else 0
++        sign = "+" if offset_hours >= 0 else "-"
++        parts.append(
++            f"Timezone: {tz_name} (UTC{sign}{abs(offset_hours):02d}:{abs(offset_minutes):02d})"
++        )
++    return "\n".join(parts)
++
++
+ def now() -> datetime:
+     """
+     Return the current time as a timezone-aware datetime.
+diff --git a/run_agent.py b/run_agent.py
+index b1936ac12..9da68df48 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -5082,7 +5082,7 @@ class AIAgent:
+         # Use session_start timestamp for stability across turns within the same session.
+         # Regenerating the timestamp on every API call would invalidate the KV cache
+         # prefix even though the session hasn't actually started at a different time.
+-        timestamp_line = f"Conversation started: {self.session_start.strftime('%A, %B %d, %Y %I:%M %p')}"
++        timestamp_line = f"Session started: {self.session_start.strftime('%A, %B %d, %Y %I:%M %p')}"
+         if self.pass_session_id and self.session_id:
+             timestamp_line += f"\nSession ID: {self.session_id}"
+         if self.model:
+@@ -10364,7 +10364,19 @@ class AIAgent:
+             "Please provide a final response summarizing what you've found and accomplished so far, "
+             "without calling any more tools."
+         )
+-        messages.append({"role": "user", "content": summary_request})
++        # Append current time so the agent has accurate sense of "now" even in recovery path
++        _time_prefix = ""
++        try:
++            from hermes_time import now as _ht_now, get_timezone_name as _get_tz
++            _current = _ht_now()
++            _time_prefix = f"[Current time: {_current.strftime('%A, %B %d, %Y %I:%M %p')}"
++            _tz = _get_tz()
++            if _tz:
++                _time_prefix += f" ({_tz})"
++            _time_prefix += "]\n\n"
++        except Exception:
++            pass
++        messages.append({"role": "user", "content": _time_prefix + summary_request})
+ 
+         try:
+             # Build API messages, stripping internal-only fields
+@@ -10876,6 +10888,32 @@ class AIAgent:
+         except Exception as exc:
+             logger.warning("pre_llm_call hook failed: %s", exc)
+ 
++        # ── Built-in current-time injection ──
++        # The system prompt contains the *session start* time (frozen for
++        # cache stability).  To prevent the agent from treating a stale
++        # timestamp as "now", we inject the actual current time into the
++        # user message on every turn — same mechanism that plugins use,
++        # so the system prompt cache prefix is preserved.
++        _time_ctx_parts: list[str] = []
++        try:
++            from hermes_time import now as _ht_now, get_timezone_name as _get_tz
++            _current = _ht_now()
++            _time_ctx_parts.append(
++                f"Current time: {_current.strftime('%A, %B %d, %Y %I:%M %p')}"
++            )
++            _tz = _get_tz()
++            if _tz:
++                _time_ctx_parts.append(f"Timezone: {_tz}")
++        except Exception:
++            pass  # non-critical; agent can fall back to ``date`` command
++        if _time_ctx_parts:
++            _time_block = "\n".join(_time_ctx_parts)
++            _plugin_user_context = (
++                f"{_time_block}\n\n{_plugin_user_context}"
++                if _plugin_user_context
++                else _time_block
++            )
++
+         # Main conversation loop
+         api_call_count = 0
+         final_response = None
+diff --git a/tests/agent/test_usage_pricing.py b/tests/agent/test_usage_pricing.py
+index 5daace97d..d90ac6fbb 100644
+--- a/tests/agent/test_usage_pricing.py
++++ b/tests/agent/test_usage_pricing.py
+@@ -190,3 +190,44 @@ def test_custom_endpoint_models_api_pricing_is_supported(monkeypatch):
+ 
+     assert float(entry.input_cost_per_million) == 0.5
+     assert float(entry.output_cost_per_million) == 2.0
++
++
++def test_estimate_usage_cost_gemini_provider_alias():
++    """Provider name 'gemini' (Hermes internal name) should resolve to
++    'google' pricing entries."""
++    result = estimate_usage_cost(
++        "gemini-2.5-pro",
++        CanonicalUsage(input_tokens=1000, output_tokens=500),
++        provider="gemini",
++    )
++
++    assert result.status == "estimated"
++    assert result.amount_usd is not None
++    assert float(result.amount_usd) > 0
++
++
++def test_estimate_usage_cost_anthropic_unversioned_model_alias():
++    """Short model names like 'claude-sonnet-4' should match versioned
++    entries like 'claude-sonnet-4-20250514'."""
++    result = estimate_usage_cost(
++        "claude-sonnet-4",
++        CanonicalUsage(input_tokens=1000, output_tokens=500),
++        provider="anthropic",
++    )
++
++    assert result.status == "estimated"
++    assert result.amount_usd is not None
++    assert float(result.amount_usd) > 0
++
++
++def test_estimate_usage_cost_deepseek_provider_route():
++    """DeepSeek provider should resolve to official_docs_snapshot pricing."""
++    result = estimate_usage_cost(
++        "deepseek-chat",
++        CanonicalUsage(input_tokens=1000, output_tokens=500),
++        provider="deepseek",
++    )
++
++    assert result.status == "estimated"
++    assert result.amount_usd is not None
++    assert float(result.amount_usd) > 0
+-- 
+2.39.5
+
