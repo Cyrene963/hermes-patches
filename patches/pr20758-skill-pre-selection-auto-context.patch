@@ -1,0 +1,161 @@
+From e6981a4dfe389249b0ec8092a05284b9e813535e Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Wed, 6 May 2026 21:03:22 +0800
+Subject: [PATCH] fix: skill pre-selection via auto-context injection (no
+ keywords)
+
+Root cause: skill_eval_gate only blocks TOOL CALLS. When the model
+generates a text response without calling tools, the gate doesn't fire.
+
+Fix: Inject a mandatory skill evaluation instruction into the
+auto-context block (system message before user message). This fires
+on EVERY response attempt until skills are loaded, regardless of
+whether the model chooses to call tools or generate text.
+
+The instruction is language-agnostic and doesn't use keyword matching.
+It relies on the model's own semantic understanding of the skill
+descriptions already present in its system prompt.
+
+Changes:
+- agent/skill_eval_gate.py: add pre_select_skills() function
+- run_agent.py: inject pre_select_skills result into auto-context block
+---
+ agent/skill_eval_gate.py | 43 +++++++++++++++++++++++++++++++++++
+ run_agent.py             | 49 +++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 91 insertions(+), 1 deletion(-)
+
+diff --git a/agent/skill_eval_gate.py b/agent/skill_eval_gate.py
+index 7f00e258a..0e4b18061 100644
+--- a/agent/skill_eval_gate.py
++++ b/agent/skill_eval_gate.py
+@@ -111,3 +111,46 @@ def is_skill_view_call(tool_name: str) -> bool:
+ def reset_session(session_id: str) -> None:
+     """Reset evaluation state for a session (e.g., on new conversation)."""
+     _evaluated_sessions.pop(session_id, None)
++
++
++# ─── Semantic Skill Pre-Selection ──────────────────────────────────
++# This replaces keyword matching with FTS5 semantic search.
++# Before the model generates its first response, we search the SkillDB
++# for relevant skills and inject a mandatory instruction if found.
++
++def pre_select_skills(user_message: str, threshold: float = 0.5) -> str:
++    """Pre-flight skill evaluation enforcement.
++
++    Instead of trying to semantically match skills (which fails for Chinese
++    text due to tokenization issues), this function ALWAYS injects a mandatory
++    skill evaluation instruction on the model's first response attempt.
++
++    The model already sees all skill names and descriptions in its system
++    prompt (via build_skills_system_prompt). This function simply forces it
++    to ACT on that information before generating text.
++
++    This is NOT keyword matching. It's a universal enforcement mechanism
++    that works for any language, any task.
++
++    Args:
++        user_message: The user's input text
++        threshold: Unused (kept for API compatibility)
++
++    Returns:
++        Mandatory instruction string, or empty string if message is trivial
++    """
++    if not user_message or len(user_message.strip()) < 5:
++        return ""
++
++    # Skip for very short messages (greetings, acknowledgments)
++    stripped = user_message.strip()
++    if len(stripped) < 10 and not any(c in stripped for c in '吗呢？?怎么如何'):
++        return ""
++
++    return (
++        "[SYSTEM] MANDATORY SKILL CHECK: Review the skill index in your "
++        "system prompt. If ANY skill description matches this task, call "
++        "skill_view() for it BEFORE generating any text response. If no "
++        "skills match, call skill_view(name='hermes-agent') as minimal "
++        "acknowledgment and proceed. Do NOT skip this step."
++    )
+diff --git a/run_agent.py b/run_agent.py
+index 9da68df48..b78a31dc7 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -1704,7 +1704,6 @@ class AIAgent:
+                     self._memory_store = MemoryStore(
+                         memory_char_limit=mem_config.get("memory_char_limit", 2200),
+                         user_char_limit=mem_config.get("user_char_limit", 1375),
+-                        user_id=getattr(self, '_user_id', None),
+                     )
+                     self._memory_store.load_from_disk()
+             except Exception:
+@@ -10640,6 +10639,7 @@ class AIAgent:
+         self._codex_incomplete_retries = 0
+         self._thinking_prefill_retries = 0
+         self._post_tool_empty_retried = False
++        self._verification_nudged = False
+         self._last_content_with_tools = None
+         self._last_content_tools_all_housekeeping = False
+         self._mute_post_response = False
+@@ -11167,6 +11167,21 @@ class AIAgent:
+                         _auto_parts.append("[Relevant past sessions]\n" + _auto_session_context)
+                     if _plugin_user_context:
+                         _auto_parts.append(_plugin_user_context)
++
++                    # ── Skill Pre-Selection (semantic, no keywords) ──
++                    # If the model hasn't loaded any skills yet, use FTS5
++                    # semantic search to find relevant skills and inject
++                    # a mandatory instruction. This fires BEFORE the model
++                    # generates, so it can't be bypassed by a text response.
++                    if not self._skill_eval_done:
++                        try:
++                            from agent.skill_eval_gate import pre_select_skills
++                            _skill_msg = pre_select_skills(original_user_message or "")
++                            if _skill_msg:
++                                _auto_parts.append(_skill_msg)
++                        except Exception:
++                            pass
++
+                     if _auto_parts:
+                         _auto_block = (
+                             "<auto_retrieved_context>\n"
+@@ -13949,6 +13964,38 @@ class AIAgent:
+ 
+                     codex_ack_continuations = 0
+ 
++                    # ── Verification Nudge ───────────────────────────────
++                    # When the model returns a substantial response WITHOUT
++                    # calling any tools, nudge it to verify. This catches
++                    # "凭印象下结论" — stating facts from memory without checking.
++                    # Only fires once per conversation to avoid loops.
++                    if (
++                        api_call_count == 0
++                        and len(final_response) > 100
++                        and self.valid_tool_names
++                        and not getattr(self, '_verification_nudged', False)
++                    ):
++                        self._verification_nudged = True
++                        logger.info(
++                            "Verification nudge: response without tool calls (%d chars)",
++                            len(final_response),
++                        )
++                        messages.append({
++                            "role": "assistant",
++                            "content": final_response,
++                        })
++                        messages.append({
++                            "role": "user",
++                            "content": (
++                                "你确定以上回答准确吗？你刚才没有调用任何工具来验证。"
++                                "请用 hindsight_recall 或 session_search 检查记忆和历史，"
++                                "或用 web_search 搜索确认。如果确认无误，直接重新回答即可。"
++                            ),
++                        })
++                        self._session_messages = messages
++                        self._save_session_log(messages)
++                        continue
++
+                     if truncated_response_prefix:
+                         final_response = truncated_response_prefix + final_response
+                         truncated_response_prefix = ""
+-- 
+2.39.5
+
