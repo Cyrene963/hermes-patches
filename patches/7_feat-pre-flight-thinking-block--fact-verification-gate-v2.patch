@@ -1,0 +1,370 @@
+From 150c7e7f00fb713450a7e4bf358bdcbe8f0c135e Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Sun, 3 May 2026 17:53:22 +0800
+Subject: [PATCH] feat: pre-flight thinking block + fact verification gate v2
+
+---
+ agent/prompt_builder.py         |  18 ++++
+ anti_fabrication_enforcement.py | 167 ++++++++++++++++++++++++++++++++
+ run_agent.py                    | 103 +++++++++++++-------
+ 3 files changed, 254 insertions(+), 34 deletions(-)
+ create mode 100644 anti_fabrication_enforcement.py
+
+diff --git a/agent/prompt_builder.py b/agent/prompt_builder.py
+index 2a90eb7b9..b3898be18 100644
+--- a/agent/prompt_builder.py
++++ b/agent/prompt_builder.py
+@@ -243,6 +243,24 @@ KANBAN_GUIDANCE = (
+     "cross-agent handoffs that outlive one API loop."
+ )
+ 
++
++# Pre-flight thinking block -- injected at the VERY TOP of the system prompt
++# Forces the model to internally assess what it knows before generating a response.
++PRE_FLIGHT_THINKING_BLOCK = (
++    "# Pre-Flight Thinking (MANDATORY -- execute before every response)\n"
++    "Before generating ANY response, you MUST internally assess:\n"
++    "1. Do I already have relevant knowledge from memory, hindsight, or past sessions?\n"
++    "   -> If uncertain, call `hindsight_recall` with key terms from the user's message.\n"
++    "2. Have we discussed this topic before?\n"
++    "   -> If it feels familiar, call `session_search` to check.\n"
++    "3. Is there a skill that governs this type of task?\n"
++    "   -> If it involves facts, verification, or domain knowledge, call `skill_view`.\n"
++    "4. Am I about to state something I haven't verified?\n"
++    "   -> If yes, use tools to verify first. Never guess.\n\n"
++    "You have these tools for a reason -- use them proactively, not reactively.\n"
++    "A good response starts with knowing what you know, not with generating text.\n"
++)
++
+ TOOL_USE_ENFORCEMENT_GUIDANCE = (
+     "# Tool-use enforcement\n"
+     "You MUST use your tools to take action — do not describe what you would do "
+diff --git a/anti_fabrication_enforcement.py b/anti_fabrication_enforcement.py
+new file mode 100644
+index 000000000..838d32724
+--- /dev/null
++++ b/anti_fabrication_enforcement.py
+@@ -0,0 +1,167 @@
++"""
++Anti-Fabrication Enforcement v2 — Universal Approach
++
++v1的问题：regex匹配特定模式（PR状态、价格等），是面向结果编程。
++v2的思路：不验证就不准说。不是匹配"什么话需要验证"，
++而是检查"模型有没有调用验证工具"。如果没有任何验证工具调用，
++就限制模型只能输出：
++- 基于对话上下文的信息（用户刚说的话）
++- 明确标注为"未验证"的推测
++- 建议用户自己去验证
++
++核心逻辑：
++- 如果本轮对话中模型调用了验证工具 → 放行
++- 如果本轮对话中模型没有调用任何验证工具 → 只允许非事实性输出
++- "非事实性输出"定义：提问、建议、分析用户提供的信息、标注为推测的内容
++
++这不是regex匹配，是基于工具调用历史的通用拦截。
++"""
++
++import json
++import logging
++from typing import List, Tuple, Optional
++
++logger = logging.getLogger(__name__)
++
++# Tools that count as "the model has verified something"
++VERIFICATION_TOOLS = {
++    # Web
++    'web_search', 'web_extract',
++    # Browser
++    'browser_navigate', 'browser_click', 'browser_snapshot', 'browser_vision',
++    # Vision
++    'vision_analyze',
++    # Terminal (for curl, API calls, git commands with verification intent)
++    'terminal',
++    # File reading (for checking config, code, docs)
++    'read_file',
++    # Session search (for checking past conversations)
++    'session_search',
++    # Memory recall
++    'hindsight_recall', 'hindsight_reflect',
++}
++
++# Tools that are NOT verification (even if they involve data)
++NON_VERIFICATION_TOOLS = {
++    'write_file', 'patch', 'send_message', 'todo', 'cronjob',
++    'skill_manage', 'skill_view', 'memory', 'delegate_task',
++    'execute_code', 'browser_type', 'browser_press', 'browser_scroll',
++    'text_to_speech', 'clarify', 'process', 'skills_list',
++}
++
++
++def _count_verification_calls(messages: List[dict], lookback: int = 20) -> int:
++    """Count how many verification tool calls were made in recent messages."""
++    count = 0
++    recent = messages[-lookback:] if len(messages) > lookback else messages
++    for msg in recent:
++        if msg.get('role') == 'assistant' and msg.get('tool_calls'):
++            for tc in msg['tool_calls']:
++                tool_name = tc.get('function', {}).get('name', '')
++                if tool_name in VERIFICATION_TOOLS:
++                    count += 1
++    return count
++
++
++def _has_factual_content(text: str) -> bool:
++    """
++    Check if the response contains factual claims (not just opinions/questions).
++    This is intentionally broad — any statement that could be a fact.
++    """
++    # Questions are OK (not factual claims)
++    # Count question marks vs periods
++    questions = text.count('?') + text.count('？')
++    statements = text.count('。') + text.count('.') - questions
++    
++    # If mostly questions, it's not factual
++    if questions > 0 and statements <= 0:
++        return False
++    
++    # Very short responses are usually OK (acks, greetings)
++    if len(text.strip()) < 30:
++        return False
++    
++    # Check for hedging language that indicates uncertainty
++    uncertainty_markers = [
++        '我认为', '我觉得', '我猜', '可能是', '也许', '不确定',
++        'I think', 'I believe', 'maybe', 'perhaps', 'not sure',
++        '据我所知', '未经验证', '需要确认', '待确认',
++    ]
++    text_lower = text.lower()
++    has_hedging = any(m.lower() in text_lower for m in uncertainty_markers)
++    
++    # If it has hedging language, it's presenting as opinion — OK
++    if has_hedging:
++        return False
++    
++    return True
++
++
++def enforce(
++    response_text: str,
++    messages: List[dict],
++    enabled: bool = True,
++    min_verification_calls: int = 1,
++) -> Tuple[bool, Optional[str]]:
++    """
++    Universal anti-fabrication enforcement.
++    
++    Logic:
++    - If model used verification tools → allow (it checked something)
++    - If model didn't use any tools AND response has factual content → block
++    
++    This is NOT pattern matching. It's a simple rule:
++    "If you didn't look anything up, don't state anything as fact."
++    
++    Returns:
++        (should_block, reason)
++    """
++    if not enabled:
++        return False, None
++    
++    # Count verification tool calls
++    verification_count = _count_verification_calls(messages)
++    
++    if verification_count >= min_verification_calls:
++        # Model has verified something — allow
++        return False, None
++    
++    # Model hasn't verified anything
++    # Check if response contains factual content
++    if not _has_factual_content(response_text):
++        # Just questions or hedging — allow
++        return False, None
++    
++    # Block: model is stating facts without having verified anything
++    return True, (
++        "你正在输出事实性声明，但本轮对话中没有调用过任何验证工具。"
++        "请先验证再回复。可选方式：\n"
++        "1. web_search 搜索相关信息\n"
++        "2. terminal 执行curl或API调用\n"
++        "3. browser_navigate 访问官方文档\n"
++        "4. read_file 检查本地文件\n"
++        "5. session_search/hindsight_recall 检查历史记录\n"
++        "如果确实是基于对话上下文的分析或个人观点，请明确标注。"
++    )
++
++
++# ═══════════════════════════════════════════════════════════════
++# Integration: Same hook point as v1, but simpler logic
++# ═══════════════════════════════════════════════════════════════
++"""
++In run_agent.py (same location as v1 patch):
++
++    from anti_fabrication_enforcement import enforce as _fab_enforce
++    _fab_block, _fab_reason = _fab_enforce(
++        response_text=final_response,
++        messages=messages,
++        enabled=True,
++        min_verification_calls=1,
++    )
++    if _fab_block:
++        messages.append({
++            "role": "system",
++            "content": f"[VERIFICATION REQUIRED] {_fab_reason}"
++        })
++        continue  # re-run, don't break
++"""
+diff --git a/run_agent.py b/run_agent.py
+index 7c3dcf23c..662044be8 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -148,7 +148,7 @@ from agent.model_metadata import (
+ from agent.context_compressor import ContextCompressor
+ from agent.subdirectory_hints import SubdirectoryHintTracker
+ from agent.prompt_caching import apply_anthropic_cache_control
+-from agent.prompt_builder import build_skills_system_prompt, build_skills_system_prompt_semantic, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE, MIMO_MODEL_EXECUTION_GUIDANCE
++from agent.prompt_builder import build_skills_system_prompt, build_skills_system_prompt_semantic, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE, MIMO_MODEL_EXECUTION_GUIDANCE, PRE_FLIGHT_THINKING_BLOCK
+ from agent.usage_pricing import estimate_usage_cost, normalize_usage
+ from agent.codex_responses_adapter import (
+     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
+@@ -1829,6 +1829,17 @@ class AIAgent:
+             self._skill_enforcement_enabled = False
+             self._skill_enforcement_mode = "warn"
+ 
++        # Fact verification gate config
++        _fact_ver = _agent_section.get("fact_verification", {})
++        if isinstance(_fact_ver, dict):
++            self._fact_verification_enabled = _fact_ver.get("enabled", True)
++            self._fact_verification_cooldown = int(_fact_ver.get("cooldown", 3))
++            self._fact_verification_mode = _fact_ver.get("mode", "block")
++        else:
++            self._fact_verification_enabled = True
++            self._fact_verification_cooldown = 3
++            self._fact_verification_mode = "block"
++
+         # App-level API retry count (wraps each model API call).  Default 3,
+         # overridable via agent.api_max_retries in config.yaml.  See #11616.
+         try:
+@@ -4865,6 +4876,11 @@ class AIAgent:
+             # Fallback to hardcoded identity
+             prompt_parts = [DEFAULT_AGENT_IDENTITY]
+ 
++        # Pre-flight thinking block -- THE FIRST THING the model reads.
++        if ("hindsight_recall" in self.valid_tool_names
++                or "session_search" in self.valid_tool_names):
++            prompt_parts.insert(0, PRE_FLIGHT_THINKING_BLOCK)
++
+         # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
+         prompt_parts.append(HERMES_AGENT_HELP_GUIDANCE)
+ 
+@@ -10450,43 +10466,38 @@ class AIAgent:
+         return final_response
+ 
+     def _verify_skill_compliance(self, response: str, loaded_skills: list[str]) -> list[str]:
+-        """Check if response violates rules from loaded skills.
+-        
+-        Returns a list of violations. Empty list means compliant.
++        """Check if response contains unverified factual claims.
++        CODE-LEVEL check using regex heuristics.
+         """
++        import re
+         violations = []
++        _strip = re.sub(r'<thinking>.*?</thinking>', '', response, flags=re.DOTALL).strip()
++        if len(_strip) < 80:
++            return []
+         response_lower = response.lower()
+-        
+-        # Check precision-and-verification rules
+-        if 'precision-and-verification' in loaded_skills:
+-            # Check for unverified price claims (common hallucination pattern)
+-            price_patterns = [
+-                r'¥\d+', r'\$\d+', r'€\d+',  # Currency amounts
+-                r'每[月天年]\d+', r'每月', r'每年',  # Chinese price patterns
+-                r'元/[月天年]', r'美元', r'人民币',
+-            ]
+-            import re
+-            for pattern in price_patterns:
+-                if re.search(pattern, response):
+-                    # Check if response mentions verification source
+-                    verification_indicators = ['官方', 'official', '文档', 'website', 'website', '网站', '查询', 'verified', 'confirmed']
+-                    if not any(indicator in response_lower for indicator in verification_indicators):
+-                        violations.append(f"precision-and-verification: price claim without verification source")
+-                        break
+-        
+-        # Check investigate-before-act rules
+-        if 'investigate-before-act' in loaded_skills:
+-            # Check for claims about server/system specs without tool calls
+-            spec_patterns = ['cpu', 'memory', '内存', '磁盘', 'disk', '服务器', 'server', '配置']
+-            if any(pattern in response_lower for pattern in spec_patterns):
+-                # Check if this looks like a factual claim about current state
+-                claim_indicators = ['是', '为', '有', '使用', 'running', 'is', 'has']
+-                if any(indicator in response_lower for indicator in claim_indicators):
+-                    # This is a potential unverified claim - check if tools were used
+-                    # (We can't know for sure here, but we can warn)
+-                    pass  # The warning is handled by the mandatory skills prompt
+-        
++        # Price/cost claims
++        for p in [r'¥\s*\d+', r'\$\s*\d+', r'€\s*\d+', r'\d+\s*(块钱|元|美元|人民币|港币|美金)', r'每[月天年]\s*\d+', r'\d+\s*/\s*[月天年]', r'(free|免费|收费|付费|定价|pricing|cost)']:
++            if re.search(p, response, re.IGNORECASE): violations.append("price_claim"); break
++        # Number claims
++        for p in [r'\d{1,3}(,\d{3})+\s*(token|请求|request|次)', r'\d+亿', r'\d+\.\d+%', r'(节省|减少|降低|提升|增加)\s*(了|约|近)?\s*\d+', r'\d+[KkMm]\s*(token|参数|param)']:
++            if re.search(p, response, re.IGNORECASE): violations.append("number_claim"); break
++        # Product/spec claims
++        for p in [r'(模型|model)\s*(是|为|=|:)\s*\w+', r'(支持|support)\s*\d+\s*[KkMm]?(?:token|参数|上下文|context)', r'(版本|version)\s*(是|为|=|:)\s*[\d.]+']:
++            if re.search(p, response, re.IGNORECASE): violations.append("product_claim"); break
++        # Stat claims
++        for p in [r'(第[一二三四五六七八九十\d]+|排名|位列)', r'(准确率|成功率|通过率)\s*(达到|为|是)\s*\d+']:
++            if re.search(p, response, re.IGNORECASE): violations.append("stat_claim"); break
+         return violations
++
++    def _has_recent_verification(self, messages: list, lookback: int = 15) -> bool:
++        """Check if verification tools were used in recent messages. CODE-LEVEL."""
++        _vtools = {'web_search', 'web_extract', 'browser_navigate', 'hindsight_recall', 'session_search', 'skill_view', 'terminal', 'execute_code'}
++        recent = messages[-lookback:] if len(messages) > lookback else messages
++        for msg in recent:
++            if msg.get("role") == "assistant" and msg.get("tool_calls"):
++                for tc in msg["tool_calls"]:
++                    if tc.get("function", {}).get("name", "") in _vtools: return True
++        return False
+     
+     def run_conversation(
+         self,
+@@ -10563,6 +10574,7 @@ class AIAgent:
+         self._last_content_tools_all_housekeeping = False
+         self._mute_post_response = False
+         self._unicode_sanitization_passes = 0
++        self._fact_verification_last_fire = -999
+         self._tool_guardrails.reset_for_turn()
+         self._tool_guardrail_halt_decision = None
+ 
+@@ -13777,6 +13789,29 @@ class AIAgent:
+                     
+                     final_msg = self._build_assistant_message(assistant_message, finish_reason)
+ 
++                    # -- Fact verification gate v2 --
++                    if (getattr(self, '_fact_verification_enabled', True)
++                            and final_response
++                            and self._has_content_after_think_block(final_response)
++                            and api_call_count >= 2):
++                        _cooldown = getattr(self, '_fact_verification_cooldown', 3)
++                        _calls_since = api_call_count - getattr(self, '_fact_verification_last_fire', -999)
++                        if _calls_since >= _cooldown:
++                            violations = self._verify_skill_compliance(final_response, [])
++                            if violations and not self._has_recent_verification(messages, 15):
++                                self._fact_verification_last_fire = api_call_count
++                                _mode = getattr(self, '_fact_verification_mode', 'block')
++                                logger.info("Fact gate: %s violations=%s", _mode, violations)
++                                if _mode == "block":
++                                    self._emit_status(f"Unverified claims ({', '.join(violations)}) -- requiring verification")
++                                    _am = self._build_assistant_message(assistant_message, finish_reason)
++                                    _am["content"] = final_response
++                                    messages.append(_am)
++                                    messages.append({"role": "user", "content": f"VERIFICATION REQUIRED: Your response triggered detection: {', '.join(violations)}. You MUST call web_search/terminal/skill_view to verify before delivering."})
++                                    self._session_messages = messages
++                                    self._save_session_log(messages)
++                                    continue
++
+                     # Pop thinking-only prefill message(s) before appending
+                     # the final response.  This avoids consecutive assistant
+                     # messages which break strict-alternation providers
+-- 
+2.39.5
+
