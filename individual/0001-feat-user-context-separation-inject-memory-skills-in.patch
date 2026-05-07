@@ -1,0 +1,279 @@
+From c7b9c2649f7ecef2a7ef7349e661412920dedd17 Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Fri, 8 May 2026 01:01:29 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20user=20context=20separation=20=E2=80=94?=
+ =?UTF-8?q?=20inject=20memory/skills=20into=20user=20message?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Move dynamic content (memory, skills, eval gate, mandatory skills) from
+system prompt to user message via _build_user_context_block(). This follows
+Claude Code's architecture pattern where:
+
+- Static content (identity, tools, safety) stays in system prompt for cache
+- Dynamic content (memory, skills, enforcement) goes into user message
+
+Benefits:
+- System prompt is now stable → maximizes prefix cache hits
+- Memory rules survive compression (user message has higher attention)
+- Skills guidance refreshed each turn (not frozen from session start)
+- Skill eval gate in user message (harder for model to ignore)
+- ~2000-18000 chars removed from system prompt per turn
+
+Based on analysis of Claude Code's leaked source code (QueryEngine.ts,
+prompts.ts, query.ts) which uses the same User Context / System Prompt
+separation pattern.
+---
+ run_agent.py | 221 ++++++++++++++++++++++++++++++---------------------
+ 1 file changed, 130 insertions(+), 91 deletions(-)
+
+diff --git a/run_agent.py b/run_agent.py
+index 237476738..205c8ab47 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -5022,97 +5022,13 @@ class AIAgent:
+         if system_message is not None:
+             prompt_parts.append(system_message)
+ 
+-        if self._memory_store:
+-            if self._memory_enabled:
+-                mem_block = self._memory_store.format_for_system_prompt("memory")
+-                if mem_block:
+-                    prompt_parts.append(mem_block)
+-            # USER.md is always included when enabled.
+-            if self._user_profile_enabled:
+-                user_block = self._memory_store.format_for_system_prompt("user")
+-                if user_block:
+-                    prompt_parts.append(user_block)
+-
+-        # External memory provider system prompt block (additive to built-in)
+-        if self._memory_manager:
+-            try:
+-                _ext_mem_block = self._memory_manager.build_system_prompt()
+-                if _ext_mem_block:
+-                    prompt_parts.append(_ext_mem_block)
+-            except Exception:
+-                pass
+-
+-        has_skills_tools = any(name in self.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
+-        if has_skills_tools:
+-            avail_toolsets = {
+-                toolset
+-                for toolset in (
+-                    get_toolset_for_tool(tool_name) for tool_name in self.valid_tool_names
+-                )
+-                if toolset
+-            }
+-            # Check config for semantic retrieval mode
+-            from hermes_constants import get_hermes_home
+-            import yaml
+-            try:
+-                config_path = get_hermes_home() / "config.yaml"
+-                with open(config_path, "r") as f:
+-                    _cfg = yaml.safe_load(f) or {}
+-                _skills_cfg = _cfg.get("skills", {}) if isinstance(_cfg, dict) else {}
+-                retrieval_mode = _skills_cfg.get("retrieval", "semantic") if isinstance(_skills_cfg, dict) else "semantic"
+-                top_k = int(_skills_cfg.get("top_k", 15)) if isinstance(_skills_cfg, dict) else 15
+-            except Exception:
+-                retrieval_mode = "broadcast"
+-                top_k = 15
+-
+-            if retrieval_mode == "semantic":
+-                skills_prompt = build_skills_system_prompt_semantic(
+-                    user_message="",  # Will be filled on first turn via message context
+-                    available_tools=self.valid_tool_names,
+-                    available_toolsets=avail_toolsets,
+-                    top_k=top_k,
+-                )
+-            else:
+-                skills_prompt = build_skills_system_prompt(
+-                    available_tools=self.valid_tool_names,
+-                    available_toolsets=avail_toolsets,
+-                )
+-        else:
+-            skills_prompt = ""
+-        if skills_prompt:
+-            prompt_parts.append(skills_prompt)
+-
+-        # Inject skill evaluation gate instruction.
+-        # Forces the agent to evaluate and load relevant skills before taking any action.
+-        # This is code-level enforcement — NOT keyword matching.
+-        if has_skills_tools:
+-            try:
+-                from agent.skill_eval_gate import get_skill_eval_instruction
+-                prompt_parts.append(get_skill_eval_instruction())
+-            except ImportError:
+-                pass
+-
+-        # Inject mandatory skills prompt if configured.
+-        # These skills MUST be loaded before responding to any factual question.
+-        if self._mandatory_skills and has_skills_tools:
+-            mandatory_skills_list = ", ".join(self._mandatory_skills)
+-            mandatory_skills_prompt = (
+-                f"## Mandatory Skills (must load before factual responses)\n"
+-                f"The following skills are MANDATORY and must be loaded via skill_view() "
+-                f"before any response containing factual claims, prices, specifications, "
+-                f"or technical details: {mandatory_skills_list}\n"
+-                f"\n"
+-                f"When responding to questions about:\n"
+-                f"- Prices, costs, or financial figures\n"
+-                f"- Product capabilities or specifications\n"
+-                f"- Technical configurations or API details\n"
+-                f"- Model comparisons or benchmark numbers\n"
+-                f"You MUST first call skill_view() for each relevant mandatory skill, "
+-                f"then follow the verification rules in that skill.\n"
+-                f"Failure to load mandatory skills before factual responses is a violation "
+-                f"of this instruction.\n"
+-            )
+-            prompt_parts.append(mandatory_skills_prompt)
++        # NOTE: Memory (MEMORY.md, USER.md), external memory provider, skills prompt,
++        # skill eval gate, and mandatory skills are now injected into the USER MESSAGE
++        # via _build_user_context_block() at API-call time, NOT the system prompt.
++        # This follows Claude Code's architecture: dynamic content goes into user
++        # messages (higher attention weight, survives compression), while static
++        # content stays in system prompt (maximizes prefix cache hits).
++        # See _build_user_context_block() and the _injections mechanism at ~line 11259.
+ 
+         if not self.skip_context_files:
+             # Use TERMINAL_CWD for context file discovery when set (gateway
+@@ -5169,6 +5085,118 @@ class AIAgent:
+ 
+         return "\n\n".join(p.strip() for p in prompt_parts if p.strip())
+ 
++    def _build_user_context_block(self) -> str:
++        """Build dynamic context block for injection into user message.
++
++        This follows Claude Code's architecture pattern: dynamic content (memory,
++        skills, enforcement) goes into the USER MESSAGE rather than the system prompt.
++        Benefits:
++        - Higher attention weight after context compression (user messages > system)
++        - System prompt stays stable for maximum prefix cache hits
++        - Memory rules survive compression (they're in user messages, not system)
++        - Skills guidance is refreshed each turn (not frozen from session start)
++        """
++        parts = []
++
++        # 1. Memory blocks (MEMORY.md + USER.md)
++        if self._memory_store:
++            if self._memory_enabled:
++                mem_block = self._memory_store.format_for_system_prompt("memory")
++                if mem_block:
++                    parts.append(mem_block)
++            if self._user_profile_enabled:
++                user_block = self._memory_store.format_for_system_prompt("user")
++                if user_block:
++                    parts.append(user_block)
++
++        # 2. External memory provider block
++        if self._memory_manager:
++            try:
++                _ext_mem_block = self._memory_manager.build_system_prompt()
++                if _ext_mem_block:
++                    parts.append(_ext_mem_block)
++            except Exception:
++                pass
++
++        # 3. Skills guidance + eval gate + mandatory skills
++        has_skills_tools = any(
++            name in self.valid_tool_names
++            for name in ['skills_list', 'skill_view', 'skill_manage']
++        )
++        if has_skills_tools:
++            avail_toolsets = {
++                toolset
++                for toolset in (
++                    get_toolset_for_tool(tool_name)
++                    for tool_name in self.valid_tool_names
++                )
++                if toolset
++            }
++            from hermes_constants import get_hermes_home
++            import yaml
++            try:
++                config_path = get_hermes_home() / "config.yaml"
++                with open(config_path, "r") as f:
++                    _cfg = yaml.safe_load(f) or {}
++                _skills_cfg = _cfg.get("skills", {}) if isinstance(_cfg, dict) else {}
++                retrieval_mode = (
++                    _skills_cfg.get("retrieval", "semantic")
++                    if isinstance(_skills_cfg, dict) else "semantic"
++                )
++                top_k = (
++                    int(_skills_cfg.get("top_k", 15))
++                    if isinstance(_skills_cfg, dict) else 15
++                )
++            except Exception:
++                retrieval_mode = "broadcast"
++                top_k = 15
++
++            if retrieval_mode == "semantic":
++                skills_prompt = build_skills_system_prompt_semantic(
++                    user_message="",
++                    available_tools=self.valid_tool_names,
++                    available_toolsets=avail_toolsets,
++                    top_k=top_k,
++                )
++            else:
++                skills_prompt = build_skills_system_prompt(
++                    available_tools=self.valid_tool_names,
++                    available_toolsets=avail_toolsets,
++                )
++            if skills_prompt:
++                parts.append(skills_prompt)
++
++            # Skill eval gate instruction
++            try:
++                from agent.skill_eval_gate import get_skill_eval_instruction
++                gate_instr = get_skill_eval_instruction()
++                if gate_instr:
++                    parts.append(gate_instr)
++            except ImportError:
++                pass
++
++            # Mandatory skills
++            if self._mandatory_skills:
++                mandatory_skills_list = ", ".join(self._mandatory_skills)
++                parts.append(
++                    f"## Mandatory Skills (must load before factual responses)\n"
++                    f"The following skills are MANDATORY and must be loaded via skill_view() "
++                    f"before any response containing factual claims, prices, specifications, "
++                    f"or technical details: {mandatory_skills_list}\n"
++                    f"\n"
++                    f"When responding to questions about:\n"
++                    f"- Prices, costs, or financial figures\n"
++                    f"- Product capabilities or specifications\n"
++                    f"- Technical configurations or API details\n"
++                    f"- Model comparisons or benchmark numbers\n"
++                    f"You MUST first call skill_view() for each relevant mandatory skill, "
++                    f"then follow the verification rules in that skill.\n"
++                    f"Failure to load mandatory skills before factual responses is a violation "
++                    f"of this instruction.\n"
++                )
++
++        return "\n\n".join(p.strip() for p in parts if p.strip())
++
+     # =========================================================================
+     # Pre/post-call guardrails (inspired by PR #1321 — @alireza78a)
+     # =========================================================================
+@@ -11257,6 +11285,17 @@ class AIAgent:
+                 # never mutated, so nothing leaks into session persistence.
+                 if idx == current_turn_user_idx and msg.get("role") == "user":
+                     _injections = []
++                    # User Context Block: memory + skills + enforcement
++                    # Injected into user message (not system prompt) for:
++                    # - Higher attention weight after compression
++                    # - Stable system prompt for prefix cache
++                    # - Fresh context each turn (memory may update)
++                    try:
++                        _user_ctx = self._build_user_context_block()
++                        if _user_ctx:
++                            _injections.append(_user_ctx)
++                    except Exception:
++                        pass
+                     if _ext_prefetch_cache:
+                         _fenced = build_memory_context_block(_ext_prefetch_cache)
+                         if _fenced:
+-- 
+2.39.5
+
