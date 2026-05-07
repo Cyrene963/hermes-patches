@@ -1,0 +1,39 @@
+From 9d8e873b0848f542a59de864fe9d7c63dc590f80 Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Fri, 8 May 2026 01:25:19 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20reduce=20per-tool=20result=20limit=2010?=
+ =?UTF-8?q?0K=E2=86=9250K,=20increase=20preview=201.5K=E2=86=922K?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Based on Claude Code's token budget pattern: single tool results capped
+at 50K chars (down from 100K), with 2KB preview (up from 1.5K) when
+persisted to disk. Large results are written to /tmp/hermes-results/
+with only the preview in context.
+
+This prevents one huge tool call from flooding the context window and
+forces the model to use read_file with offset/limit for large outputs.
+---
+ tools/budget_config.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/tools/budget_config.py b/tools/budget_config.py
+index 577e59442..52204cdf8 100644
+--- a/tools/budget_config.py
++++ b/tools/budget_config.py
+@@ -15,9 +15,9 @@ PINNED_THRESHOLDS: Dict[str, float] = {
+ 
+ # Defaults matching the current hardcoded values in tool_result_storage.py.
+ # Kept here as the single source of truth; tool_result_storage.py imports these.
+-DEFAULT_RESULT_SIZE_CHARS: int = 100_000
++DEFAULT_RESULT_SIZE_CHARS: int = 50_000
+ DEFAULT_TURN_BUDGET_CHARS: int = 200_000
+-DEFAULT_PREVIEW_SIZE_CHARS: int = 1_500
++DEFAULT_PREVIEW_SIZE_CHARS: int = 2_000
+ 
+ 
+ @dataclass(frozen=True)
+-- 
+2.39.5
+
