@@ -1,0 +1,142 @@
+From 4c96b54e7f4eb2c96bb1a2f9051cd58660537ba6 Mon Sep 17 00:00:00 2001
+From: qWaitCrypto <axmaiqiu@gmail.com>
+Date: Thu, 7 May 2026 11:04:03 +0800
+Subject: [PATCH] fix(security): force-redact context compression summaries
+
+---
+ agent/context_compressor.py            |  6 +-
+ tests/agent/test_context_compressor.py | 80 +++++++++++++++++++++++++-
+ 2 files changed, 82 insertions(+), 4 deletions(-)
+
+diff --git a/agent/context_compressor.py b/agent/context_compressor.py
+index ee328df03..0d393f763 100644
+--- a/agent/context_compressor.py
++++ b/agent/context_compressor.py
+@@ -688,7 +688,7 @@ class ContextCompressor(ContextEngine):
+         parts = []
+         for msg in turns:
+             role = msg.get("role", "unknown")
+-            content = redact_sensitive_text(msg.get("content") or "")
++            content = redact_sensitive_text(msg.get("content") or "", force=True)
+ 
+             # Tool results: keep enough content for the summarizer
+             if role == "tool":
+@@ -709,7 +709,7 @@ class ContextCompressor(ContextEngine):
+                         if isinstance(tc, dict):
+                             fn = tc.get("function", {})
+                             name = fn.get("name", "?")
+-                            args = redact_sensitive_text(fn.get("arguments", ""))
++                            args = redact_sensitive_text(fn.get("arguments", ""), force=True)
+                             # Truncate long arguments but keep enough for context
+                             if len(args) > self._TOOL_ARGS_MAX:
+                                 args = args[:self._TOOL_ARGS_HEAD] + "..."
+@@ -892,7 +892,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
+             content = extract_content_or_reasoning(response)
+             # Redact the summary output as well — the summarizer LLM may
+             # ignore prompt instructions and echo back secrets verbatim.
+-            summary = redact_sensitive_text(content.strip())
++            summary = redact_sensitive_text(content.strip(), force=True)
+             # Store for iterative updates on next compaction
+             self._previous_summary = summary
+             self._summary_failure_cooldown_until = 0.0
+diff --git a/tests/agent/test_context_compressor.py b/tests/agent/test_context_compressor.py
+index 25ae7a322..ae3140c9e 100644
+--- a/tests/agent/test_context_compressor.py
++++ b/tests/agent/test_context_compressor.py
+@@ -1,7 +1,9 @@
+ """Tests for agent/context_compressor.py — compression logic, thresholds, truncation fallback."""
+ 
++import json
++from unittest.mock import MagicMock, patch
++
+ import pytest
+-from unittest.mock import patch, MagicMock
+ 
+ from agent.context_compressor import ContextCompressor, SUMMARY_PREFIX
+ 
+@@ -241,6 +243,82 @@ class TestNonStringContent:
+         }
+ 
+ 
++class TestSummarySerializationRedaction:
++    def test_summary_serialization_force_redacts_message_content_when_global_redaction_disabled(self, monkeypatch):
++        from agent import redact as redact_module
++
++        monkeypatch.setattr(redact_module, "_REDACT_ENABLED", False)
++
++        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
++            c = ContextCompressor(model="test", quiet_mode=True)
++
++        secret = "sk-proj-abc123def456ghi789jkl012"
++        serialized = c._serialize_for_summary([
++            {"role": "user", "content": f"Here is my API key: {secret}"},
++            {"role": "tool", "tool_call_id": "call_1", "content": f"Authorization: Bearer {secret}"},
++        ])
++
++        assert secret not in serialized
++        assert "Authorization: Bearer" in serialized
++        assert "***" in serialized
++
++    def test_summary_serialization_force_redacts_tool_call_arguments_when_global_redaction_disabled(self, monkeypatch):
++        from agent import redact as redact_module
++
++        monkeypatch.setattr(redact_module, "_REDACT_ENABLED", False)
++
++        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
++            c = ContextCompressor(model="test", quiet_mode=True)
++
++        secret = "sk-proj-abc123def456ghi789jkl012"
++        serialized = c._serialize_for_summary([
++            {
++                "role": "assistant",
++                "content": "",
++                "tool_calls": [
++                    {
++                        "id": "call_1",
++                        "type": "function",
++                        "function": {
++                            "name": "write_file",
++                            "arguments": json.dumps({
++                                "path": ".env",
++                                "content": f"OPENAI_API_KEY={secret}",
++                            }),
++                        },
++                    }
++                ],
++            }
++        ])
++
++        assert secret not in serialized
++        assert "OPENAI_API_KEY" in serialized
++        assert "***" in serialized
++
++    def test_generate_summary_force_redacts_summary_output_when_global_redaction_disabled(self, monkeypatch):
++        from agent import redact as redact_module
++
++        monkeypatch.setattr(redact_module, "_REDACT_ENABLED", False)
++
++        mock_response = MagicMock()
++        mock_response.choices = [MagicMock()]
++        secret = "sk-proj-abc123def456ghi789jkl012"
++        mock_response.choices[0].message.content = f"summary echoed {secret}"
++
++        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
++            c = ContextCompressor(model="test", quiet_mode=True)
++
++        with patch("agent.context_compressor.call_llm", return_value=mock_response):
++            summary = c._generate_summary([
++                {"role": "user", "content": f"use {secret}"},
++                {"role": "assistant", "content": "ok"},
++            ])
++
++        assert summary is not None
++        assert secret not in summary
++        assert "sk-pro..." in summary
++
++
+ class TestSummaryFailureCooldown:
+     def test_summary_failure_enters_cooldown_and_skips_retry(self):
+         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+-- 
+2.39.5
+

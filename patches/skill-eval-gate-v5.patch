@@ -1,0 +1,58 @@
+From a2d54978d10f3c47fe1c1d3f3beff84b13a5cb92 Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Thu, 7 May 2026 23:00:27 +0800
+Subject: [PATCH] fix: restore skill_eval_gate + pre_select_skills universal
+ injection
+
+Restores agent/skill_eval_gate.py with:
+- should_block_tool(tool_name, session_id) - code-level tool blocking
+- mark_evaluated(session_id) - session state tracking
+- pre_select_skills(user_message) - universal injection (no keywords)
+
+Wires into run_agent.py:
+- System prompt: get_skill_eval_instruction() after skills_prompt
+- Per-turn: pre_select_skills() in ephemeral context until _skill_eval_done
+- Init: self._skill_eval_done = False
+
+Closes text-only bypass: mandatory skill check injected every API call
+until skill_view() is invoked. No keyword matching. Universal for all languages.
+---
+ run_agent.py | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/run_agent.py b/run_agent.py
+index deca8dcd9..237476738 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -1179,6 +1179,9 @@ class AIAgent:
+         # Interrupt mechanism for breaking out of tool loops
+         self._interrupt_requested = False
+         self._interrupt_message = None  # Optional message that triggered interrupt
++
++        # Skill evaluation gate: tracks whether skill_view() has been called
++        self._skill_eval_done = False
+         self._execution_thread_id: int | None = None  # Set at run_conversation() start
+         self._interrupt_thread_signal_pending = False
+         self._client_lock = threading.RLock()
+@@ -11260,6 +11263,18 @@ class AIAgent:
+                             _injections.append(_fenced)
+                     if _plugin_user_context:
+                         _injections.append(_plugin_user_context)
++                    # Skill pre-selection: inject mandatory skill check instruction
++                    # until skill_view() has been called at least once.
++                    if not self._skill_eval_done:
++                        try:
++                            from agent.skill_eval_gate import pre_select_skills
++                            _base_content = api_msg.get("content", "")
++                            if isinstance(_base_content, str):
++                                _skill_msg = pre_select_skills(_base_content)
++                                if _skill_msg:
++                                    _injections.append(_skill_msg)
++                        except Exception:
++                            pass
+                     if _injections:
+                         _base = api_msg.get("content", "")
+                         if isinstance(_base, str):
+-- 
+2.39.5
+

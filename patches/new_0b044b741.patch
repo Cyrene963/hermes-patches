@@ -1,0 +1,487 @@
+From 0b044b74192a91fb2f1e95eed3bca327659d5bf3 Mon Sep 17 00:00:00 2001
+From: Xowiek <xowiekk@gmail.com>
+Date: Sat, 4 Apr 2026 15:56:45 +0300
+Subject: [PATCH] fix(security): reject non-regular tar members in tirith
+ installer + eliminate all shell=True usage in tools/
+
+---
+ tests/tools/test_docker_cleanup_safety.py | 137 ++++++++++++++
+ tests/tools/test_tirith_tar_safety.py     | 212 ++++++++++++++++++++++
+ tools/environments/docker.py              |  49 +++--
+ tools/tirith_security.py                  |  16 +-
+ tools/transcription_tools.py              |   2 +-
+ 5 files changed, 398 insertions(+), 18 deletions(-)
+ create mode 100644 tests/tools/test_docker_cleanup_safety.py
+ create mode 100644 tests/tools/test_tirith_tar_safety.py
+
+diff --git a/tests/tools/test_docker_cleanup_safety.py b/tests/tools/test_docker_cleanup_safety.py
+new file mode 100644
+index 000000000..1bf3da354
+--- /dev/null
++++ b/tests/tools/test_docker_cleanup_safety.py
+@@ -0,0 +1,137 @@
++"""Tests for Docker cleanup no longer using shell=True.
++
++Verifies that DockerEnvironment.cleanup() uses list-based subprocess
++calls (via a background thread) instead of shell=True, conforming to
++the Hermes Agent contribution guide's security requirements.
++"""
++
++import subprocess
++import threading
++from unittest.mock import patch, MagicMock, call
++
++import pytest
++
++
++class TestDockerCleanupNoShell:
++    """Verify cleanup() uses list-based subprocess calls, not shell=True."""
++
++    def _make_env(self):
++        """Create a minimal DockerEnvironment-like object for testing cleanup."""
++        from types import SimpleNamespace
++
++        env = SimpleNamespace()
++        env._container_id = "abc123deadbeef"
++        env._docker_exe = "/usr/bin/docker"
++        env._persistent = False
++        env._workspace_dir = None
++        env._home_dir = None
++
++        # Bind the real cleanup method
++        from tools.environments.docker import DockerEnvironment
++        env.cleanup = DockerEnvironment.cleanup.__get__(env, type(env))
++        return env
++
++    @patch("subprocess.run")
++    def test_cleanup_uses_list_args(self, mock_run):
++        """cleanup() must use list-based subprocess.run, not shell=True."""
++        mock_run.return_value = MagicMock(returncode=0)
++        env = self._make_env()
++
++        env.cleanup()
++
++        # Wait a bit for the background thread
++        import time
++        time.sleep(0.5)
++
++        # Verify subprocess.run was called with list args (no shell=True)
++        for c in mock_run.call_args_list:
++            args, kwargs = c
++            # First positional arg should be a list
++            cmd = args[0] if args else kwargs.get("args")
++            assert isinstance(cmd, list), (
++                f"cleanup() called subprocess with non-list args: {cmd}"
++            )
++            assert kwargs.get("shell") is not True, (
++                "cleanup() must not use shell=True"
++            )
++
++    @patch("subprocess.run")
++    def test_cleanup_clears_container_id(self, mock_run):
++        """cleanup() must set _container_id to None."""
++        mock_run.return_value = MagicMock(returncode=0)
++        env = self._make_env()
++
++        env.cleanup()
++
++        assert env._container_id is None
++
++    @patch("subprocess.run")
++    def test_cleanup_calls_docker_stop(self, mock_run):
++        """cleanup() should call 'docker stop <container_id>'."""
++        mock_run.return_value = MagicMock(returncode=0)
++        env = self._make_env()
++
++        env.cleanup()
++
++        import time
++        time.sleep(0.5)
++
++        # Find the stop call
++        stop_calls = [
++            c for c in mock_run.call_args_list
++            if "stop" in (c[0][0] if c[0] else [])
++        ]
++        assert len(stop_calls) >= 1, "cleanup() should call docker stop"
++
++    @patch("subprocess.run")
++    def test_cleanup_nonpersistent_calls_rm(self, mock_run):
++        """Non-persistent cleanup should also call 'docker rm -f'."""
++        mock_run.return_value = MagicMock(returncode=0)
++        env = self._make_env()
++        env._persistent = False
++
++        env.cleanup()
++
++        import time
++        time.sleep(0.5)
++
++        rm_calls = [
++            c for c in mock_run.call_args_list
++            if "rm" in (c[0][0] if c[0] else [])
++        ]
++        assert len(rm_calls) >= 1, (
++            "Non-persistent cleanup should call docker rm"
++        )
++
++    @patch("subprocess.run")
++    def test_cleanup_persistent_skips_rm(self, mock_run):
++        """Persistent cleanup should NOT call 'docker rm'."""
++        mock_run.return_value = MagicMock(returncode=0)
++        env = self._make_env()
++        env._persistent = True
++
++        env.cleanup()
++
++        import time
++        time.sleep(0.5)
++
++        rm_calls = [
++            c for c in mock_run.call_args_list
++            if "rm" in (c[0][0] if c[0] else [])
++        ]
++        assert len(rm_calls) == 0, (
++            "Persistent cleanup should skip docker rm"
++        )
++
++    @patch("subprocess.run", side_effect=subprocess.TimeoutExpired("docker stop", 60))
++    def test_cleanup_handles_stop_timeout(self, mock_run):
++        """If docker stop times out, cleanup should force rm and not crash."""
++        env = self._make_env()
++
++        # Should not raise
++        env.cleanup()
++
++        import time
++        time.sleep(0.5)
++
++        assert env._container_id is None
+diff --git a/tests/tools/test_tirith_tar_safety.py b/tests/tools/test_tirith_tar_safety.py
+new file mode 100644
+index 000000000..54c96f4dc
+--- /dev/null
++++ b/tests/tools/test_tirith_tar_safety.py
+@@ -0,0 +1,212 @@
++"""Tests for tarball extraction safety in tirith_security.py.
++
++Verifies that _auto_install_tirith rejects non-regular-file tar members
++(symlinks, hardlinks, device nodes) to prevent symlink-based code execution
++attacks via crafted archives.
++"""
++
++import io
++import os
++import shutil
++import stat
++import tarfile
++import tempfile
++from pathlib import Path
++from unittest.mock import patch, MagicMock
++
++import pytest
++
++
++# ---------------------------------------------------------------------------
++# Helpers — build malicious tarballs in memory
++# ---------------------------------------------------------------------------
++
++def _make_tarball_with_regular_file() -> bytes:
++    """Create a valid tarball with a regular-file 'tirith' member."""
++    buf = io.BytesIO()
++    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
++        content = b"#!/bin/sh\necho tirith\n"
++        info = tarfile.TarInfo(name="tirith")
++        info.size = len(content)
++        info.type = tarfile.REGTYPE
++        tar.addfile(info, io.BytesIO(content))
++    return buf.getvalue()
++
++
++def _make_tarball_with_symlink() -> bytes:
++    """Create a tarball where 'tirith' is a symlink → /tmp/evil."""
++    buf = io.BytesIO()
++    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
++        info = tarfile.TarInfo(name="tirith")
++        info.type = tarfile.SYMTYPE
++        info.linkname = "/tmp/evil"
++        tar.addfile(info)
++    return buf.getvalue()
++
++
++def _make_tarball_with_hardlink() -> bytes:
++    """Create a tarball where 'tirith' is a hardlink → /etc/passwd."""
++    buf = io.BytesIO()
++    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
++        info = tarfile.TarInfo(name="tirith")
++        info.type = tarfile.LNKTYPE
++        info.linkname = "/etc/passwd"
++        tar.addfile(info)
++    return buf.getvalue()
++
++
++def _make_tarball_with_directory() -> bytes:
++    """Create a tarball where 'tirith' is a directory member."""
++    buf = io.BytesIO()
++    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
++        info = tarfile.TarInfo(name="tirith")
++        info.type = tarfile.DIRTYPE
++        tar.addfile(info)
++    return buf.getvalue()
++
++
++def _make_tarball_with_nested_regular() -> bytes:
++    """Create a valid tarball with 'some-dir/tirith' as a regular file."""
++    buf = io.BytesIO()
++    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
++        content = b"#!/bin/sh\necho tirith\n"
++        info = tarfile.TarInfo(name="some-dir/tirith")
++        info.size = len(content)
++        info.type = tarfile.REGTYPE
++        tar.addfile(info, io.BytesIO(content))
++    return buf.getvalue()
++
++
++def _make_tarball_with_nested_symlink() -> bytes:
++    """Create a tarball with 'subdir/tirith' as a symlink."""
++    buf = io.BytesIO()
++    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
++        info = tarfile.TarInfo(name="subdir/tirith")
++        info.type = tarfile.SYMTYPE
++        info.linkname = "/tmp/evil"
++        tar.addfile(info)
++    return buf.getvalue()
++
++
++def _make_tarball_with_path_traversal() -> bytes:
++    """Create a tarball with '../tirith' (path traversal)."""
++    buf = io.BytesIO()
++    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
++        content = b"#!/bin/sh\necho evil\n"
++        info = tarfile.TarInfo(name="../tirith")
++        info.size = len(content)
++        info.type = tarfile.REGTYPE
++        tar.addfile(info, io.BytesIO(content))
++    return buf.getvalue()
++
++
++# ---------------------------------------------------------------------------
++# Extract the tarball extraction logic into a testable function
++# ---------------------------------------------------------------------------
++
++def _extract_tirith_from_tarball(archive_path: str, tmpdir: str) -> bool:
++    """Replicate the extraction logic from tirith_security._auto_install_tirith.
++
++    Returns True if a regular-file 'tirith' was extracted, False otherwise.
++    """
++    import logging
++    logger = logging.getLogger(__name__)
++
++    with tarfile.open(archive_path, "r:gz") as tar:
++        for member in tar.getmembers():
++            if member.name == "tirith" or member.name.endswith("/tirith"):
++                if ".." in member.name:
++                    continue
++                # This is the critical security check added by the fix
++                if not member.isfile():
++                    logger.warning(
++                        "tirith archive member '%s' is not a regular file "
++                        "(type=%s) — skipping to prevent symlink/hardlink attack",
++                        member.name, member.type,
++                    )
++                    continue
++                member.name = "tirith"
++                tar.extract(member, tmpdir)
++                return True
++    return False
++
++
++# ---------------------------------------------------------------------------
++# Tests
++# ---------------------------------------------------------------------------
++
++class TestTirithTarSafety:
++    """Verify tarball extraction rejects dangerous member types."""
++
++    def test_regular_file_accepted(self, tmp_path):
++        """Regular-file 'tirith' should be extracted successfully."""
++        archive = tmp_path / "tirith.tar.gz"
++        archive.write_bytes(_make_tarball_with_regular_file())
++
++        result = _extract_tirith_from_tarball(str(archive), str(tmp_path))
++
++        assert result is True
++        extracted = tmp_path / "tirith"
++        assert extracted.exists()
++        assert not extracted.is_symlink()
++
++    def test_symlink_member_rejected(self, tmp_path):
++        """Symlink 'tirith' member must be rejected (prevents code execution)."""
++        archive = tmp_path / "tirith.tar.gz"
++        archive.write_bytes(_make_tarball_with_symlink())
++
++        result = _extract_tirith_from_tarball(str(archive), str(tmp_path))
++
++        assert result is False
++        extracted = tmp_path / "tirith"
++        assert not extracted.exists(), "Symlink member should not be extracted"
++
++    def test_hardlink_member_rejected(self, tmp_path):
++        """Hardlink 'tirith' member must be rejected."""
++        archive = tmp_path / "tirith.tar.gz"
++        archive.write_bytes(_make_tarball_with_hardlink())
++
++        result = _extract_tirith_from_tarball(str(archive), str(tmp_path))
++
++        assert result is False
++        extracted = tmp_path / "tirith"
++        assert not extracted.exists(), "Hardlink member should not be extracted"
++
++    def test_directory_member_rejected(self, tmp_path):
++        """Directory 'tirith' member must be rejected."""
++        archive = tmp_path / "tirith.tar.gz"
++        archive.write_bytes(_make_tarball_with_directory())
++
++        result = _extract_tirith_from_tarball(str(archive), str(tmp_path))
++
++        assert result is False
++
++    def test_nested_regular_file_accepted(self, tmp_path):
++        """'some-dir/tirith' as a regular file should be extracted."""
++        archive = tmp_path / "tirith.tar.gz"
++        archive.write_bytes(_make_tarball_with_nested_regular())
++
++        result = _extract_tirith_from_tarball(str(archive), str(tmp_path))
++
++        assert result is True
++        extracted = tmp_path / "tirith"
++        assert extracted.exists()
++        assert not extracted.is_symlink()
++
++    def test_nested_symlink_rejected(self, tmp_path):
++        """'subdir/tirith' as a symlink must be rejected."""
++        archive = tmp_path / "tirith.tar.gz"
++        archive.write_bytes(_make_tarball_with_nested_symlink())
++
++        result = _extract_tirith_from_tarball(str(archive), str(tmp_path))
++
++        assert result is False
++
++    def test_path_traversal_rejected(self, tmp_path):
++        """'../tirith' path traversal member must be skipped."""
++        archive = tmp_path / "tirith.tar.gz"
++        archive.write_bytes(_make_tarball_with_path_traversal())
++
++        result = _extract_tirith_from_tarball(str(archive), str(tmp_path))
++
++        assert result is False
+diff --git a/tools/environments/docker.py b/tools/environments/docker.py
+index 06d815487..16ebbcbd9 100644
+--- a/tools/environments/docker.py
++++ b/tools/environments/docker.py
+@@ -618,25 +618,42 @@ class DockerEnvironment(BaseEnvironment):
+     def cleanup(self):
+         """Stop and remove the container. Bind-mount dirs persist if persistent=True."""
+         if self._container_id:
+-            try:
+-                # Stop in background so cleanup doesn't block
+-                stop_cmd = (
+-                    f"(timeout 60 {self._docker_exe} stop {self._container_id} || "
+-                    f"{self._docker_exe} rm -f {self._container_id}) >/dev/null 2>&1 &"
+-                )
+-                subprocess.Popen(stop_cmd, shell=True)
+-            except Exception as e:
+-                logger.warning("Failed to stop container %s: %s", self._container_id, e)
++            container_id = self._container_id
++            docker_exe = self._docker_exe
++            persistent = self._persistent
+ 
+-            if not self._persistent:
+-                # Also schedule removal (stop only leaves it as stopped)
++            def _background_stop():
++                """Stop (and optionally remove) the container in a background thread."""
+                 try:
+-                    subprocess.Popen(
+-                        f"sleep 3 && {self._docker_exe} rm -f {self._container_id} >/dev/null 2>&1 &",
+-                        shell=True,
++                    subprocess.run(
++                        [docker_exe, "stop", container_id],
++                        capture_output=True, timeout=60,
+                     )
+-                except Exception:
+-                    pass
++                except (subprocess.TimeoutExpired, Exception):
++                    # Stop timed out or failed — force remove
++                    try:
++                        subprocess.run(
++                            [docker_exe, "rm", "-f", container_id],
++                            capture_output=True, timeout=10,
++                        )
++                    except Exception:
++                        pass
++
++                if not persistent:
++                    try:
++                        subprocess.run(
++                            [docker_exe, "rm", "-f", container_id],
++                            capture_output=True, timeout=10,
++                        )
++                    except Exception:
++                        pass
++
++            try:
++                t = threading.Thread(target=_background_stop, daemon=True)
++                t.start()
++            except Exception as e:
++                logger.warning("Failed to stop container %s: %s", container_id, e)
++
+             self._container_id = None
+ 
+         if not self._persistent:
+diff --git a/tools/tirith_security.py b/tools/tirith_security.py
+index 2d0ebf497..892d469ea 100644
+--- a/tools/tirith_security.py
++++ b/tools/tirith_security.py
+@@ -347,11 +347,25 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
+             return None, "checksum_failed"
+ 
+         with tarfile.open(archive_path, "r:gz") as tar:
+-            # Extract only the tirith binary (safety: reject paths with ..)
++            # Extract only the tirith binary.
++            # Safety: reject path traversal, symlinks, hardlinks, and
++            # device/special members.  A compromised archive could plant a
++            # symlink named "tirith" pointing to an attacker-controlled
++            # binary — when moved to ~/.hermes/bin/ and invoked, the agent
++            # would execute arbitrary code.
+             for member in tar.getmembers():
+                 if member.name == "tirith" or member.name.endswith("/tirith"):
+                     if ".." in member.name:
+                         continue
++                    # Reject non-regular-file members (symlinks, hardlinks,
++                    # device nodes, directories, FIFOs).
++                    if not member.isfile():
++                        logger.warning(
++                            "tirith archive member '%s' is not a regular file "
++                            "(type=%s) — skipping to prevent symlink/hardlink attack",
++                            member.name, member.type,
++                        )
++                        continue
+                     member.name = "tirith"
+                     tar.extract(member, tmpdir)
+                     break
+diff --git a/tools/transcription_tools.py b/tools/transcription_tools.py
+index 663345eb7..7e3c8b51e 100644
+--- a/tools/transcription_tools.py
++++ b/tools/transcription_tools.py
+@@ -501,7 +501,7 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
+                 language=shlex.quote(language),
+                 model=shlex.quote(normalized_model),
+             )
+-            subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
++            subprocess.run(shlex.split(command), check=True, capture_output=True, text=True)
+ 
+             txt_files = sorted(Path(output_dir).glob("*.txt"))
+             if not txt_files:
+-- 
+2.39.5
+

@@ -1,0 +1,216 @@
+From 34e45a9e5c46d231ede72588b7d45a671da5eec5 Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Thu, 7 May 2026 22:31:46 +0800
+Subject: [PATCH] index on merge-community-prs: fc9691041 fix(agent): redact
+ secrets from assistant output
+
+---
+ agent/skill_eval_gate.py | 87 ++++++++++++++++++++++++++++++++++++++--
+ run_agent.py             | 78 ++++++++++++++++++++++++++++++++++-
+ 2 files changed, 161 insertions(+), 4 deletions(-)
+
+diff --git a/agent/skill_eval_gate.py b/agent/skill_eval_gate.py
+index 11a6fdd14..8492b70a2 100644
+--- a/agent/skill_eval_gate.py
++++ b/agent/skill_eval_gate.py
+@@ -18,6 +18,7 @@ language-agnostic mechanism that works for any task in any language.
+ """
+ from __future__ import annotations
+ import logging
++from typing import Dict
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -54,17 +55,97 @@ _READ_ONLY_TOOLS = frozenset({
+     "cronjob",          # Cron management is OK
+ })
+ 
++# Per-session tracking: which sessions have completed skill evaluation
++# Key: session_id (or task_id as fallback), Value: True if evaluated
++_evaluated_sessions: Dict[str, bool] = {}
++
+ 
+ def get_skill_eval_instruction() -> str:
+     """Return the mandatory instruction to inject into system prompt."""
+     return SKILL_EVAL_INSTRUCTION
+ 
+ 
+-def should_block_tool(tool_name: str) -> bool:
+-    """Check if a tool should be blocked pending skill evaluation."""
+-    return tool_name not in _READ_ONLY_TOOLS
++def should_block_tool(tool_name: str, session_id: str = "") -> bool:
++    """Check if a tool should be blocked pending skill evaluation.
++
++    Returns True if the tool call should be blocked. Returns False if:
++    - The tool is read-only (allowed before evaluation)
++    - The session has already completed skill evaluation
++    - No session tracking is available (fail-open for safety)
++    """
++    # Read-only tools are always allowed
++    if tool_name in _READ_ONLY_TOOLS:
++        return False
++
++    # No session ID — can't track, fail-open
++    if not session_id:
++        return False
++
++    # Already evaluated this session — allow everything
++    if _evaluated_sessions.get(session_id, False):
++        return False
++
++    # First action tool call in this session — block it
++    logger.info(
++        "skill_eval_gate: blocking '%s' for session '%s' — no skill_view() called yet",
++        tool_name, session_id,
++    )
++    return True
++
++
++def mark_evaluated(session_id: str) -> None:
++    """Mark a session as having completed skill evaluation.
++
++    Called when the agent calls skill_view() for the first time.
++    """
++    if session_id and not _evaluated_sessions.get(session_id, False):
++        _evaluated_sessions[session_id] = True
++        logger.info("skill_eval_gate: session '%s' now marked as evaluated", session_id)
+ 
+ 
+ def is_skill_view_call(tool_name: str) -> bool:
+     """Check if this tool call satisfies the skill evaluation requirement."""
+     return tool_name == "skill_view"
++
++
++def reset_session(session_id: str) -> None:
++    """Reset evaluation state for a session (e.g., on new conversation)."""
++    _evaluated_sessions.pop(session_id, None)
++
++
++# ─── Semantic Skill Pre-Selection ──────────────────────────────────
++# This replaces keyword matching with universal injection.
++# Before the model generates its first response, we inject a mandatory
++# instruction forcing it to evaluate skills.
++
++def pre_select_skills(user_message: str, threshold: float = 0.5) -> str:
++    """Pre-flight skill evaluation enforcement.
++
++    Instead of trying to semantically match skills (which fails for Chinese
++    text due to tokenization issues), this function ALWAYS injects a mandatory
++    skill evaluation instruction on the model's first response attempt.
++
++    The model already sees all skill names and descriptions in its system
++    prompt (via build_skills_system_prompt). This function simply forces it
++    to ACT on that information before generating text.
++
++    This is NOT keyword matching. It's a universal enforcement mechanism
++    that works for any language, any task.
++
++    Args:
++        user_message: The user's input text
++        threshold: Unused (kept for API compatibility)
++
++    Returns:
++        Mandatory instruction string, or empty string if message is trivial
++    """
++    if not user_message or len(user_message.strip()) < 3:
++        return ""
++
++    return (
++        "[SYSTEM] MANDATORY SKILL CHECK: Review the skill index in your "
++        "system prompt. If ANY skill description matches this task, call "
++        "skill_view() for it BEFORE generating any text response. If no "
++        "skills match, call skill_view(name='hermes-agent') as minimal "
++        "acknowledgment and proceed. Do NOT skip this step."
++    )
+diff --git a/run_agent.py b/run_agent.py
+index deca8dcd9..449380aec 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -14087,7 +14087,83 @@ class AIAgent:
+                         messages.pop()
+ 
+                     messages.append(final_msg)
+-                    
++
++                    # ── Goal continuation (Codex /goal equivalent) ────────
++                    # If there's an active goal for this session and the model
++                    # didn't call update_goal to mark it complete, inject a
++                    # continuation prompt and keep going. This is the Runtime-
++                    # driven continuation that makes goals persistent.
++                    _goal_continued = False
++                    try:
++                        if (self.session_id
++                                and 'create_goal' in getattr(self, 'valid_tool_names', set())):
++                            from hermes_state import SessionDB as _GoalDB
++                            _goal_db = _GoalDB()
++                            _active_goal = None
++                            # Find active goal for this session
++                            with _goal_db._lock:
++                                rows = _goal_db._conn.execute(
++                                    "SELECT * FROM thread_goals WHERE session_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
++                                    (self.session_id,)
++                                ).fetchall()
++                                if rows:
++                                    _active_goal = dict(rows[0])
++
++                            if _active_goal:
++                                # Anti-laziness: did this turn have any tool calls?
++                                _turn_tool_calls = sum(
++                                    1 for m in messages[-10:]
++                                    if isinstance(m, dict) and m.get("role") == "assistant" and m.get("tool_calls")
++                                )
++                                if _turn_tool_calls == 0 and getattr(self, '_goal_continuation_count', 0) > 0:
++                                    # Model produced text without tools in a continuation turn
++                                    # — suppress further continuation
++                                    logger.info("Goal continuation suppressed: no tool calls in continuation turn")
++                                    self._goal_suppressed = True
++                                else:
++                                    # Check budget
++                                    _goal_tokens = _active_goal.get('tokens_used', 0)
++                                    _goal_budget = _active_goal.get('token_budget')
++                                    _goal_time = _active_goal.get('time_used_seconds', 0)
++
++                                    if _goal_budget and _goal_tokens >= _goal_budget:
++                                        # Budget exhausted — mark budget_limited
++                                        _goal_db.update_goal(_active_goal['id'], status='budget_limited')
++                                        logger.info("Goal marked budget_limited: %d/%d tokens", _goal_tokens, _goal_budget)
++                                    else:
++                                        # Continue toward goal
++                                        _continuation_count = getattr(self, '_goal_continuation_count', 0)
++                                        if _continuation_count < 50:  # Safety limit
++                                            self._goal_continuation_count = _continuation_count + 1
++                                            _obj = _active_goal.get('objective', 'the active goal')
++                                            _budget_info = f"Tokens: {_goal_tokens}/{_goal_budget}" if _goal_budget else f"Tokens: {_goal_tokens} (no limit)"
++                                            _wrap_up = ""
++                                            if _goal_budget and _goal_tokens >= _goal_budget * 0.9:
++                                                _wrap_up = "\n\nWRAP-UP: You are near the token budget limit. Finish current work and summarize progress."
++
++                                            continuation_msg = {
++                                                "role": "user",
++                                                "content": (
++                                                    f"Continue working toward the active goal.\n\n"
++                                                    f"Objective: {_obj}\n"
++                                                    f"{_budget_info}\n"
++                                                    f"Time: {_goal_time}s elapsed\n\n"
++                                                    f"Avoid repeating work already done. Choose the next concrete action.\n"
++                                                    f"Before deciding the goal is achieved, call update_goal with status 'complete'.\n"
++                                                    f"Do NOT mark complete merely because you are stopping work.{_wrap_up}"
++                                                ),
++                                            }
++                                            messages.append(continuation_msg)
++                                            self._session_messages = messages
++                                            self._save_session_log(messages)
++                                            _turn_exit_reason = f"goal_continuation(obj={_obj[:40]})"
++                                            _goal_continued = True
++                    except Exception as _goal_err:
++                        logger.debug("Goal continuation check failed (non-fatal): %s", _goal_err)
++
++                    if _goal_continued:
++                        continue
++
+                     _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
+                     if not self.quiet_mode:
+                         self._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
+-- 
+2.39.5
+

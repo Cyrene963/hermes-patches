@@ -1,0 +1,62 @@
+From 1181fa76edf7c8927963535cbe2f3c6fe2737a30 Mon Sep 17 00:00:00 2001
+From: failsafesecurity <failsafesecurity@users.noreply.github.com>
+Date: Thu, 2 Apr 2026 18:26:05 -0700
+Subject: [PATCH] fix(security): validate media file paths to prevent arbitrary
+ file read [HIGH]
+
+Previously, `extract_media()` parsed MEDIA:<path> tags from LLM responses
+and passed extracted paths directly to platform send methods without any
+validation. A prompt injection attack could cause the LLM to emit
+MEDIA:/etc/passwd or similar, exfiltrating any file readable by the
+process.
+
+Add `_is_safe_media_path()` which resolves the path and verifies it
+resides within ~/.hermes/media_cache before allowing delivery. Paths
+outside the cache directory are silently dropped.
+
+Reported-by: FailSafe Security Researcher
+Co-Authored-By: Joshua Medvinsky <joshua-medvinsky@users.noreply.github.com>
+---
+ gateway/platforms/base.py | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
+index 26c0c430c..39bd1efb5 100644
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -1913,6 +1913,23 @@ class BasePlatformAdapter(ABC):
+             text = f"{caption}\n{text}"
+         return await self.send(chat_id=chat_id, content=text, reply_to=reply_to)
+ 
++    @staticmethod
++    def _is_safe_media_path(path: str) -> bool:
++        """Validate that a MEDIA: path is within the Hermes cache directory.
++
++        Rejects absolute paths, parent-directory traversal, and paths outside
++        the designated media cache to prevent arbitrary file reads via prompt
++        injection.
++        """
++        cache_dir = os.path.realpath(os.path.join(
++            os.path.expanduser("~"), ".hermes", "media_cache"
++        ))
++        try:
++            resolved = os.path.realpath(os.path.expanduser(path))
++        except (ValueError, OSError):
++            return False
++        return resolved.startswith(cache_dir + os.sep) or resolved == cache_dir
++
+     @staticmethod
+     def extract_media(content: str) -> Tuple[List[Tuple[str, bool]], str]:
+         """
+@@ -1945,7 +1962,7 @@ class BasePlatformAdapter(ABC):
+             if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
+                 path = path[1:-1].strip()
+             path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
+-            if path:
++            if path and _is_safe_media_path(path):
+                 media.append((os.path.expanduser(path), has_voice_tag))
+ 
+         # Remove MEDIA tags from content (including surrounding quote/backtick wrappers)
+-- 
+2.39.5
+
