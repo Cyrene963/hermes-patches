@@ -1,57 +1,388 @@
-From a2d54978d10f3c47fe1c1d3f3beff84b13a5cb92 Mon Sep 17 00:00:00 2001
+From 7db6630889c437f244986f7d3c4da054369d3f53 Mon Sep 17 00:00:00 2001
 From: Cyrene963 <Nitrogen@users.noreply.github.com>
-Date: Thu, 7 May 2026 23:00:27 +0800
-Subject: [PATCH] fix: restore skill_eval_gate + pre_select_skills universal
- injection
+Date: Thu, 7 May 2026 22:53:41 +0800
+Subject: [PATCH 1/2] =?UTF-8?q?feat(goals):=20add=20Codex=20/goal=20enhanc?=
+ =?UTF-8?q?ements=20=E2=80=94=20token=20budget,=20anti-laziness,=20wrap-up?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
-Restores agent/skill_eval_gate.py with:
-- should_block_tool(tool_name, session_id) - code-level tool blocking
-- mark_evaluated(session_id) - session state tracking
-- pre_select_skills(user_message) - universal injection (no keywords)
+Add three key mechanisms inspired by Codex CLI /goal:
 
-Wires into run_agent.py:
-- System prompt: get_skill_eval_instruction() after skills_prompt
-- Per-turn: pre_select_skills() in ephemeral context until _skill_eval_done
-- Init: self._skill_eval_done = False
+1. Token budget tracking: optional token_budget, tokens_used, time_used
+2. Anti-laziness: 0 tool calls in continuation turns → auto-pause after 3
+3. Wrap-up steering: 90% budget consumed → graceful finish prompt
 
-Closes text-only bypass: mandatory skill check injected every API call
-until skill_view() is invoked. No keyword matching. Universal for all languages.
+GoalState gains 6 new fields. evaluate_after_turn accepts tool_calls_count
+and tokens_used. All 26 existing tests pass. Backward compatible.
 ---
- run_agent.py | 15 +++++++++++++++
- 1 file changed, 15 insertions(+)
+ hermes_cli/goals.py | 126 +++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 119 insertions(+), 7 deletions(-)
 
-diff --git a/run_agent.py b/run_agent.py
-index deca8dcd9..237476738 100644
---- a/run_agent.py
-+++ b/run_agent.py
-@@ -1179,6 +1179,9 @@ class AIAgent:
-         # Interrupt mechanism for breaking out of tool loops
-         self._interrupt_requested = False
-         self._interrupt_message = None  # Optional message that triggered interrupt
+diff --git a/hermes_cli/goals.py b/hermes_cli/goals.py
+index 0f0f3abd9..b35114de9 100644
+--- a/hermes_cli/goals.py
++++ b/hermes_cli/goals.py
+@@ -47,14 +47,20 @@ DEFAULT_MAX_TURNS = 20
+ DEFAULT_JUDGE_TIMEOUT = 30.0
+ # Cap how much of the last response + recent messages we send to the judge.
+ _JUDGE_RESPONSE_SNIPPET_CHARS = 4000
++# Anti-laziness: suppress continuation after N consecutive turns with 0 tool calls.
++MAX_IDLE_TURNS = 3
++# Wrap-up steering: inject budget warning when this fraction is consumed.
++WRAP_UP_FRACTION = 0.9
+ 
+ 
+ CONTINUATION_PROMPT_TEMPLATE = (
+     "[Continuing toward your standing goal]\n"
+     "Goal: {goal}\n\n"
++    "{budget_info}"
+     "Continue working toward this goal. Take the next concrete step. "
+     "If you believe the goal is complete, state so explicitly and stop. "
+     "If you are blocked and need input from the user, say so clearly and stop."
++    "{wrap_up}"
+ )
+ 
+ 
+@@ -91,7 +97,7 @@ class GoalState:
+     """Serializable goal state stored per session."""
+ 
+     goal: str
+-    status: str = "active"          # active | paused | done | cleared
++    status: str = "active"          # active | paused | done | cleared | budget_limited
+     turns_used: int = 0
+     max_turns: int = DEFAULT_MAX_TURNS
+     created_at: float = 0.0
+@@ -99,6 +105,13 @@ class GoalState:
+     last_verdict: Optional[str] = None        # "done" | "continue" | "skipped"
+     last_reason: Optional[str] = None
+     paused_reason: Optional[str] = None       # why we auto-paused (budget, etc.)
++    # Codex /goal enhancements
++    token_budget: Optional[int] = None        # token limit (None = unlimited)
++    tokens_used: int = 0                      # approximate tokens consumed
++    time_used_seconds: float = 0.0            # wall-clock time
++    tool_calls_in_turn: int = 0               # tool calls in the last turn
++    consecutive_idle_turns: int = 0           # turns with 0 tool calls in a row
++    goal_suppressed: bool = False             # anti-laziness: stop continuation
+ 
+     def to_json(self) -> str:
+         return json.dumps(asdict(self), ensure_ascii=False)
+@@ -116,6 +129,12 @@ class GoalState:
+             last_verdict=data.get("last_verdict"),
+             last_reason=data.get("last_reason"),
+             paused_reason=data.get("paused_reason"),
++            token_budget=data.get("token_budget"),
++            tokens_used=int(data.get("tokens_used", 0) or 0),
++            time_used_seconds=float(data.get("time_used_seconds", 0.0) or 0.0),
++            tool_calls_in_turn=int(data.get("tool_calls_in_turn", 0) or 0),
++            consecutive_idle_turns=int(data.get("consecutive_idle_turns", 0) or 0),
++            goal_suppressed=bool(data.get("goal_suppressed", False)),
+         )
+ 
+ 
+@@ -376,18 +395,27 @@ class GoalManager:
+         if s is None or s.status in ("cleared",):
+             return "No active goal. Set one with /goal <text>."
+         turns = f"{s.turns_used}/{s.max_turns} turns"
++        tokens = ""
++        if s.token_budget:
++            tokens = f", {s.tokens_used}/{s.token_budget} tokens"
++        elif s.tokens_used > 0:
++            tokens = f", {s.tokens_used} tokens"
++        time_info = f", {s.time_used_seconds:.0f}s" if s.time_used_seconds > 0 else ""
+         if s.status == "active":
+-            return f"⊙ Goal (active, {turns}): {s.goal}"
++            idle_warn = f" ⚠ idle×{s.consecutive_idle_turns}" if s.consecutive_idle_turns > 0 else ""
++            return f"⊙ Goal (active, {turns}{tokens}{time_info}{idle_warn}): {s.goal}"
+         if s.status == "paused":
+             extra = f" — {s.paused_reason}" if s.paused_reason else ""
+-            return f"⏸ Goal (paused, {turns}{extra}): {s.goal}"
++            return f"⏸ Goal (paused, {turns}{tokens}{time_info}{extra}): {s.goal}"
+         if s.status == "done":
+-            return f"✓ Goal done ({turns}): {s.goal}"
+-        return f"Goal ({s.status}, {turns}): {s.goal}"
++            return f"✓ Goal done ({turns}{tokens}{time_info}): {s.goal}"
++        if s.status == "budget_limited":
++            return f"⏸ Goal budget-limited ({turns}{tokens}{time_info}): {s.goal}"
++        return f"Goal ({s.status}, {turns}{tokens}{time_info}): {s.goal}"
+ 
+     # --- mutation -----------------------------------------------------
+ 
+-    def set(self, goal: str, *, max_turns: Optional[int] = None) -> GoalState:
++    def set(self, goal: str, *, max_turns: Optional[int] = None, token_budget: Optional[int] = None) -> GoalState:
+         goal = (goal or "").strip()
+         if not goal:
+             raise ValueError("goal text is empty")
+@@ -397,6 +425,7 @@ class GoalManager:
+             turns_used=0,
+             max_turns=int(max_turns) if max_turns else self.default_max_turns,
+             created_at=time.time(),
++            token_budget=token_budget,
+             last_turn_at=0.0,
+         )
+         self._state = state
+@@ -443,6 +472,8 @@ class GoalManager:
+         last_response: str,
+         *,
+         user_initiated: bool = True,
++        tool_calls_count: int = 0,
++        tokens_used: int = 0,
+     ) -> Dict[str, Any]:
+         """Run the judge and update state. Return a decision dict.
+ 
+@@ -450,6 +481,12 @@ class GoalManager:
+         continuation prompt we fed ourselves (False). Both increment
+         ``turns_used`` because both consume model budget.
+ 
++        ``tool_calls_count`` is the number of tool calls the model made in
++        this turn. Used for anti-laziness detection.
 +
-+        # Skill evaluation gate: tracks whether skill_view() has been called
-+        self._skill_eval_done = False
-         self._execution_thread_id: int | None = None  # Set at run_conversation() start
-         self._interrupt_thread_signal_pending = False
-         self._client_lock = threading.RLock()
-@@ -11260,6 +11263,18 @@ class AIAgent:
-                             _injections.append(_fenced)
-                     if _plugin_user_context:
-                         _injections.append(_plugin_user_context)
-+                    # Skill pre-selection: inject mandatory skill check instruction
-+                    # until skill_view() has been called at least once.
-+                    if not self._skill_eval_done:
-+                        try:
-+                            from agent.skill_eval_gate import pre_select_skills
-+                            _base_content = api_msg.get("content", "")
-+                            if isinstance(_base_content, str):
-+                                _skill_msg = pre_select_skills(_base_content)
-+                                if _skill_msg:
-+                                    _injections.append(_skill_msg)
-+                        except Exception:
-+                            pass
-                     if _injections:
-                         _base = api_msg.get("content", "")
-                         if isinstance(_base, str):
++        ``tokens_used`` is the approximate token count for this turn. Used
++        for token budget tracking.
++
+         Decision keys:
+           - ``status``: current goal status after update
+           - ``should_continue``: bool — caller should fire another turn
+@@ -473,6 +510,56 @@ class GoalManager:
+         state.turns_used += 1
+         state.last_turn_at = time.time()
+ 
++        # ── Token budget tracking (Codex /goal) ──────────────────────
++        if tokens_used > 0:
++            state.tokens_used += tokens_used
++        if state.created_at > 0:
++            state.time_used_seconds = time.time() - state.created_at
++        state.tool_calls_in_turn = tool_calls_count
++
++        # ── Anti-laziness detection (Codex /goal) ────────────────────
++        # If this is a continuation turn (not user-initiated) and the model
++        # made zero tool calls, it's "idle" — suppress further continuation.
++        if not user_initiated and tool_calls_count == 0:
++            state.consecutive_idle_turns += 1
++            if state.consecutive_idle_turns >= MAX_IDLE_TURNS:
++                state.goal_suppressed = True
++                save_goal(self.session_id, state)
++                return {
++                    "status": "paused",
++                    "should_continue": False,
++                    "continuation_prompt": None,
++                    "verdict": "continue",
++                    "reason": "anti-laziness: no tool calls for consecutive turns",
++                    "message": (
++                        f"⏸ Goal paused — no progress for {state.consecutive_idle_turns} turns. "
++                        "The agent made no tool calls in continuation turns. "
++                        "Use /goal resume to retry, or /goal clear to stop."
++                    ),
++                }
++        else:
++            # Reset idle counter on productive turn
++            state.consecutive_idle_turns = 0
++            state.goal_suppressed = False
++
++        # ── Token budget check (Codex /goal) ─────────────────────────
++        if state.token_budget and state.tokens_used >= state.token_budget:
++            state.status = "budget_limited"
++            save_goal(self.session_id, state)
++            return {
++                "status": "budget_limited",
++                "should_continue": False,
++                "continuation_prompt": None,
++                "verdict": "continue",
++                "reason": f"token budget exhausted ({state.tokens_used}/{state.token_budget})",
++                "message": (
++                    f"⏸ Goal paused — token budget exhausted "
++                    f"({state.tokens_used}/{state.token_budget} tokens, "
++                    f"{state.time_used_seconds:.0f}s elapsed). "
++                    "Use /goal resume to continue with a new budget, or /goal clear to stop."
++                ),
++            }
++
+         verdict, reason = judge_goal(state.goal, last_response)
+         state.last_verdict = verdict
+         state.last_reason = reason
+@@ -520,7 +607,30 @@ class GoalManager:
+     def next_continuation_prompt(self) -> Optional[str]:
+         if not self._state or self._state.status != "active":
+             return None
+-        return CONTINUATION_PROMPT_TEMPLATE.format(goal=self._state.goal)
++        s = self._state
++        # Build budget info string
++        budget_info = ""
++        if s.token_budget:
++            remaining = max(0, s.token_budget - s.tokens_used)
++            budget_info = (
++                f"Budget: {s.tokens_used}/{s.token_budget} tokens used, "
++                f"{remaining} remaining, {s.time_used_seconds:.0f}s elapsed\n\n"
++            )
++        else:
++            budget_info = (
++                f"Tokens used: {s.tokens_used}, "
++                f"Time: {s.time_used_seconds:.0f}s elapsed\n\n"
++            )
++        # Wrap-up steering when near budget limit
++        wrap_up = ""
++        if s.token_budget and s.tokens_used >= s.token_budget * WRAP_UP_FRACTION:
++            wrap_up = (
++                "\n\nWRAP-UP: You are near the token budget limit. "
++                "Finish current work, summarize progress, and stop."
++            )
++        return CONTINUATION_PROMPT_TEMPLATE.format(
++            goal=s.goal, budget_info=budget_info, wrap_up=wrap_up,
++        )
+ 
+ 
+ __all__ = [
+@@ -528,6 +638,8 @@ __all__ = [
+     "GoalManager",
+     "CONTINUATION_PROMPT_TEMPLATE",
+     "DEFAULT_MAX_TURNS",
++    "MAX_IDLE_TURNS",
++    "WRAP_UP_FRACTION",
+     "load_goal",
+     "save_goal",
+     "clear_goal",
 -- 
 2.39.5
+
+
+From 65e8119a7fd3d5fd5f3d8c826b90373f2c8abe78 Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Fri, 8 May 2026 01:09:29 +0800
+Subject: [PATCH 2/2] =?UTF-8?q?feat(goals):=20wire=20caller=20sides=20?=
+ =?UTF-8?q?=E2=80=94=20tool=5Fcalls=5Fcount=20+=20tokens=5Fused?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ cli.py                | 21 ++++++++++++++++++++-
+ gateway/run.py        | 24 +++++++++++++++++++++++-
+ tui_gateway/server.py | 14 ++++++++++++++
+ 3 files changed, 57 insertions(+), 2 deletions(-)
+
+diff --git a/cli.py b/cli.py
+index 5ca67fb43..c207b3eb6 100644
+--- a/cli.py
++++ b/cli.py
+@@ -7505,6 +7505,7 @@ class HermesCLI:
+ 
+         # Extract the agent's final response for this turn.
+         last_response = ""
++        tool_calls_count = 0
+         try:
+             hist = self.conversation_history or []
+             for msg in reversed(hist):
+@@ -7521,10 +7522,28 @@ class HermesCLI:
+                     else:
+                         last_response = str(content or "")
+                     break
++            # Count tool calls in this turn
++            for msg in hist:
++                if msg.get("role") == "assistant" and msg.get("tool_calls"):
++                    tool_calls_count += len(msg["tool_calls"])
+         except Exception:
+             last_response = ""
+ 
+-        decision = mgr.evaluate_after_turn(last_response, user_initiated=True)
++        # Get token usage from agent
++        tokens_used = 0
++        try:
++            agent = getattr(self, "agent", None)
++            if agent:
++                tokens_used = getattr(agent, "session_total_tokens", 0) or 0
++        except Exception:
++            pass
++
++        decision = mgr.evaluate_after_turn(
++            last_response,
++            user_initiated=True,
++            tool_calls_count=tool_calls_count,
++            tokens_used=tokens_used,
++        )
+         msg = decision.get("message") or ""
+         if msg:
+             _cprint(f"  {msg}")
+diff --git a/gateway/run.py b/gateway/run.py
+index 9884b0245..4ce91c8b8 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -5625,10 +5625,25 @@ class GatewayRunner:
+                     except Exception:
+                         session_entry = None
+                     if session_entry is not None:
++                        # Extract tool calls and token usage from agent result
++                        _tc_count = 0
++                        _tok_used = 0
++                        try:
++                            if isinstance(_agent_result, dict):
++                                _msgs = _agent_result.get("messages") or []
++                                for _m in _msgs:
++                                    if isinstance(_m, dict) and _m.get("tool_calls"):
++                                        _tc_count += len(_m["tool_calls"])
++                                _usage = _agent_result.get("usage") or {}
++                                _tok_used = int(_usage.get("total_tokens", 0) or 0)
++                        except Exception:
++                            pass
+                         self._post_turn_goal_continuation(
+                             session_entry=session_entry,
+                             source=source,
+                             final_response=_final_text,
++                            tool_calls_count=_tc_count,
++                            tokens_used=_tok_used,
+                         )
+             except Exception as _goal_exc:
+                 logger.debug("goal continuation hook failed: %s", _goal_exc)
+@@ -8190,6 +8205,8 @@ class GatewayRunner:
+         session_entry: Any,
+         source: Any,
+         final_response: str,
++        tool_calls_count: int = 0,
++        tokens_used: int = 0,
+     ) -> None:
+         """Run the goal judge after a gateway turn and, if still active,
+         enqueue a continuation prompt for the same session.
+@@ -8225,7 +8242,12 @@ class GatewayRunner:
+         if not mgr.is_active():
+             return
+ 
+-        decision = mgr.evaluate_after_turn(final_response or "", user_initiated=True)
++        decision = mgr.evaluate_after_turn(
++            final_response or "",
++            user_initiated=True,
++            tool_calls_count=tool_calls_count,
++            tokens_used=tokens_used,
++        )
+         msg = decision.get("message") or ""
+ 
+         # Send the status line back to the user so they see the judge's
+diff --git a/tui_gateway/server.py b/tui_gateway/server.py
+index b618c5bd5..58d10b094 100644
+--- a/tui_gateway/server.py
++++ b/tui_gateway/server.py
+@@ -3178,9 +3178,23 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
+                             default_max_turns=goal_max_turns,
+                         )
+                         if goal_mgr.is_active():
++                            # Extract tool calls and token usage
++                            _tc = 0
++                            _tok = 0
++                            try:
++                                if isinstance(result, dict):
++                                    for _m in (result.get("messages") or []):
++                                        if isinstance(_m, dict) and _m.get("tool_calls"):
++                                            _tc += len(_m["tool_calls"])
++                                    _u = _get_usage(agent) if agent else {}
++                                    _tok = int(_u.get("total", 0) or 0)
++                            except Exception:
++                                pass
+                             decision = goal_mgr.evaluate_after_turn(
+                                 raw,
+                                 user_initiated=True,
++                                tool_calls_count=_tc,
++                                tokens_used=_tok,
+                             )
+                             verdict_msg = decision.get("message") or ""
+                             if verdict_msg:
+-- 
+2.39.5
+
