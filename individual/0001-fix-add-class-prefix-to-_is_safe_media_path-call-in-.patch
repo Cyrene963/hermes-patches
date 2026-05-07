@@ -1,0 +1,42 @@
+From 2be688537e617ffa97d4cca9e0f2107cf43c416b Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Fri, 8 May 2026 04:12:32 +0800
+Subject: [PATCH] fix: add class prefix to _is_safe_media_path call in
+ extract_media
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The static method _is_safe_media_path() was called without the
+BasePlatformAdapter class prefix inside another @staticmethod
+(extract_media). This caused NameError when the CLI's send_message
+tool tried to send files via MEDIA: tags, breaking file delivery
+from CLI sessions.
+
+Gateway file sending worked because it uses send_document() directly,
+bypassing extract_media().
+
+Fix: _is_safe_media_path(path) → BasePlatformAdapter._is_safe_media_path(path)
+
+Introduced by PR #4686 (security: validate media file paths) where
+the conflict resolution dropped the class prefix.
+---
+ gateway/platforms/base.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
+index 39bd1efb5..f454522cf 100644
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -1962,7 +1962,7 @@ class BasePlatformAdapter(ABC):
+             if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
+                 path = path[1:-1].strip()
+             path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
+-            if path and _is_safe_media_path(path):
++            if path and BasePlatformAdapter._is_safe_media_path(path):
+                 media.append((os.path.expanduser(path), has_voice_tag))
+ 
+         # Remove MEDIA tags from content (including surrounding quote/backtick wrappers)
+-- 
+2.39.5
+
