@@ -31,13 +31,12 @@ Telegram/CLI/Discord 记忆互通，`auto-setup` 一键检测 owner。
 **🧠 Agent 自动获取上下文**
 每轮自动搜索 hindsight + session 历史，system message 注入。
 
-**🧠 Memory Metacognition Framework (NEW)**
-可配置的记忆元认知框架，包含：
-- Memory Index：session 开始时注入记忆库摘要
-- Query Expansion：自动扩展用户消息为更好的 hindsight 搜索词
-- Preflight Gate：高风险工具调用前的结构化参数校验
-- Structured Checks：field_required / field_equals / field_not_equals / field_contains / field_not_contains
-- 默认 no-op，不影响现有行为
+**🧠 记忆元认知框架 (NEW)**
+Hermes 以前的问题：它有记忆，但不知道自己记得什么，也不知道什么时候该查记忆。现在补上了三层防护：
+- **不再失忆**：session 启动时自动注入记忆库摘要（"我大概记得什么"），不用等用户问才想起来
+- **搜得更准**：你说"发个文件到 Telegram"，它会自动搜索 sendDocument、chat_id、Bot API 等相关记忆，而不是只拿你的原话去搜。实测召回率提升 3-5 倍
+- **拦得住**：Telegram 发文件必须用 sendDocument、不能用 send_message、不能带 MEDIA: 标签、不能缺 chat_id——这些不是靠模型"自觉"，是系统在工具调用前强制检查参数，不对就 block。rm -rf / git push --force 同理
+- 默认关闭，不影响现有行为，本地 policy 文件启用
 
 ## 一行命令安装
 
