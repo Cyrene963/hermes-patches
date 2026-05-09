@@ -1,7 +1,7 @@
 From c9d860ff93e05a177b7c47d38c31543e06456d4f Mon Sep 17 00:00:00 2001
 From: Cyrene963 <Nitrogen@users.noreply.github.com>
 Date: Sat, 9 May 2026 19:31:47 +0800
-Subject: [PATCH 1/2] feat: add configurable memory metacognition framework
+Subject: [PATCH 1/3] feat: add configurable memory metacognition framework
 
 Introduces opt-in extension points for compact memory indexing,
 recall query expansion, and memory-aware preflight checks.
@@ -906,7 +906,7 @@ index 000000000..cce50a396
 From 26ac361ef4666a5df42139b61228b11e90a4e573 Mon Sep 17 00:00:00 2001
 From: Cyrene963 <Nitrogen@users.noreply.github.com>
 Date: Sat, 9 May 2026 21:06:30 +0800
-Subject: [PATCH 2/2] feat: add structured preflight argument checks
+Subject: [PATCH 2/3] feat: add structured preflight argument checks
 
 Adds five new check types that validate tool arguments directly,
 complementing the existing memory recall checks:
@@ -1430,6 +1430,217 @@ index cce50a396..007255ffe 100644
 +
  if __name__ == "__main__":
      unittest.main(verbosity=2)
+-- 
+2.39.5
+
+
+From 223296bf1e894b54ba672616cdc55bb37123177e Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Sat, 9 May 2026 22:06:56 +0800
+Subject: [PATCH 3/3] feat: add Task Routing Preflight (Strategy Recall Gate)
+
+Adds a fourth layer to the memory metacognition framework:
+before tool selection, match user message against known strategies
+and inject hints so the model plans with prior experience.
+
+- StrategyHint dataclass with recommended_strategy, avoid_methods
+- TaskRoutingPreflight class with trigger_patterns + recall
+- build_strategy_preflight() factory from policy config
+- Integration in run_agent.py: injects system message before tool loop
+- Default: disabled (no-op) upstream
+- Local policy: enabled with Cloudflare/linux.do routing rules
+
+This solves the 'remembered but didn't use on first try' problem
+exemplified by linux.do requiring Camoufox instead of browser_navigate.
+---
+ agent/memory_metacognition.py    | 115 +++++++++++++++++++++++++++++++
+ agent/memory_policy.default.yaml |  15 ++++
+ run_agent.py                     |  23 +++++++
+ 3 files changed, 153 insertions(+)
+
+diff --git a/agent/memory_metacognition.py b/agent/memory_metacognition.py
+index 1fb81c780..54c979f7d 100644
+--- a/agent/memory_metacognition.py
++++ b/agent/memory_metacognition.py
+@@ -557,3 +557,118 @@ def build_preflight_policy() -> MemoryPreflightPolicy:
+     api = preflight_cfg.get("hindsight_api", "http://localhost:9177")
+     bank = preflight_cfg.get("bank_id", "hindsight")
+     return PolicyPreflightPolicy(rules=rules, hindsight_api=api, bank_id=bank)
++
++
++# ─── Task Routing / Strategy Recall ──────────────────────────────────
++
++@dataclass
++class StrategyHint:
++    """Output from task routing preflight. Injected into agent planning."""
++    task_type: str                    # e.g. "cloudflare_site_access"
++    recommended_strategy: str         # e.g. "use_camoufox"
++    avoid_methods: List[str]          # e.g. ["browser_navigate", "curl"]
++    preferred_method: str             # e.g. "camoufox"
++    reason: str                       # human-readable explanation
++    confidence: str                   # "high", "medium", "low"
++    recall_hits: int                  # how many memories matched
++
++
++class TaskRoutingPreflight:
++    """Strategy recall gate — runs BEFORE tool selection.
++
++    Matches user_message against routing rules. If triggered, searches
++    hindsight for strategy memories and returns a StrategyHint that
++    should be injected into the agent's planning context.
++
++    Default: disabled (no-op). Controlled by routing_preflight in policy.
++    """
++
++    def __init__(self, rules: Optional[List[Dict]] = None,
++                 hindsight_api: str = "http://localhost:9177",
++                 bank_id: str = "hindsight"):
++        self._rules = rules or []
++        self._hindsight_api = hindsight_api
++        self._bank_id = bank_id
++
++    def check(self, user_message: str) -> Optional[StrategyHint]:
++        """Check user_message against routing rules. Returns StrategyHint or None."""
++        if not user_message or not self._rules:
++            return None
++
++        msg_lower = user_message.lower()
++
++        for rule in self._rules:
++            patterns = rule.get("trigger_patterns", [])
++            if not patterns:
++                continue
++
++            # Match trigger patterns against user message
++            if not any(p.lower() in msg_lower for p in patterns):
++                continue
++
++            # Triggered — run recall for strategy memories
++            recall_queries = rule.get("recall_queries", [])
++            if not recall_queries:
++                recall_queries = [user_message]
++
++            total_hits = 0
++            top_reasons = []
++            for query in recall_queries[:3]:  # Cap at 3 queries
++                try:
++                    hits = self._recall(query)
++                    total_hits += len(hits)
++                    for h in hits[:2]:
++                        text = h.get("text", "")[:150]
++                        if text:
++                            top_reasons.append(text)
++                except Exception:
++                    pass
++
++            # Build confidence from hit count
++            if total_hits >= 3:
++                confidence = "high"
++            elif total_hits >= 1:
++                confidence = "medium"
++            else:
++                confidence = "low"
++
++            return StrategyHint(
++                task_type=rule.get("task_type", "unknown"),
++                recommended_strategy=rule.get("preferred_method", ""),
++                avoid_methods=rule.get("avoid_methods", []),
++                preferred_method=rule.get("preferred_method", ""),
++                reason=rule.get("strategy_hint", "") or "; ".join(top_reasons[:2]),
++                confidence=confidence,
++                recall_hits=total_hits,
++            )
++
++        return None
++
++    def _recall(self, query: str) -> List[Dict]:
++        """Search hindsight for strategy memories."""
++        try:
++            import json
++            import urllib.request
++            url = f"{self._hindsight_api}/v1/default/banks/{self._bank_id}/memories/recall"
++            data = json.dumps({"query": query, "budget": "low", "max_tokens": 512}).encode()
++            req = urllib.request.Request(url, data=data, method="POST")
++            req.add_header("Content-Type", "application/json")
++            with urllib.request.urlopen(req, timeout=8) as resp:
++                result = json.loads(resp.read())
++                return result.get("results", result.get("memories", []))
++        except Exception:
++            return []
++
++
++def build_strategy_preflight() -> TaskRoutingPreflight:
++    """Build TaskRoutingPreflight from policy config."""
++    policy = load_policy()
++    routing_cfg = policy.get("routing_preflight", {})
++    if not routing_cfg.get("enabled", False):
++        return TaskRoutingPreflight()  # no-op (empty rules)
++    rules = routing_cfg.get("rules", [])
++    api = routing_cfg.get("hindsight_api",
++                           policy.get("preflight", {}).get("hindsight_api", "http://localhost:9177"))
++    bank = routing_cfg.get("bank_id",
++                           policy.get("preflight", {}).get("bank_id", "hindsight"))
++    return TaskRoutingPreflight(rules=rules, hindsight_api=api, bank_id=bank)
+diff --git a/agent/memory_policy.default.yaml b/agent/memory_policy.default.yaml
+index 950c3e0e4..646969b82 100644
+--- a/agent/memory_policy.default.yaml
++++ b/agent/memory_policy.default.yaml
+@@ -45,6 +45,21 @@ query_expansion:
+ #    - PASS if found, FAIL if required and not found
+ #
+ # Rules can combine both types. block_on_failure: true = hard block.
++
++# ─── Task Routing Preflight (Strategy Recall Gate) ────────────────
++# Runs BEFORE tool selection. Matches user message against known
++# strategies and injects hints so the model plans with prior experience.
++# Output is a hint (not a block) — the model still decides, but with context.
++routing_preflight:
++  enabled: false
++  # rules:
++  #   - task_type: site_access
++  #     trigger_patterns: ["example.com"]
++  #     recall_queries: ["example.com access method"]
++  #     preferred_method: "browser_navigate"
++  #     avoid_methods: ["curl"]
++  #     strategy_hint: "Use browser for example.com"
++
+ preflight:
+   enabled: false
+   # hindsight_api: http://localhost:9177
+diff --git a/run_agent.py b/run_agent.py
+index 52d995c4e..9bde39c22 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -11426,6 +11426,29 @@ class AIAgent:
+             except Exception:
+                 pass
+ 
++        # ── Task Routing Preflight: inject strategy hint before planning ──
++        # Searches hindsight for known strategies (e.g., "linux.do needs Camoufox")
++        # and injects the hint so the model plans with prior knowledge, not after failure.
++        try:
++            from agent.memory_metacognition import build_strategy_preflight
++            _strat = build_strategy_preflight()
++            _hint = _strat.check(original_user_message if isinstance(original_user_message, str) else "")
++            if _hint:
++                _hint_text = (
++                    f"## Strategy Recall (from prior experience)\n"
++                    f"Task: {_hint.task_type}\n"
++                    f"Recommended: {_hint.preferred_method}\n"
++                )
++                if _hint.avoid_methods:
++                    _hint_text += f"Avoid: {', '.join(_hint.avoid_methods)}\n"
++                if _hint.reason:
++                    _hint_text += f"Reason: {_hint.reason}\n"
++                _hint_text += f"Confidence: {_hint.confidence} ({_hint.recall_hits} memories)\n"
++                # Inject as system message before the tool loop starts
++                messages.append({"role": "system", "content": _hint_text})
++        except Exception:
++            pass  # Non-blocking
++
+         while (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) or self._budget_grace_call:
+             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
+             self._checkpoint_mgr.new_turn()
 -- 
 2.39.5
 
