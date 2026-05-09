@@ -175,5 +175,24 @@ fi
 # Cleanup
 rm -rf "$TEMP_DIR"
 
+# Install memory metacognition policy (if not already present)
+POLICY_DIR="${HERMES_HOME:-$HOME/.hermes}"
+if [ ! -f "$POLICY_DIR/memory_policy.yaml" ]; then
+    if [ -f "$PATCHES_DIR/../memory_policy.default.yaml" ]; then
+        cp "$PATCHES_DIR/../memory_policy.default.yaml" "$POLICY_DIR/memory_policy.yaml"
+        echo ""
+        echo "🧠 记忆元认知框架已启用 → $POLICY_DIR/memory_policy.yaml"
+        echo "   自定义或删除此文件可关闭"
+    elif [ -d "$(dirname "$0")" ] && [ -f "$(dirname "$0")/memory_policy.default.yaml" ]; then
+        cp "$(dirname "$0")/memory_policy.default.yaml" "$POLICY_DIR/memory_policy.yaml"
+        echo ""
+        echo "🧠 记忆元认知框架已启用 → $POLICY_DIR/memory_policy.yaml"
+        echo "   自定义或删除此文件可关闭"
+    fi
+else
+    echo ""
+    echo "🧠 记忆元认知: 已有 policy 文件，跳过"
+fi
+
 echo ""
 echo "🎉 完成！"
