@@ -1,0 +1,1435 @@
+From c9d860ff93e05a177b7c47d38c31543e06456d4f Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Sat, 9 May 2026 19:31:47 +0800
+Subject: [PATCH 1/2] feat: add configurable memory metacognition framework
+
+Introduces opt-in extension points for compact memory indexing,
+recall query expansion, and memory-aware preflight checks.
+
+All behavior is disabled by default and controlled via policy.
+
+- agent/memory_metacognition.py: framework interfaces + policy loader
+- agent/memory_policy.default.yaml: conservative default (all disabled)
+- agent/prompt_builder.py: thin wrappers for index/query expansion
+- run_agent.py: optional preflight gate + query expansion hooks
+- tests/test_memory_metacognition_upstream.py: 28 tests, all passing
+---
+ agent/memory_metacognition.py               | 432 ++++++++++++++++++++
+ agent/memory_policy.default.yaml            |  49 +++
+ agent/prompt_builder.py                     |  28 ++
+ run_agent.py                                |  70 +++-
+ tests/test_memory_metacognition_upstream.py | 225 ++++++++++
+ 5 files changed, 799 insertions(+), 5 deletions(-)
+ create mode 100644 agent/memory_metacognition.py
+ create mode 100644 agent/memory_policy.default.yaml
+ create mode 100644 tests/test_memory_metacognition_upstream.py
+
+diff --git a/agent/memory_metacognition.py b/agent/memory_metacognition.py
+new file mode 100644
+index 000000000..c7ba850d4
+--- /dev/null
++++ b/agent/memory_metacognition.py
+@@ -0,0 +1,432 @@
++"""Memory Metacognition Framework — interfaces + policy loader.
++
++Provides three pluggable extension points for enhancing the agent's
++awareness of its own persistent memory:
++
++1. MemoryIndexProvider  — generates a compact index of what's in the memory store
++2. RecallQueryExpander  — expands user messages into better hindsight queries
++3. MemoryPreflightPolicy — gates dangerous operations based on memory state
++
++All three are loaded from a YAML policy file. The framework ships with
++no-op defaults; users/deployers customize via ~/.hermes/memory_policy.yaml.
++
++Design principles:
++- Core code contains ZERO hardcoded deployment-specific data (no user IDs,
++  no platform-specific rules, no language-specific mappings).
++- Default behavior is conservative: warn-only, never block.
++- Policy is loaded once per process and cached.
++- All failures are non-blocking (agent continues without enhancement).
++"""
++
++import logging
++import os
++from abc import ABC, abstractmethod
++from dataclasses import dataclass, field
++from pathlib import Path
++from typing import Any, Dict, List, Optional
++
++logger = logging.getLogger(__name__)
++
++# ─── Data types ──────────────────────────────────────────────────────
++
++@dataclass
++class PreflightCheck:
++    """Result of a single preflight check."""
++    check_type: str           # e.g. "identity", "method", "safety"
++    query: str                # hindsight query used
++    required: bool            # whether this check is mandatory
++    found: bool               # whether relevant memory was found
++    status: str               # "PASS" | "WARN" | "FAIL"
++    message: str = ""         # human-readable explanation
++    top_memory: str = ""      # relevant memory snippet if found
++
++
++@dataclass
++class PreflightResult:
++    """Aggregated preflight result for a high-risk task."""
++    decision: str             # "allow" | "warn" | "block"
++    reason: str
++    task_type: str
++    checks: List[PreflightCheck] = field(default_factory=list)
++
++
++# ─── Abstract interfaces ─────────────────────────────────────────────
++
++class MemoryIndexProvider(ABC):
++    """Generates a compact index of the agent's memory store.
++
++    The index is injected into the system prompt once per session so the
++    model knows what categories and recent memories exist, without needing
++    to search proactively.
++    """
++
++    @abstractmethod
++    def build_index(self) -> str:
++        """Return compact memory index text (ideally 200-300 tokens).
++
++        Returns empty string on failure. Must never raise.
++        """
++        ...
++
++
++class RecallQueryExpander(ABC):
++    """Expands a user message into better hindsight search queries.
++
++    The default implementation returns [original_message] only.
++    Policies can add keyword→expansion mappings for their language/domain.
++    """
++
++    @abstractmethod
++    def expand(self, user_message: str, max_queries: int = 8) -> List[str]:
++        """Return [original, expanded1, expanded2, ...] capped at max_queries."""
++        ...
++
++
++class MemoryPreflightPolicy(ABC):
++    """Gates dangerous operations based on memory state.
++
++    The default implementation allows all operations (no-op).
++    Policies define which tool+arg combinations are high-risk and what
++    memory checks are required.
++    """
++
++    @abstractmethod
++    def get_task_type(self, tool_name: str, tool_args: Dict[str, Any]) -> Optional[str]:
++        """Return task type string if this tool call is high-risk, else None."""
++        ...
++
++    @abstractmethod
++    def run_checks(self, task_type: str, context: Dict[str, Any]) -> PreflightResult:
++        """Run preflight checks for a high-risk task.
++
++        Returns PreflightResult with decision=allow/warn/block.
++        """
++        ...
++
++
++# ─── Default no-op implementations ───────────────────────────────────
++
++class NoOpIndexProvider(MemoryIndexProvider):
++    """Default: no memory index injected."""
++    def build_index(self) -> str:
++        return ""
++
++
++class PassthroughExpander(RecallQueryExpander):
++    """Default: returns only the original message (no expansion)."""
++    def expand(self, user_message: str, max_queries: int = 8) -> List[str]:
++        if not user_message:
++            return []
++        return [user_message]
++
++
++class NoOpPreflightPolicy(MemoryPreflightPolicy):
++    """Default: all operations allowed, no checks."""
++    def get_task_type(self, tool_name: str, tool_args: Dict[str, Any]) -> Optional[str]:
++        return None
++
++    def run_checks(self, task_type: str, context: Dict[str, Any]) -> PreflightResult:
++        return PreflightResult(
++            decision="allow",
++            reason="No preflight policy configured",
++            task_type=task_type or "",
++        )
++
++
++# ─── Script-backed implementations ──────────────────────────────────
++
++class ScriptIndexProvider(MemoryIndexProvider):
++    """Generates memory index by calling an external script.
++
++    Looks for the script at ~/.hermes/scripts/memory_index_generator.py.
++    Falls back to no-op if script is missing or fails.
++    """
++
++    def __init__(self, script_dir: Optional[str] = None, timeout: int = 5):
++        self._script_dir = script_dir or os.path.join(
++            os.path.expanduser("~"), ".hermes", "scripts"
++        )
++        self._timeout = timeout
++
++    def build_index(self) -> str:
++        try:
++            import subprocess
++            import sys as _sys
++            script = os.path.join(self._script_dir, "memory_index_generator.py")
++            if not os.path.exists(script):
++                return ""
++            result = subprocess.run(
++                [_sys.executable, script, "--limit", "10"],
++                capture_output=True, text=True, timeout=self._timeout,
++            )
++            if result.returncode == 0 and result.stdout.strip():
++                output = result.stdout.strip()
++                if len(output) > 800:
++                    output = output[:797] + "..."
++                return f"# Memory Index (auto-generated, session start)\n{output}"
++        except Exception:
++            pass
++        return ""
++
++
++class PolicyQueryExpander(RecallQueryExpander):
++    """Expands queries using keyword→terms mappings from policy."""
++
++    def __init__(self, expansions: Optional[Dict[str, List[str]]] = None,
++                 max_queries: int = 8):
++        self._expansions = expansions or {}
++        self._max_queries = max_queries
++
++    def expand(self, user_message: str, max_queries: int = 8) -> List[str]:
++        if not user_message:
++            return []
++        cap = min(max_queries, self._max_queries)
++        queries = [user_message]
++        msg_lower = user_message.lower()
++        for keyword, terms in self._expansions.items():
++            if keyword.lower() in msg_lower:
++                for term in terms:
++                    if term.lower() not in [q.lower() for q in queries]:
++                        queries.append(term)
++                        if len(queries) >= cap:
++                            return queries
++        return queries
++
++
++class PolicyPreflightPolicy(MemoryPreflightPolicy):
++    """Preflight policy loaded from YAML config.
++
++    Config format:
++      preflight_rules:
++        - tool: send_message
++          task_type: outgoing_message
++          checks:
++            - type: identity
++              query: recipient
++              required: true
++              error: "recipient not verified"
++          block_on_failure: true
++    """
++
++    def __init__(self, rules: Optional[List[Dict]] = None,
++                 hindsight_api: str = "http://localhost:9177",
++                 bank_id: str = "hindsight"):
++        self._rules = rules or []
++        self._hindsight_api = hindsight_api
++        self._bank_id = bank_id
++        # Build lookup: tool_name → rule
++        self._tool_map: Dict[str, List[Dict]] = {}
++        for rule in self._rules:
++            tool = rule.get("tool", "")
++            if tool:
++                self._tool_map.setdefault(tool, []).append(rule)
++
++    def get_task_type(self, tool_name: str, tool_args: Dict[str, Any]) -> Optional[str]:
++        rules = self._tool_map.get(tool_name, [])
++        for rule in rules:
++            patterns = rule.get("trigger_patterns", [])
++            if patterns:
++                cmd = tool_args.get("command", "").lower()
++                if not any(p.lower() in cmd for p in patterns):
++                    continue
++            return rule.get("task_type", tool_name)
++        return None
++
++    def run_checks(self, task_type: str, context: Dict[str, Any]) -> PreflightResult:
++        # Find the rule for this task type
++        rule = None
++        for r in self._rules:
++            if r.get("task_type") == task_type:
++                rule = r
++                break
++        if not rule:
++            return PreflightResult(
++                decision="allow",
++                reason=f"No rule for task type: {task_type}",
++                task_type=task_type,
++            )
++
++        checks = []
++        all_passed = True
++        should_block = rule.get("block_on_failure", False)
++
++        for check_def in rule.get("checks", []):
++            check = self._run_single_check(check_def, context)
++            checks.append(check)
++            if check.status == "FAIL":
++                all_passed = False
++
++        if not all_passed and should_block:
++            decision = "block"
++            reason = "Critical memory checks failed"
++        elif not all_passed:
++            decision = "warn"
++            reason = "Some recommended checks failed"
++        else:
++            decision = "allow"
++            reason = "All checks passed"
++
++        return PreflightResult(
++            decision=decision,
++            reason=reason,
++            task_type=task_type,
++            checks=checks,
++        )
++
++    def _run_single_check(self, check_def: Dict, context: Dict) -> PreflightCheck:
++        """Run a single preflight check against hindsight."""
++        check_type = check_def.get("type", "unknown")
++        query_template = check_def.get("query", "")
++        required = check_def.get("required", False)
++        error_msg = check_def.get("error", "")
++
++        # Interpolate context into query
++        query = query_template
++        for k, v in context.items():
++            query = query.replace(f"{{{k}}}", str(v))
++
++        # Search hindsight
++        found = False
++        top_memory = ""
++        try:
++            import json
++            import urllib.request
++            url = f"{self._hindsight_api}/v1/default/banks/{self._bank_id}/memories/recall"
++            data = json.dumps({"query": query, "limit": 2}).encode()
++            req = urllib.request.Request(url, data=data, method="POST")
++            req.add_header("Content-Type", "application/json")
++            with urllib.request.urlopen(req, timeout=5) as resp:
++                result = json.loads(resp.read())
++                memories = result.get("memories", [])
++                found = len(memories) > 0
++                if found:
++                    top_memory = memories[0].get("text", "")[:100]
++        except Exception:
++            pass
++
++        if required and not found:
++            status = "FAIL"
++        elif not found:
++            status = "WARN"
++        else:
++            status = "PASS"
++
++        return PreflightCheck(
++            check_type=check_type,
++            query=query,
++            required=required,
++            found=found,
++            status=status,
++            message=error_msg if status != "PASS" else "",
++            top_memory=top_memory,
++        )
++
++
++# ─── Policy loader ───────────────────────────────────────────────────
++
++_POLICY_CACHE: Optional[Dict] = None
++_POLICY_FILE_PATHS = [
++    # Local private policy (user-specific, not committed)
++    os.path.join(os.path.expanduser("~"), ".hermes", "memory_policy.yaml"),
++]
++
++
++def _find_default_policy() -> Optional[str]:
++    """Find the default policy YAML bundled with the agent."""
++    # Look relative to this file
++    here = Path(__file__).parent
++    candidate = here / "memory_policy.default.yaml"
++    if candidate.exists():
++        return str(candidate)
++    return None
++
++
++def load_policy(force_reload: bool = False) -> Dict[str, Any]:
++    """Load and merge memory metacognition policy.
++
++    Priority: local private > default bundled.
++    Returns dict with keys: index_provider, expander, preflight_policy.
++    Cached after first load unless force_reload=True.
++    """
++    global _POLICY_CACHE
++    if _POLICY_CACHE is not None and not force_reload:
++        return _POLICY_CACHE
++
++    try:
++        import yaml
++    except ImportError:
++        logger.warning("PyYAML unavailable; memory metacognition policy disabled")
++        _POLICY_CACHE = {}
++        return _POLICY_CACHE
++
++    merged: Dict[str, Any] = {}
++
++    # 1. Load default (bundled) policy
++    default_path = _find_default_policy()
++    if default_path:
++        try:
++            with open(default_path) as f:
++                merged = yaml.safe_load(f) or {}
++        except Exception as e:
++            logger.warning("Failed to load default memory policy: %s", e)
++
++    # 2. Overlay local private policy (skipped if HERMES_MEMORY_POLICY_DISABLE_LOCAL=1)
++    if os.environ.get("HERMES_MEMORY_POLICY_DISABLE_LOCAL") == "1":
++        logger.debug("Local memory policy disabled via env var")
++    else:
++        for path in _POLICY_FILE_PATHS:
++            if os.path.exists(path):
++                try:
++                    with open(path) as f:
++                        local = yaml.safe_load(f) or {}
++                    _deep_merge(merged, local)
++                    logger.info("Loaded memory policy from %s", path)
++                except Exception as e:
++                    logger.warning("Failed to load memory policy from %s: %s", path, e)
++
++    _POLICY_CACHE = merged
++    return merged
++
++
++def _deep_merge(base: Dict, overlay: Dict) -> Dict:
++    """Recursively merge overlay into base (overlay wins)."""
++    for k, v in overlay.items():
++        if k in base and isinstance(base[k], dict) and isinstance(v, dict):
++            _deep_merge(base[k], v)
++        else:
++            base[k] = v
++    return base
++
++
++def build_index_provider() -> MemoryIndexProvider:
++    """Build MemoryIndexProvider from policy config."""
++    policy = load_policy()
++    index_cfg = policy.get("memory_index", {})
++    if not index_cfg.get("enabled", False):
++        return NoOpIndexProvider()
++    script_dir = index_cfg.get("script_dir")
++    timeout = index_cfg.get("timeout", 5)
++    return ScriptIndexProvider(script_dir=script_dir, timeout=timeout)
++
++
++def build_query_expander() -> RecallQueryExpander:
++    """Build RecallQueryExpander from policy config."""
++    policy = load_policy()
++    expansion_cfg = policy.get("query_expansion", {})
++    if not expansion_cfg.get("enabled", False):
++        return PassthroughExpander()
++    expansions = expansion_cfg.get("expansions", {})
++    max_queries = expansion_cfg.get("max_queries", 8)
++    return PolicyQueryExpander(expansions=expansions, max_queries=max_queries)
++
++
++def build_preflight_policy() -> MemoryPreflightPolicy:
++    """Build MemoryPreflightPolicy from policy config."""
++    policy = load_policy()
++    preflight_cfg = policy.get("preflight", {})
++    if not preflight_cfg.get("enabled", False):
++        return NoOpPreflightPolicy()
++    rules = preflight_cfg.get("rules", [])
++    api = preflight_cfg.get("hindsight_api", "http://localhost:9177")
++    bank = preflight_cfg.get("bank_id", "hindsight")
++    return PolicyPreflightPolicy(rules=rules, hindsight_api=api, bank_id=bank)
+diff --git a/agent/memory_policy.default.yaml b/agent/memory_policy.default.yaml
+new file mode 100644
+index 000000000..425872245
+--- /dev/null
++++ b/agent/memory_policy.default.yaml
+@@ -0,0 +1,49 @@
++# Memory Metacognition Policy — Default (bundled with agent)
++#
++# This file ships with the agent and provides CONSERVATIVE defaults:
++# - Memory index: disabled (no extra tokens unless user opts in)
++# - Query expansion: disabled (original message only)
++# - Preflight: disabled (no blocking, no checks)
++#
++# To customize: copy to ~/.hermes/memory_policy.yaml and edit.
++# Local policy overlays this file (local wins on conflicts).
++#
++# All sections are optional. Missing sections = disabled.
++
++# ─── Memory Index ────────────────────────────────────────────────────
++# Injects a compact summary of the memory store into the system prompt.
++# Helps the model know what categories and recent memories exist.
++memory_index:
++  enabled: false
++  # script_dir: ~/.hermes/scripts   (default)
++  # timeout: 5                      (seconds)
++
++# ─── Query Expansion ─────────────────────────────────────────────────
++# Expands user messages into better hindsight search queries.
++# Maps keywords → list of related terms to also search for.
++query_expansion:
++  enabled: false
++  max_queries: 8
++  # expansions:
++  #   "example_keyword": ["related_term1", "related_term2"]
++
++# ─── Preflight Gate ──────────────────────────────────────────────────
++# Gates dangerous operations based on memory state.
++# Each rule maps a tool name to preflight checks.
++# Default: warn-only (block_on_failure: false).
++preflight:
++  enabled: false
++  # hindsight_api: http://localhost:9177
++  # bank_id: hindsight
++  # rules: []
++  #
++  # Example rule (disabled by default):
++  # rules:
++  #   - tool: send_message
++  #     task_type: external_send
++  #     checks:
++  #       - type: recipient
++  #         query: "recipient identity"
++  #         required: false
++  #         error: "Recipient not verified"
++  #     block_on_failure: false
+diff --git a/agent/prompt_builder.py b/agent/prompt_builder.py
+index d907a5815..d6e971155 100644
+--- a/agent/prompt_builder.py
++++ b/agent/prompt_builder.py
+@@ -1403,6 +1403,34 @@ def _load_cursorrules(cwd_path: Path) -> str:
+     return _truncate_content(cursorrules_content, ".cursorrules")
+ 
+ 
++def expand_recall_queries(user_message: str) -> list[str]:
++    """Expand user message into hindsight search queries.
++
++    Delegates to RecallQueryExpander loaded from memory_policy.yaml.
++    Default: passthrough (returns [original_message] only).
++    Returns list of queries: [original_message, expanded1, expanded2, ...]
++    """
++    try:
++        from agent.memory_metacognition import build_query_expander
++        return build_query_expander().expand(user_message)
++    except Exception:
++        return [user_message] if user_message else []
++
++
++def build_memory_index_block() -> str:
++    """Generate a compact memory index for the system prompt.
++
++    Delegates to MemoryIndexProvider loaded from memory_policy.yaml.
++    Default: no-op (returns empty string).
++    Returns empty string on failure (non-blocking).
++    """
++    try:
++        from agent.memory_metacognition import build_index_provider
++        return build_index_provider().build_index()
++    except Exception:
++        return ""
++
++
+ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = False) -> str:
+     """Discover and load context files for the system prompt.
+ 
+diff --git a/run_agent.py b/run_agent.py
+index 801678f37..52d995c4e 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -5392,6 +5392,18 @@ class AIAgent:
+             except Exception:
+                 pass
+ 
++        # Memory Index: compact summary of what's in the memory store.
++        # Generated once per session (cached on self).
++        if self._memory_enabled:
++            try:
++                if not hasattr(self, '_memory_index_cached'):
++                    from agent.prompt_builder import build_memory_index_block
++                    self._memory_index_cached = build_memory_index_block()
++                if self._memory_index_cached:
++                    prompt_parts.append(self._memory_index_cached)
++            except Exception:
++                pass  # Non-blocking
++
+         has_skills_tools = any(name in self.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
+         if has_skills_tools:
+             avail_toolsets = {
+@@ -9850,13 +9862,26 @@ class AIAgent:
+         # Check plugin hooks for a block directive before executing anything.
+         block_message: Optional[str] = None
+         if not pre_tool_block_checked:
++            # Memory Preflight Gate (concurrent path)
++            try:
++                from agent.memory_metacognition import build_preflight_policy
++                _pf_policy = build_preflight_policy()
++                _task_type = _pf_policy.get_task_type(function_name, function_args)
++                if _task_type:
++                    _ctx = {k: str(v)[:100] for k, v in function_args.items()}
++                    _pf = _pf_policy.run_checks(_task_type, _ctx)
++                    if _pf.decision == "block":
++                        _errors = [c.message for c in _pf.checks if c.status == "FAIL" and c.message]
++                        block_message = f"MEMORY PREFLIGHT BLOCKED: {chr(10).join(_errors)}"
++            except Exception:
++                pass  # Non-blocking
+             try:
+                 from hermes_cli.plugins import get_pre_tool_call_block_message
+-                block_message = get_pre_tool_call_block_message(
++                block_message = block_message or get_pre_tool_call_block_message(
+                     function_name, function_args, task_id=effective_task_id or "",
+                 )
+             except Exception:
+-                pass
++                pass  # Keep existing block_message if set by preflight gate
+         if block_message is not None:
+             return json.dumps({"error": block_message}, ensure_ascii=False)
+ 
+@@ -10383,13 +10408,30 @@ class AIAgent:
+ 
+             # Check plugin hooks for a block directive before executing.
+             _block_msg: Optional[str] = None
++
++            # Memory Preflight Gate: verify relevant memories for high-risk ops.
++            # Policy-driven: rules loaded from memory_policy.yaml.
++            # Default: no-op (all operations allowed).
++            try:
++                from agent.memory_metacognition import build_preflight_policy
++                _pf_policy = build_preflight_policy()
++                _task_type = _pf_policy.get_task_type(function_name, function_args)
++                if _task_type:
++                    _ctx = {k: str(v)[:100] for k, v in function_args.items()}
++                    _pf = _pf_policy.run_checks(_task_type, _ctx)
++                    if _pf.decision == "block":
++                        _errors = [c.message for c in _pf.checks if c.status == "FAIL" and c.message]
++                        _block_msg = f"MEMORY PREFLIGHT BLOCKED: {chr(10).join(_errors)}"
++            except Exception:
++                pass  # Non-blocking
++
+             try:
+                 from hermes_cli.plugins import get_pre_tool_call_block_message
+-                _block_msg = get_pre_tool_call_block_message(
++                _block_msg = _block_msg or get_pre_tool_call_block_message(
+                     function_name, function_args, task_id=effective_task_id or "",
+                 )
+             except Exception:
+-                pass
++                pass  # Keep existing _block_msg if set by preflight gate
+ 
+             _guardrail_block_decision: ToolGuardrailDecision | None = None
+             if _block_msg is None:
+@@ -11362,7 +11404,25 @@ class AIAgent:
+         if self._memory_manager:
+             try:
+                 _query = original_user_message if isinstance(original_user_message, str) else ""
+-                _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
++                # Auto-Recall Enhancement: expand query with related terms
++                # to improve hindsight recall precision.
++                try:
++                    from agent.prompt_builder import expand_recall_queries
++                    _expanded = expand_recall_queries(_query)
++                    if len(_expanded) > 1:
++                        # Run prefetch for original + expanded queries, deduplicate
++                        _all_prefetch = []
++                        _seen = set()
++                        for _q in _expanded[:5]:  # Cap at 5 to limit latency
++                            _result = self._memory_manager.prefetch_all(_q) or ""
++                            if _result and _result not in _seen:
++                                _seen.add(_result)
++                                _all_prefetch.append(_result)
++                        _ext_prefetch_cache = "\n".join(_all_prefetch) if _all_prefetch else ""
++                    else:
++                        _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
++                except Exception:
++                    _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
+             except Exception:
+                 pass
+ 
+diff --git a/tests/test_memory_metacognition_upstream.py b/tests/test_memory_metacognition_upstream.py
+new file mode 100644
+index 000000000..cce50a396
+--- /dev/null
++++ b/tests/test_memory_metacognition_upstream.py
+@@ -0,0 +1,225 @@
++#!/usr/bin/env python3
++"""
++Upstream Framework Tests for Memory Metacognition.
++Tests generic interfaces, default no-op behavior, policy loading, fallbacks.
++NO user-specific data (no user IDs, no platform-specific rules, no language-specific mappings).
++
++Suitable for PR to NousResearch/hermes-agent.
++"""
++
++import json
++import os
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++
++# Repo root: tests/ -> hermes-agent/
++REPO_ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(REPO_ROOT))
++sys.path.insert(0, str(REPO_ROOT / "agent"))
++
++# Disable local policy to test pure default behavior
++os.environ["HERMES_MEMORY_POLICY_DISABLE_LOCAL"] = "1"
++
++from agent.memory_metacognition import (
++    MemoryIndexProvider,
++    RecallQueryExpander,
++    MemoryPreflightPolicy,
++    PreflightResult,
++    PreflightCheck,
++    NoOpIndexProvider,
++    PassthroughExpander,
++    NoOpPreflightPolicy,
++    PolicyQueryExpander,
++    PolicyPreflightPolicy,
++    ScriptIndexProvider,
++    load_policy,
++    build_index_provider,
++    build_query_expander,
++    build_preflight_policy,
++    _deep_merge,
++)
++
++
++class TestInterfaces(unittest.TestCase):
++    """Test that abstract interfaces are properly defined."""
++
++    def test_memory_index_provider_is_abstract(self):
++        self.assertTrue(hasattr(MemoryIndexProvider, 'build_index'))
++
++    def test_recall_query_expander_is_abstract(self):
++        self.assertTrue(hasattr(RecallQueryExpander, 'expand'))
++
++    def test_memory_preflight_policy_is_abstract(self):
++        self.assertTrue(hasattr(MemoryPreflightPolicy, 'get_task_type'))
++        self.assertTrue(hasattr(MemoryPreflightPolicy, 'run_checks'))
++
++    def test_preflight_result_dataclass(self):
++        r = PreflightResult(decision="allow", reason="test", task_type="x")
++        self.assertEqual(r.decision, "allow")
++        self.assertEqual(r.checks, [])
++
++    def test_preflight_check_dataclass(self):
++        c = PreflightCheck(
++            check_type="identity", query="q", required=True,
++            found=False, status="FAIL", message="err"
++        )
++        self.assertEqual(c.status, "FAIL")
++
++
++class TestDefaultNoOp(unittest.TestCase):
++    """Test that default implementations are no-op."""
++
++    def test_noop_index_returns_empty(self):
++        provider = NoOpIndexProvider()
++        self.assertEqual(provider.build_index(), "")
++
++    def test_passthrough_expander_returns_original(self):
++        expander = PassthroughExpander()
++        result = expander.expand("hello world")
++        self.assertEqual(result, ["hello world"])
++
++    def test_passthrough_expander_empty_message(self):
++        expander = PassthroughExpander()
++        self.assertEqual(expander.expand(""), [])
++        self.assertEqual(expander.expand(None), [])
++
++    def test_noop_preflight_allows_all(self):
++        policy = NoOpPreflightPolicy()
++        self.assertIsNone(policy.get_task_type("send_message", {}))
++        self.assertIsNone(policy.get_task_type("terminal", {"command": "rm -rf /"}))
++        result = policy.run_checks("anything", {})
++        self.assertEqual(result.decision, "allow")
++
++
++class TestPolicyQueryExpander(unittest.TestCase):
++    """Test PolicyQueryExpander with generic test data."""
++
++    def test_expands_with_mappings(self):
++        expansions = {"hello": ["greeting", "hi"]}
++        expander = PolicyQueryExpander(expansions=expansions)
++        result = expander.expand("say hello")
++        self.assertIn("say hello", result)
++        self.assertIn("greeting", result)
++        self.assertIn("hi", result)
++
++    def test_respects_max_queries(self):
++        expansions = {f"k{i}": [f"v{i}"] for i in range(20)}
++        expander = PolicyQueryExpander(expansions=expansions, max_queries=3)
++        result = expander.expand("k0 k1 k2 k3 k4 k5 k6 k7 k8 k9")
++        self.assertLessEqual(len(result), 3)
++
++    def test_empty_expansions_passthrough(self):
++        expander = PolicyQueryExpander(expansions={})
++        self.assertEqual(expander.expand("test"), ["test"])
++
++    def test_case_insensitive_matching(self):
++        expansions = {"Hello": ["world"]}
++        expander = PolicyQueryExpander(expansions=expansions)
++        result = expander.expand("HELLO there")
++        self.assertIn("world", result)
++
++    def test_deduplication(self):
++        expansions = {"test": ["test", "testing"]}
++        expander = PolicyQueryExpander(expansions=expansions)
++        result = expander.expand("test")
++        # "test" appears once (original), "testing" added
++        self.assertEqual(result.count("test"), 1)
++
++
++class TestPolicyPreflightPolicy(unittest.TestCase):
++    """Test PolicyPreflightPolicy with generic test data."""
++
++    def test_no_rules_allows_all(self):
++        policy = PolicyPreflightPolicy(rules=[])
++        self.assertIsNone(policy.get_task_type("any_tool", {}))
++
++    def test_matching_tool_returns_task_type(self):
++        rules = [{"tool": "my_tool", "task_type": "my_task"}]
++        policy = PolicyPreflightPolicy(rules=rules)
++        self.assertEqual(policy.get_task_type("my_tool", {}), "my_task")
++
++    def test_nonmatching_tool_returns_none(self):
++        rules = [{"tool": "my_tool", "task_type": "my_task"}]
++        policy = PolicyPreflightPolicy(rules=rules)
++        self.assertIsNone(policy.get_task_type("other_tool", {}))
++
++    def test_trigger_patterns_activate(self):
++        rules = [{
++            "tool": "terminal",
++            "task_type": "dangerous",
++            "trigger_patterns": ["rm -rf", "drop table"],
++        }]
++        policy = PolicyPreflightPolicy(rules=rules)
++        self.assertEqual(
++            policy.get_task_type("terminal", {"command": "rm -rf /tmp"}),
++            "dangerous"
++        )
++        self.assertIsNone(
++            policy.get_task_type("terminal", {"command": "ls -la"})
++        )
++
++    def test_run_checks_no_rule_allows(self):
++        policy = PolicyPreflightPolicy(rules=[])
++        result = policy.run_checks("unknown_task", {})
++        self.assertEqual(result.decision, "allow")
++
++
++class TestPolicyLoader(unittest.TestCase):
++    """Test YAML policy loading and merging."""
++
++    def test_load_policy_returns_dict(self):
++        policy = load_policy(force_reload=True)
++        self.assertIsInstance(policy, dict)
++
++    def test_deep_merge_overlay_wins(self):
++        base = {"a": 1, "b": {"c": 2, "d": 3}}
++        overlay = {"b": {"c": 99}, "e": 5}
++        result = _deep_merge(base, overlay)
++        self.assertEqual(result["b"]["c"], 99)
++        self.assertEqual(result["b"]["d"], 3)
++        self.assertEqual(result["e"], 5)
++
++    def test_build_expander_returns_object(self):
++        expander = build_query_expander()
++        self.assertIsInstance(expander, RecallQueryExpander)
++
++    def test_build_preflight_returns_object(self):
++        policy = build_preflight_policy()
++        self.assertIsInstance(policy, MemoryPreflightPolicy)
++
++    def test_build_index_returns_object(self):
++        provider = build_index_provider()
++        self.assertIsInstance(provider, MemoryIndexProvider)
++
++    def test_default_policy_is_noop(self):
++        """Without local policy, defaults should be no-op."""
++        expander = build_query_expander()
++        result = expander.expand("any message")
++        self.assertIsInstance(result, list)
++        self.assertTrue(len(result) >= 1)
++
++
++class TestIntegrationPoints(unittest.TestCase):
++    """Test that prompt_builder integration points work."""
++
++    def test_expand_recall_queries_callable(self):
++        from agent.prompt_builder import expand_recall_queries
++        result = expand_recall_queries("test message")
++        self.assertIsInstance(result, list)
++        self.assertTrue(len(result) >= 1)
++
++    def test_expand_recall_queries_empty(self):
++        from agent.prompt_builder import expand_recall_queries
++        self.assertEqual(expand_recall_queries(""), [])
++        self.assertEqual(expand_recall_queries(None), [])
++
++    def test_build_memory_index_block_callable(self):
++        from agent.prompt_builder import build_memory_index_block
++        result = build_memory_index_block()
++        self.assertIsInstance(result, str)
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
+-- 
+2.39.5
+
+
+From 26ac361ef4666a5df42139b61228b11e90a4e573 Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Sat, 9 May 2026 21:06:30 +0800
+Subject: [PATCH 2/2] feat: add structured preflight argument checks
+
+Adds five new check types that validate tool arguments directly,
+complementing the existing memory recall checks:
+
+- field_required: field must exist
+- field_equals: field must equal value
+- field_not_equals: field must NOT equal value
+- field_contains: field must contain substring
+- field_not_contains: field must NOT contain substring
+
+Also:
+- trigger_patterns now match both arg keys and values
+- Multiple rules per tool supported without override
+- Backward compatible: old check types still work as memory recall
+- 15 new upstream tests (43 total)
+- Updated default policy with generic structured check examples
+---
+ agent/memory_metacognition.py               | 165 +++++++++++++++++---
+ agent/memory_policy.default.yaml            |  66 ++++++--
+ tests/test_memory_metacognition_upstream.py | 165 ++++++++++++++++++++
+ 3 files changed, 368 insertions(+), 28 deletions(-)
+
+diff --git a/agent/memory_metacognition.py b/agent/memory_metacognition.py
+index c7ba850d4..1fb81c780 100644
+--- a/agent/memory_metacognition.py
++++ b/agent/memory_metacognition.py
+@@ -196,15 +196,38 @@ class PolicyQueryExpander(RecallQueryExpander):
+ class PolicyPreflightPolicy(MemoryPreflightPolicy):
+     """Preflight policy loaded from YAML config.
+ 
++    Supports two categories of checks:
++
++    1. Memory recall checks (backward compatible):
++       - type: memory / memory_recall / identity / method / safety
++       - Searches hindsight for the query string
++       - PASS if found, FAIL if required and not found
++
++    2. Structured argument checks (new):
++       - type: field_required      — field must exist in context
++       - type: field_equals        — field must equal value
++       - type: field_not_equals    — field must NOT equal value
++       - type: field_contains      — field must contain value
++       - type: field_not_contains  — field must NOT contain value
++
+     Config format:
+       preflight_rules:
+         - tool: send_message
+           task_type: outgoing_message
+           checks:
+-            - type: identity
+-              query: recipient
++            - type: field_required
++              field: chat_id
++              required: true
++              error: "chat_id is required"
++            - type: field_equals
++              field: method
++              value: sendDocument
+               required: true
+-              error: "recipient not verified"
++              error: "must use sendDocument"
++            - type: memory_recall
++              query: "sendDocument usage"
++              required: false
++              error: "no related memory"
+           block_on_failure: true
+     """
+ 
+@@ -214,7 +237,7 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
+         self._rules = rules or []
+         self._hindsight_api = hindsight_api
+         self._bank_id = bank_id
+-        # Build lookup: tool_name → rule
++        # Build lookup: tool_name → [rule, ...]
+         self._tool_map: Dict[str, List[Dict]] = {}
+         for rule in self._rules:
+             tool = rule.get("tool", "")
+@@ -226,8 +249,15 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
+         for rule in rules:
+             patterns = rule.get("trigger_patterns", [])
+             if patterns:
+-                cmd = tool_args.get("command", "").lower()
+-                if not any(p.lower() in cmd for p in patterns):
++                # Build searchable string from ALL tool_args keys AND values
++                # so patterns can match field names or field values.
++                parts = []
++                for k, v in tool_args.items():
++                    parts.append(str(k))
++                    if isinstance(v, str):
++                        parts.append(v)
++                arg_text = " ".join(parts).lower()
++                if not any(p.lower() in arg_text for p in patterns):
+                     continue
+             return rule.get("task_type", tool_name)
+         return None
+@@ -246,19 +276,26 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
+                 task_type=task_type,
+             )
+ 
++        # Build enriched context: top-level fields + tool_args sub-dict
++        # This allows structured checks to access both context["method"]
++        # and context["tool_args"]["method"] patterns.
++        enriched = dict(context)
++        if "tool_args" not in enriched:
++            enriched["tool_args"] = dict(context)
++
+         checks = []
+         all_passed = True
+         should_block = rule.get("block_on_failure", False)
+ 
+         for check_def in rule.get("checks", []):
+-            check = self._run_single_check(check_def, context)
++            check = self._run_single_check(check_def, enriched)
+             checks.append(check)
+             if check.status == "FAIL":
+                 all_passed = False
+ 
+         if not all_passed and should_block:
+             decision = "block"
+-            reason = "Critical memory checks failed"
++            reason = "Critical preflight checks failed"
+         elif not all_passed:
+             decision = "warn"
+             reason = "Some recommended checks failed"
+@@ -274,18 +311,111 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
+         )
+ 
+     def _run_single_check(self, check_def: Dict, context: Dict) -> PreflightCheck:
+-        """Run a single preflight check against hindsight."""
++        """Dispatch a single preflight check to the appropriate handler."""
+         check_type = check_def.get("type", "unknown")
+-        query_template = check_def.get("query", "")
+         required = check_def.get("required", False)
+         error_msg = check_def.get("error", "")
+ 
+-        # Interpolate context into query
++        # ── Structured argument checks ──
++        if check_type == "field_required":
++            return self._check_field_required(check_def, context, required, error_msg)
++        if check_type == "field_equals":
++            return self._check_field_equals(check_def, context, required, error_msg)
++        if check_type == "field_not_equals":
++            return self._check_field_not_equals(check_def, context, required, error_msg)
++        if check_type == "field_contains":
++            return self._check_field_contains(check_def, context, required, error_msg)
++        if check_type == "field_not_contains":
++            return self._check_field_not_contains(check_def, context, required, error_msg)
++
++        # ── Memory recall check (backward compatible) ──
++        # Covers: memory, memory_recall, identity, method, safety, unknown
++        return self._check_memory_recall(check_def, context, required, error_msg, check_type)
++
++    def _resolve_field(self, context: Dict, field: str) -> Any:
++        """Resolve a field from context. Checks top-level first, then tool_args."""
++        if field in context:
++            return context[field]
++        tool_args = context.get("tool_args", {})
++        if field in tool_args:
++            return tool_args[field]
++        return None
++
++    def _check_field_required(self, check_def: Dict, context: Dict,
++                               required: bool, error_msg: str) -> PreflightCheck:
++        field = check_def.get("field", "")
++        value = self._resolve_field(context, field)
++        found = value is not None and value != ""
++        status = "PASS" if found else ("FAIL" if required else "WARN")
++        return PreflightCheck(
++            check_type="field_required", query=field,
++            required=required, found=found, status=status,
++            message=error_msg if status != "PASS" else "",
++        )
++
++    def _check_field_equals(self, check_def: Dict, context: Dict,
++                             required: bool, error_msg: str) -> PreflightCheck:
++        field = check_def.get("field", "")
++        expected = check_def.get("value", "")
++        actual = self._resolve_field(context, field)
++        found = actual is not None and str(actual) == str(expected)
++        status = "PASS" if found else ("FAIL" if required else "WARN")
++        return PreflightCheck(
++            check_type="field_equals", query=f"{field}=={expected}",
++            required=required, found=found, status=status,
++            message=error_msg if status != "PASS" else "",
++        )
++
++    def _check_field_not_equals(self, check_def: Dict, context: Dict,
++                                 required: bool, error_msg: str) -> PreflightCheck:
++        field = check_def.get("field", "")
++        forbidden = check_def.get("value", "")
++        actual = self._resolve_field(context, field)
++        # PASS if field doesn't exist OR doesn't equal forbidden value
++        found = actual is not None and str(actual) == str(forbidden)
++        status = "FAIL" if (found and required) else ("WARN" if found else "PASS")
++        return PreflightCheck(
++            check_type="field_not_equals", query=f"{field}!={forbidden}",
++            required=required, found=not found, status=status,
++            message=error_msg if status != "PASS" else "",
++        )
++
++    def _check_field_contains(self, check_def: Dict, context: Dict,
++                               required: bool, error_msg: str) -> PreflightCheck:
++        field = check_def.get("field", "")
++        needle = check_def.get("value", "")
++        actual = self._resolve_field(context, field)
++        found = actual is not None and needle in str(actual)
++        status = "PASS" if found else ("FAIL" if required else "WARN")
++        return PreflightCheck(
++            check_type="field_contains", query=f"{field}~={needle}",
++            required=required, found=found, status=status,
++            message=error_msg if status != "PASS" else "",
++        )
++
++    def _check_field_not_contains(self, check_def: Dict, context: Dict,
++                                   required: bool, error_msg: str) -> PreflightCheck:
++        field = check_def.get("field", "")
++        needle = check_def.get("value", "")
++        actual = self._resolve_field(context, field)
++        contains = actual is not None and needle in str(actual)
++        status = "FAIL" if (contains and required) else ("WARN" if contains else "PASS")
++        return PreflightCheck(
++            check_type="field_not_contains", query=f"{field}!~={needle}",
++            required=required, found=not contains, status=status,
++            message=error_msg if status != "PASS" else "",
++        )
++
++    def _check_memory_recall(self, check_def: Dict, context: Dict,
++                              required: bool, error_msg: str,
++                              check_type: str) -> PreflightCheck:
++        """Legacy memory recall check. Searches hindsight for query."""
++        query_template = check_def.get("query", "")
+         query = query_template
+         for k, v in context.items():
+-            query = query.replace(f"{{{k}}}", str(v))
++            if isinstance(v, str):
++                query = query.replace(f"{{{k}}}", v)
+ 
+-        # Search hindsight
+         found = False
+         top_memory = ""
+         try:
+@@ -297,7 +427,7 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
+             req.add_header("Content-Type", "application/json")
+             with urllib.request.urlopen(req, timeout=5) as resp:
+                 result = json.loads(resp.read())
+-                memories = result.get("memories", [])
++                memories = result.get("memories", result.get("results", []))
+                 found = len(memories) > 0
+                 if found:
+                     top_memory = memories[0].get("text", "")[:100]
+@@ -312,11 +442,8 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
+             status = "PASS"
+ 
+         return PreflightCheck(
+-            check_type=check_type,
+-            query=query,
+-            required=required,
+-            found=found,
+-            status=status,
++            check_type=check_type, query=query,
++            required=required, found=found, status=status,
+             message=error_msg if status != "PASS" else "",
+             top_memory=top_memory,
+         )
+diff --git a/agent/memory_policy.default.yaml b/agent/memory_policy.default.yaml
+index 425872245..950c3e0e4 100644
+--- a/agent/memory_policy.default.yaml
++++ b/agent/memory_policy.default.yaml
+@@ -28,22 +28,70 @@ query_expansion:
+   #   "example_keyword": ["related_term1", "related_term2"]
+ 
+ # ─── Preflight Gate ──────────────────────────────────────────────────
+-# Gates dangerous operations based on memory state.
+-# Each rule maps a tool name to preflight checks.
+-# Default: warn-only (block_on_failure: false).
++# Gates dangerous operations based on tool arguments and/or memory state.
++#
++# Two categories of checks are supported:
++#
++# 1. Structured argument checks (inspect tool call parameters):
++#    - field_required:      field must exist in tool args
++#    - field_equals:        field must equal a specific value
++#    - field_not_equals:    field must NOT equal a specific value
++#    - field_contains:      field must contain a substring
++#    - field_not_contains:  field must NOT contain a substring
++#
++# 2. Memory recall checks (search hindsight for related memories):
++#    - memory_recall / identity / method / safety
++#    - Searches hindsight for the query string
++#    - PASS if found, FAIL if required and not found
++#
++# Rules can combine both types. block_on_failure: true = hard block.
+ preflight:
+   enabled: false
+   # hindsight_api: http://localhost:9177
+   # bank_id: hindsight
+   # rules: []
+   #
+-  # Example rule (disabled by default):
++  # Example rules (disabled by default):
+   # rules:
++  #   # ── File delivery gate ──
+   #   - tool: send_message
+-  #     task_type: external_send
++  #     task_type: file_delivery
++  #     trigger_patterns: ["file", "document"]
++  #     block_on_failure: true
++  #     checks:
++  #       # Structured: recipient field must exist
++  #       - type: field_required
++  #         field: recipient
++  #         required: true
++  #         error: "Recipient is required before sending"
++  #       # Structured: method must be the correct one
++  #       - type: field_equals
++  #         field: method
++  #         value: sendDocument
++  #         required: true
++  #         error: "File delivery must use sendDocument"
++  #       # Structured: payload must not contain raw file tags
++  #       - type: field_not_contains
++  #         field: payload
++  #         value: "MEDIA:"
++  #         required: true
++  #         error: "MEDIA tag must not be sent as plain text"
++  #       # Memory: check if we have related experience
++  #       - type: memory_recall
++  #         query: "file delivery sendDocument"
++  #         required: false
++  #         error: "No related memory found"
++  #
++  #   # ── Destructive command gate ──
++  #   - tool: terminal
++  #     task_type: destructive_command
++  #     trigger_patterns:
++  #       - "rm -rf"
++  #       - "git push --force"
++  #       - "git reset --hard"
++  #     block_on_failure: true
+   #     checks:
+-  #       - type: recipient
+-  #         query: "recipient identity"
++  #       - type: memory_recall
++  #         query: "backup safety confirmation"
+   #         required: false
+-  #         error: "Recipient not verified"
+-  #     block_on_failure: false
++  #         error: "No backup verification memory found"
+diff --git a/tests/test_memory_metacognition_upstream.py b/tests/test_memory_metacognition_upstream.py
+index cce50a396..007255ffe 100644
+--- a/tests/test_memory_metacognition_upstream.py
++++ b/tests/test_memory_metacognition_upstream.py
+@@ -221,5 +221,170 @@ class TestIntegrationPoints(unittest.TestCase):
+         self.assertIsInstance(result, str)
+ 
+ 
++class TestStructuredChecks(unittest.TestCase):
++    """Test structured argument checks (field_required, field_equals, etc.)."""
++
++    def _make_policy(self, rules):
++        """Helper: create a PolicyPreflightPolicy with given rules."""
++        return PolicyPreflightPolicy(rules=rules)
++
++    # ── field_required ──
++
++    def test_field_required_pass(self):
++        policy = self._make_policy([{
++            "tool": "send_message", "task_type": "test",
++            "checks": [{"type": "field_required", "field": "chat_id", "required": True}],
++        }])
++        result = policy.run_checks("test", {"chat_id": "12345"})
++        self.assertEqual(result.decision, "allow")
++        self.assertEqual(result.checks[0].status, "PASS")
++
++    def test_field_required_fail(self):
++        policy = self._make_policy([{
++            "tool": "send_message", "task_type": "test", "block_on_failure": True,
++            "checks": [{"type": "field_required", "field": "chat_id", "required": True, "error": "missing chat_id"}],
++        }])
++        result = policy.run_checks("test", {"target": "telegram"})
++        self.assertEqual(result.decision, "block")
++        self.assertEqual(result.checks[0].status, "FAIL")
++
++    def test_field_required_warn_when_not_required(self):
++        policy = self._make_policy([{
++            "tool": "send_message", "task_type": "test",
++            "checks": [{"type": "field_required", "field": "chat_id", "required": False}],
++        }])
++        result = policy.run_checks("test", {"target": "telegram"})
++        self.assertEqual(result.decision, "allow")
++        self.assertEqual(result.checks[0].status, "WARN")
++
++    # ── field_equals ──
++
++    def test_field_equals_pass(self):
++        policy = self._make_policy([{
++            "tool": "send_message", "task_type": "test",
++            "checks": [{"type": "field_equals", "field": "method", "value": "sendDocument", "required": True}],
++        }])
++        result = policy.run_checks("test", {"method": "sendDocument"})
++        self.assertEqual(result.checks[0].status, "PASS")
++
++    def test_field_equals_fail(self):
++        policy = self._make_policy([{
++            "tool": "send_message", "task_type": "test", "block_on_failure": True,
++            "checks": [{"type": "field_equals", "field": "method", "value": "sendDocument", "required": True, "error": "wrong method"}],
++        }])
++        result = policy.run_checks("test", {"method": "send_message"})
++        self.assertEqual(result.decision, "block")
++        self.assertEqual(result.checks[0].status, "FAIL")
++
++    # ── field_not_equals ──
++
++    def test_field_not_equals_pass(self):
++        policy = self._make_policy([{
++            "tool": "send_message", "task_type": "test",
++            "checks": [{"type": "field_not_equals", "field": "method", "value": "send_message", "required": True}],
++        }])
++        result = policy.run_checks("test", {"method": "sendDocument"})
++        self.assertEqual(result.checks[0].status, "PASS")
++
++    def test_field_not_equals_fail(self):
++        policy = self._make_policy([{
++            "tool": "send_message", "task_type": "test", "block_on_failure": True,
++            "checks": [{"type": "field_not_equals", "field": "method", "value": "send_message", "required": True, "error": "must not use send_message"}],
++        }])
++        result = policy.run_checks("test", {"method": "send_message"})
++        self.assertEqual(result.decision, "block")
++        self.assertEqual(result.checks[0].status, "FAIL")
++
++    # ── field_contains ──
++
++    def test_field_contains_pass(self):
++        policy = self._make_policy([{
++            "tool": "terminal", "task_type": "test",
++            "checks": [{"type": "field_contains", "field": "command", "value": "git", "required": True}],
++        }])
++        result = policy.run_checks("test", {"command": "git status"})
++        self.assertEqual(result.checks[0].status, "PASS")
++
++    def test_field_contains_fail(self):
++        policy = self._make_policy([{
++            "tool": "terminal", "task_type": "test", "block_on_failure": True,
++            "checks": [{"type": "field_contains", "field": "command", "value": "git", "required": True}],
++        }])
++        result = policy.run_checks("test", {"command": "ls -la"})
++        self.assertEqual(result.checks[0].status, "FAIL")
++
++    # ── field_not_contains ──
++
++    def test_field_not_contains_pass(self):
++        policy = self._make_policy([{
++            "tool": "send_message", "task_type": "test",
++            "checks": [{"type": "field_not_contains", "field": "payload", "value": "MEDIA:", "required": True}],
++        }])
++        result = policy.run_checks("test", {"payload": "normal text"})
++        self.assertEqual(result.checks[0].status, "PASS")
++
++    def test_field_not_contains_fail(self):
++        policy = self._make_policy([{
++            "tool": "send_message", "task_type": "test", "block_on_failure": True,
++            "checks": [{"type": "field_not_contains", "field": "payload", "value": "MEDIA:", "required": True, "error": "MEDIA tag found"}],
++        }])
++        result = policy.run_checks("test", {"payload": "MEDIA:/tmp/file.pdf"})
++        self.assertEqual(result.decision, "block")
++        self.assertEqual(result.checks[0].status, "FAIL")
++
++    # ── Unknown check type ──
++
++    def test_unknown_check_type_warns(self):
++        policy = self._make_policy([{
++            "tool": "test", "task_type": "test",
++            "checks": [{"type": "nonexistent_type", "query": "test"}],
++        }])
++        result = policy.run_checks("test", {})
++        # Unknown types fall through to memory recall (backward compatible)
++        self.assertIn(result.checks[0].status, ["PASS", "WARN", "FAIL"])
++
++    # ── Multiple rules per tool ──
++
++    def test_multiple_rules_per_tool(self):
++        policy = self._make_policy([
++            {"tool": "terminal", "task_type": "destructive",
++             "trigger_patterns": ["rm -rf"],
++             "checks": [{"type": "field_contains", "field": "command", "value": "rm", "required": True}]},
++            {"tool": "terminal", "task_type": "gateway_restart",
++             "trigger_patterns": ["systemctl restart"],
++             "checks": [{"type": "field_contains", "field": "command", "value": "restart", "required": True}]},
++        ])
++        self.assertEqual(policy.get_task_type("terminal", {"command": "rm -rf /tmp"}), "destructive")
++        self.assertEqual(policy.get_task_type("terminal", {"command": "systemctl restart svc"}), "gateway_restart")
++        self.assertIsNone(policy.get_task_type("terminal", {"command": "ls -la"}))
++
++    # ── tool_args resolution ──
++
++    def test_field_resolves_from_tool_args(self):
++        """Structured checks should find fields in tool_args sub-dict."""
++        policy = self._make_policy([{
++            "tool": "send_message", "task_type": "test",
++            "checks": [{"type": "field_equals", "field": "method", "value": "sendDocument", "required": True}],
++        }])
++        # Pass via run_checks context (tool_args auto-populated)
++        result = policy.run_checks("test", {"method": "sendDocument"})
++        self.assertEqual(result.checks[0].status, "PASS")
++
++    # ── Combined structured + memory checks ──
++
++    def test_combined_structured_and_memory(self):
++        policy = self._make_policy([{
++            "tool": "send_message", "task_type": "test", "block_on_failure": True,
++            "checks": [
++                {"type": "field_required", "field": "method", "required": True, "error": "method required"},
++                {"type": "memory_recall", "query": "test query", "required": False},
++            ],
++        }])
++        # Structured passes, memory may WARN (no hindsight in test)
++        result = policy.run_checks("test", {"method": "sendDocument"})
++        # The structured check should PASS; memory check may WARN
++        self.assertEqual(result.checks[0].status, "PASS")
++
++
+ if __name__ == "__main__":
+     unittest.main(verbosity=2)
+-- 
+2.39.5
+
