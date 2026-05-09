@@ -31,6 +31,14 @@ Telegram/CLI/Discord 记忆互通，`auto-setup` 一键检测 owner。
 **🧠 Agent 自动获取上下文**
 每轮自动搜索 hindsight + session 历史，system message 注入。
 
+**🧠 Memory Metacognition Framework (NEW)**
+可配置的记忆元认知框架，包含：
+- Memory Index：session 开始时注入记忆库摘要
+- Query Expansion：自动扩展用户消息为更好的 hindsight 搜索词
+- Preflight Gate：高风险工具调用前的结构化参数校验
+- Structured Checks：field_required / field_equals / field_not_equals / field_contains / field_not_contains
+- 默认 no-op，不影响现有行为
+
 ## 一行命令安装
 
 ```bash
@@ -39,7 +47,7 @@ bash <(curl -sL https://raw.githubusercontent.com/Cyrene963/hermes-patches/main/
 
 ## 兼容性说明
 
-**上游合并状态**（2026-05-05 测试）：
+**上游合并状态**（2026-05-09 测试）：
 
 上游在最近几周合并了大量社区贡献，包括：
 - Pre-flight thinking block
@@ -60,10 +68,11 @@ bash <(curl -sL https://raw.githubusercontent.com/Cyrene963/hermes-patches/main/
 - Skill Evaluation Gate
 - 18 个安全补丁（文件/网络/环境防护）
 - Skill Pre-selection Auto-context Injection
+- Memory Metacognition Framework (PR #22516)
 
-## 包含的补丁 (48 个)
+## 包含的补丁 (49 个)
 
-### 核心功能 (14 个)
+### 核心功能 (15 个)
 
 | # | 补丁文件 | 说明 | PR |
 |---|---------|------|-----|
@@ -82,6 +91,7 @@ bash <(curl -sL https://raw.githubusercontent.com/Cyrene963/hermes-patches/main/
 | 43 | `43_fix-cjk-user_id-and-switch_model-credential_pool.patch` | CJK 搜索隔离 + credential pool | 本地修复 |
 | 44 | `44_feat-skill-eval-gate-integration.patch` | Skill Eval Gate 集成到 run_agent | [#18316](https://github.com/NousResearch/hermes-agent/pull/18316) |
 | 45 | `45_overnight-evolution-bundle.patch` | Overnight evolution 综合补丁 | 夜间自动扫描合并 |
+| mc | `memory-metacognition-framework.patch` | Memory Metacognition Framework | [#22516](https://github.com/NousResearch/hermes-agent/pull/22516) |
 
 ### Custom Provider 修复 (7 个)
 
@@ -136,6 +146,11 @@ bash <(curl -sL https://raw.githubusercontent.com/Cyrene963/hermes-patches/main/
 | community-prs | `community-prs-combined.patch` | 社区 PR 合集 (旧版) |
 | pr20758 | `pr20758-skill-pre-selection-auto-context.patch` | 技能预选自动上下文注入 |
 | pr19064 | 包含在 #6 | /model credential pool 保持 |
+
+## 配置文件
+
+- `examples/memory_policy.example.yaml` — Memory Metacognition 脱敏配置模板
+  复制到 `~/.hermes/memory_policy.yaml` 并自定义
 
 ## 使用说明
 
