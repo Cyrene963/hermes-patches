@@ -1,7 +1,7 @@
 From c9d860ff93e05a177b7c47d38c31543e06456d4f Mon Sep 17 00:00:00 2001
 From: Cyrene963 <Nitrogen@users.noreply.github.com>
 Date: Sat, 9 May 2026 19:31:47 +0800
-Subject: [PATCH 1/5] feat: add configurable memory metacognition framework
+Subject: [PATCH 1/6] feat: add configurable memory metacognition framework
 
 Introduces opt-in extension points for compact memory indexing,
 recall query expansion, and memory-aware preflight checks.
@@ -906,7 +906,7 @@ index 000000000..cce50a396
 From 26ac361ef4666a5df42139b61228b11e90a4e573 Mon Sep 17 00:00:00 2001
 From: Cyrene963 <Nitrogen@users.noreply.github.com>
 Date: Sat, 9 May 2026 21:06:30 +0800
-Subject: [PATCH 2/5] feat: add structured preflight argument checks
+Subject: [PATCH 2/6] feat: add structured preflight argument checks
 
 Adds five new check types that validate tool arguments directly,
 complementing the existing memory recall checks:
@@ -1437,7 +1437,7 @@ index cce50a396..007255ffe 100644
 From 223296bf1e894b54ba672616cdc55bb37123177e Mon Sep 17 00:00:00 2001
 From: Cyrene963 <Nitrogen@users.noreply.github.com>
 Date: Sat, 9 May 2026 22:06:56 +0800
-Subject: [PATCH 3/5] feat: add Task Routing Preflight (Strategy Recall Gate)
+Subject: [PATCH 3/6] feat: add Task Routing Preflight (Strategy Recall Gate)
 
 Adds a fourth layer to the memory metacognition framework:
 before tool selection, match user message against known strategies
@@ -1648,7 +1648,7 @@ index 52d995c4e..9bde39c22 100644
 From 547f9c7a817d2a3799a735143455c1491b59b0fa Mon Sep 17 00:00:00 2001
 From: Cyrene963 <Nitrogen@users.noreply.github.com>
 Date: Sat, 9 May 2026 22:52:46 +0800
-Subject: [PATCH 4/5] feat: add per-user multi-tenant isolation to memory
+Subject: [PATCH 4/6] feat: add per-user multi-tenant isolation to memory
  metacognition
 
 Adds optional user_context parameter to all build_* and load_policy
@@ -1931,7 +1931,7 @@ index 9bde39c22..a8d36cfb9 100644
 From b9e4586d8536dc5488a7a0ac4a5e577bb1e725cb Mon Sep 17 00:00:00 2001
 From: Cyrene963 <Nitrogen@users.noreply.github.com>
 Date: Sat, 9 May 2026 23:05:57 +0800
-Subject: [PATCH 5/5] feat: add lesson promotion / policy suggestion framework
+Subject: [PATCH 5/6] feat: add lesson promotion / policy suggestion framework
 
 Adds a lightweight mechanism for converting user lessons into
 reviewable policy suggestions:
@@ -2261,6 +2261,215 @@ index 007255ffe..1228c1cb7 100644
 +        suggestion = suggest_policy_patch("今天天气不错")
 +        result = apply_suggestion(suggestion)
 +        self.assertEqual(result["status"], "no_policy_change")
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
+-- 
+2.39.5
+
+
+From b561b3b5bc574a41eae7985b05fc95f4c15ec7aa Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Sat, 9 May 2026 23:12:36 +0800
+Subject: [PATCH 6/6] fix: lesson promotion security hardening
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Private scope without user_context → REFUSE (prevent leak to global)
+- Public scope without shared=True → REFUSE (prevent accidental global write)
+- _sanitize_lesson_text() masks chat_id/token/long IDs in preview
+- user_id from runtime metadata only, never from lesson text
+- 8 new security tests (61 total)
+---
+ agent/memory_metacognition.py               | 46 +++++++++++-
+ tests/test_memory_metacognition_upstream.py | 81 ++++++++++++++++++++-
+ 2 files changed, 122 insertions(+), 5 deletions(-)
+
+diff --git a/agent/memory_metacognition.py b/agent/memory_metacognition.py
+index 3a6c622e7..6de7ad738 100644
+--- a/agent/memory_metacognition.py
++++ b/agent/memory_metacognition.py
+@@ -870,13 +870,34 @@ def suggest_policy_patch(lesson_text: str,
+     )
+ 
+ 
++def _sanitize_lesson_text(text: str) -> str:
++    """Remove private indicators from lesson text for safe preview/logging."""
++    import re
++    # Mask chat_id patterns
++    text = re.sub(r'chat_id\s*[:=]\s*\S+', 'chat_id=[REDACTED]', text)
++    # Mask token/key patterns
++    text = re.sub(r'(token|key|secret|password|api_key)\s*[:=]\s*\S+', r'\1=[REDACTED]', text, flags=re.IGNORECASE)
++    # Mask long numeric IDs (likely chat_id)
++    text = re.sub(r'\b\d{8,}\b', '[ID]', text)
++    return text
++
++
+ def apply_suggestion(suggestion: LessonSuggestion,
+                      user_context: Optional[Dict] = None,
+-                     dry_run: bool = True) -> Dict[str, Any]:
++                     dry_run: bool = True,
++                     shared: bool = False) -> Dict[str, Any]:
+     """Apply a confirmed lesson suggestion to the appropriate policy file.
+ 
+     dry_run=True (default): returns what WOULD be written, without writing.
+     dry_run=False: writes to the appropriate policy file.
++    shared=True: explicit confirmation to write to global/shared policy.
++                  Required when target would be global policy.
++
++    Safety rules:
++    - scope=private without user_context → REFUSE (prevent leak to global)
++    - scope=public without user_context and without shared=True → REFUSE
++    - _lesson_source is sanitized before including in preview/logs
++    - user_id comes from runtime metadata only, never from lesson text
+ 
+     Returns dict with: status, file_path, diff_preview, errors.
+     """
+@@ -885,7 +906,10 @@ def apply_suggestion(suggestion: LessonSuggestion,
+ 
+     # Determine target file
+     scope = suggestion.scope
+-    if user_context and user_context.get("user_id"):
++    has_user = bool(user_context and user_context.get("user_id"))
++
++    if has_user:
++        # User-specific policy (safe)
+         target_path = _get_user_policy_path(user_context["user_id"])
+         if not target_path:
+             target_path = os.path.join(
+@@ -893,6 +917,19 @@ def apply_suggestion(suggestion: LessonSuggestion,
+                 f"user_{user_context['user_id']}", "memory_policy.yaml"
+             )
+     else:
++        # Global policy — require explicit shared confirmation
++        if scope == "private":
++            return {
++                "status": "refused",
++                "errors": ["Private lesson cannot be written to global policy without user_context."],
++                "dry_run": dry_run,
++            }
++        if not shared:
++            return {
++                "status": "refused",
++                "errors": ["Writing to shared/global policy requires explicit shared=True confirmation."],
++                "dry_run": dry_run,
++            }
+         target_path = os.path.join(
+             os.path.expanduser("~"), ".hermes", "memory_policy.yaml"
+         )
+@@ -909,10 +946,13 @@ def apply_suggestion(suggestion: LessonSuggestion,
+             "dry_run": dry_run,
+         }
+ 
++    # Sanitize lesson text for preview
++    sanitized_source = _sanitize_lesson_text(suggestion.lesson_text[:100])
++
+     # For other actions, build a YAML patch preview
+     patch_preview = {
+         section: {
+-            "_lesson_source": suggestion.lesson_text[:100],
++            "_lesson_source": sanitized_source,
+             "_confidence": suggestion.confidence,
+             **{k: v for k, v in suggestion.suggestion.items()
+                if k not in ("section", "action", "note")},
+diff --git a/tests/test_memory_metacognition_upstream.py b/tests/test_memory_metacognition_upstream.py
+index 1228c1cb7..842299e89 100644
+--- a/tests/test_memory_metacognition_upstream.py
++++ b/tests/test_memory_metacognition_upstream.py
+@@ -438,16 +438,93 @@ class TestLessonPromotion(unittest.TestCase):
+     def test_apply_dry_run_default(self):
+         from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
+         suggestion = suggest_policy_patch("搜 linux.do 要扩展 camoufox")
+-        result = apply_suggestion(suggestion)
++        result = apply_suggestion(suggestion, user_context={"user_id": "test"})
+         self.assertTrue(result["dry_run"])
+         self.assertEqual(result["status"], "dry_run")
+ 
+     def test_apply_memory_only_no_policy_change(self):
+         from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
+         suggestion = suggest_policy_patch("今天天气不错")
+-        result = apply_suggestion(suggestion)
++        result = apply_suggestion(suggestion, user_context={"user_id": "test"})
+         self.assertEqual(result["status"], "no_policy_change")
+ 
+ 
+ if __name__ == "__main__":
+     unittest.main(verbosity=2)
++
++
++class TestLessonPromotionSecurity(unittest.TestCase):
++    """Security tests for lesson promotion."""
++
++    def test_private_scope_no_user_context_refused(self):
++        """Private lesson without user_context must NOT write to global policy."""
++        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
++        s = suggest_policy_patch("chat_id 12345 对应 Steven")
++        self.assertEqual(s.scope, "private")
++        r = apply_suggestion(s, user_context=None, dry_run=False)
++        self.assertEqual(r["status"], "refused")
++        self.assertIn("Private lesson", r["errors"][0])
++
++    def test_public_scope_no_user_context_no_shared_refused(self):
++        """Public lesson without user_context and without shared=True must NOT write."""
++        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
++        s = suggest_policy_patch("搜 linux.do 要扩展 camoufox")
++        self.assertEqual(s.scope, "public")
++        r = apply_suggestion(s, user_context=None, dry_run=False, shared=False)
++        self.assertEqual(r["status"], "refused")
++        self.assertIn("shared=True", r["errors"][0])
++
++    def test_public_scope_shared_allowed(self):
++        """Public lesson with shared=True can write to global policy."""
++        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
++        s = suggest_policy_patch("搜 linux.do 要扩展 camoufox")
++        r = apply_suggestion(s, user_context=None, dry_run=True, shared=True)
++        self.assertEqual(r["status"], "dry_run")
++
++    def test_user_context_writes_to_user_policy(self):
++        """With user_context, writes to user-specific policy (not global)."""
++        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
++        s = suggest_policy_patch("搜 linux.do 要扩展 camoufox")
++        r = apply_suggestion(s, user_context={"user_id": "test_user"}, dry_run=True)
++        self.assertEqual(r["status"], "dry_run")
++        self.assertIn("user_test_user", r["file_path"])
++
++    def test_dry_run_default(self):
++        """apply_suggestion defaults to dry_run=True."""
++        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
++        s = suggest_policy_patch("test lesson")
++        r = apply_suggestion(s, user_context={"user_id": "x"})
++        self.assertTrue(r["dry_run"])
++
++    def test_natural_language_does_not_trigger_write(self):
++        """Natural language 'I confirm' does NOT call apply_suggestion(dry_run=False)."""
++        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
++        # Use a query_expansion lesson (not memory_recall) to test dry_run
++        s = suggest_policy_patch("搜配置的时候要扩展搜索 provider")
++        # Even if someone says "I confirm", the function defaults to dry_run
++        r = apply_suggestion(s, user_context={"user_id": "x"})
++        self.assertTrue(r["dry_run"])
++        self.assertEqual(r["status"], "dry_run")
++
++    def test_sanitized_lesson_text(self):
++        """_lesson_source in preview should be sanitized."""
++        from agent.memory_metacognition import _sanitize_lesson_text
++        raw = "chat_id 123456789 对应 Steven，token=abc123secret"
++        sanitized = _sanitize_lesson_text(raw)
++        self.assertNotIn("123456789", sanitized)
++        self.assertIn("[ID]", sanitized)
++        self.assertIn("[REDACTED]", sanitized)
++        self.assertNotIn("abc123secret", sanitized)
++
++    def test_user_id_from_runtime_not_text(self):
++        """user_id in target path comes from user_context, not lesson text."""
++        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
++        # Lesson mentions a user_id but user_context is different
++        s = suggest_policy_patch("用户 user_xyz 的配置")
++        r = apply_suggestion(s, user_context={"user_id": "actual_user"}, dry_run=True)
++        self.assertIn("user_actual_user", r["file_path"])
++        self.assertNotIn("user_xyz", r["file_path"])
 +
 +
 +if __name__ == "__main__":
