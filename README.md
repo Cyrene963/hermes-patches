@@ -34,8 +34,12 @@ Telegram/CLI/Discord 记忆互通，`auto-setup` 一键检测 owner。
 **🧠 记忆元认知框架 (NEW)**
 Hermes 以前的问题：它有记忆，但不知道自己记得什么，也不知道什么时候该查记忆。现在补上了三层防护：
 - **不再失忆**：session 启动时自动注入记忆库摘要（"我大概记得什么"），不用等用户问才想起来
-- **搜得更准**：你说"发个文件到 Telegram"，它会自动搜索 sendDocument、chat_id、Bot API 等相关记忆，而不是只拿你的原话去搜。实测召回率提升 3-5 倍
-- **拦得住**：Telegram 发文件必须用 sendDocument、不能用 send_message、不能带 MEDIA: 标签、不能缺 chat_id——这些不是靠模型"自觉"，是系统在工具调用前强制检查参数，不对就 block。rm -rf / git push --force 同理
+- **搜得更准**：你说"改一下配置"，它不只搜"配置"，还会自动搜 config.yaml、provider、gateway 等相关记忆。你说"做个 patch"，它会搜 branch、PR、四端同步。以前经常搜不到、白问的情况大幅减少
+- **拦得住**：不是靠模型"自觉"，是系统在工具调用前强制检查参数。比如：
+  - `rm -rf` / `git push --force` / `drop table` → 直接 block，不给执行
+  - 发消息时带了文件标签但方法不对 → block，要求用正确方式
+  - 缺少必要参数（比如收件人没填）→ block，不发空包
+  - 你也可以自定义规则：哪些命令要拦、哪些字段必须存在、哪些值不能出现
 - 默认关闭，不影响现有行为，本地 policy 文件启用
 
 ## 一行命令安装
