@@ -1,0 +1,42 @@
+# Memory Policy Example (desensitized template)
+#
+# Copy this file to ~/.hermes/memory_policy.yaml and customize.
+# The framework loads this file and overlays it on the default policy.
+#
+# All features are DISABLED by default. Enable only what you need.
+# See agent/memory_policy.default.yaml for the full schema reference.
+
+# ── Memory Index ──────────────────────────────────────────────────
+# Injects a compact index of what's in the memory store into the system prompt.
+# Useful for helping the agent recall what memories exist without full prefetch.
+memory_index:
+  enabled: false
+  # max_items: 20
+  # format: "compact"  # or "verbose"
+
+# ── Query Expansion ───────────────────────────────────────────────
+# Expands user messages into multiple hindsight search queries.
+# Improves recall precision by searching for related terms.
+query_expansion:
+  enabled: false
+  # max_queries: 5
+  # expansions:
+  #   # Map user terms → related search terms
+  #   "project name":
+  #     - "related term 1"
+  #     - "related term 2"
+
+# ── Preflight Policy ─────────────────────────────────────────────
+# Gates tool execution based on memory state.
+# Default: no-op (all operations allowed).
+preflight:
+  enabled: false
+  # rules:
+  #   - tool: send_message
+  #     task_type: outgoing_message
+  #     checks:
+  #       - type: identity
+  #         query: "recipient"
+  #         required: true
+  #         error: "recipient not verified"
+  #     block_on_failure: false  # true = hard block, false = warn only
