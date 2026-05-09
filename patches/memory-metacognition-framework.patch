@@ -1,7 +1,7 @@
 From c9d860ff93e05a177b7c47d38c31543e06456d4f Mon Sep 17 00:00:00 2001
 From: Cyrene963 <Nitrogen@users.noreply.github.com>
 Date: Sat, 9 May 2026 19:31:47 +0800
-Subject: [PATCH 1/4] feat: add configurable memory metacognition framework
+Subject: [PATCH 1/5] feat: add configurable memory metacognition framework
 
 Introduces opt-in extension points for compact memory indexing,
 recall query expansion, and memory-aware preflight checks.
@@ -906,7 +906,7 @@ index 000000000..cce50a396
 From 26ac361ef4666a5df42139b61228b11e90a4e573 Mon Sep 17 00:00:00 2001
 From: Cyrene963 <Nitrogen@users.noreply.github.com>
 Date: Sat, 9 May 2026 21:06:30 +0800
-Subject: [PATCH 2/4] feat: add structured preflight argument checks
+Subject: [PATCH 2/5] feat: add structured preflight argument checks
 
 Adds five new check types that validate tool arguments directly,
 complementing the existing memory recall checks:
@@ -1437,7 +1437,7 @@ index cce50a396..007255ffe 100644
 From 223296bf1e894b54ba672616cdc55bb37123177e Mon Sep 17 00:00:00 2001
 From: Cyrene963 <Nitrogen@users.noreply.github.com>
 Date: Sat, 9 May 2026 22:06:56 +0800
-Subject: [PATCH 3/4] feat: add Task Routing Preflight (Strategy Recall Gate)
+Subject: [PATCH 3/5] feat: add Task Routing Preflight (Strategy Recall Gate)
 
 Adds a fourth layer to the memory metacognition framework:
 before tool selection, match user message against known strategies
@@ -1648,7 +1648,7 @@ index 52d995c4e..9bde39c22 100644
 From 547f9c7a817d2a3799a735143455c1491b59b0fa Mon Sep 17 00:00:00 2001
 From: Cyrene963 <Nitrogen@users.noreply.github.com>
 Date: Sat, 9 May 2026 22:52:46 +0800
-Subject: [PATCH 4/4] feat: add per-user multi-tenant isolation to memory
+Subject: [PATCH 4/5] feat: add per-user multi-tenant isolation to memory
  metacognition
 
 Adds optional user_context parameter to all build_* and load_policy
@@ -1924,6 +1924,347 @@ index 9bde39c22..a8d36cfb9 100644
              _hint = _strat.check(original_user_message if isinstance(original_user_message, str) else "")
              if _hint:
                  _hint_text = (
+-- 
+2.39.5
+
+
+From b9e4586d8536dc5488a7a0ac4a5e577bb1e725cb Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Sat, 9 May 2026 23:05:57 +0800
+Subject: [PATCH 5/5] feat: add lesson promotion / policy suggestion framework
+
+Adds a lightweight mechanism for converting user lessons into
+reviewable policy suggestions:
+
+- classify_lesson(): categorizes lessons as query_expansion,
+  task_routing, preflight, or memory_recall
+- suggest_policy_patch(): generates structured suggestion dict
+- apply_suggestion(): dry-run by default, explicit confirm to write
+- Scope detection: public vs private (based on indicators)
+- Default: no-op, no files modified, no behavior changes
+- 10 new upstream tests (53 total)
+---
+ agent/memory_metacognition.py               | 238 ++++++++++++++++++++
+ tests/test_memory_metacognition_upstream.py |  63 ++++++
+ 2 files changed, 301 insertions(+)
+
+diff --git a/agent/memory_metacognition.py b/agent/memory_metacognition.py
+index c863a1ea9..3a6c622e7 100644
+--- a/agent/memory_metacognition.py
++++ b/agent/memory_metacognition.py
+@@ -719,3 +719,241 @@ def build_strategy_preflight(user_context: Optional[Dict] = None) -> TaskRouting
+     bank = _resolve_bank_id(user_context) or routing_cfg.get("bank_id",
+                            policy.get("preflight", {}).get("bank_id", "hindsight"))
+     return TaskRoutingPreflight(rules=rules, hindsight_api=api, bank_id=bank)
++
++
++# ─── Lesson Promotion / Policy Suggestion ────────────────────────────
++
++LESSON_KEYWORDS = {
++    "query_expansion": [
++        "搜", "搜索", "recall", "search", "扩展", "expand", "关键词",
++        "keyword", "相关词", "related terms",
++    ],
++    "task_routing": [
++        "用", "用这个", "优先", "prefer", "avoid", "别用", "不要用",
++        "方法", "method", "策略", "strategy", "路由", "route",
++        "应该用", "should use", "camoufox", "curl", "browser",
++    ],
++    "preflight": [
++        "检查", "check", "验证", "verify", "必须", "must", "不能",
++        "block", "阻止", "拦截", "阻止", "before", "执行前",
++        "参数", "parameter", "field", "字段",
++    ],
++}
++
++
++@dataclass
++class LessonSuggestion:
++    """A reviewable policy suggestion derived from a lesson."""
++    lesson_text: str              # original lesson
++    lesson_type: str              # "query_expansion" | "task_routing" | "preflight" | "memory_recall"
++    scope: str                    # "public" | "private" | "user_specific"
++    suggestion: Dict[str, Any]    # structured policy patch
++    confidence: str               # "high" | "medium" | "low"
++    reasoning: str                # why this classification
++    applied: bool = False         # whether user confirmed
++
++
++def classify_lesson(lesson_text: str) -> tuple:
++    """Classify a lesson into type and scope.
++
++    Returns (lesson_type, scope, confidence, reasoning).
++    """
++    text_lower = lesson_text.lower()
++
++    # Score each type by keyword matches
++    scores = {}
++    for ltype, keywords in LESSON_KEYWORDS.items():
++        score = sum(1 for kw in keywords if kw.lower() in text_lower)
++        scores[ltype] = score
++
++    # Determine type
++    if not any(scores.values()):
++        return ("memory_recall", "private", "low",
++                "No policy keywords matched; treat as general memory.")
++
++    best_type = max(scores, key=scores.get)
++    best_score = scores[best_type]
++
++    if best_score >= 3:
++        confidence = "high"
++    elif best_score >= 2:
++        confidence = "medium"
++    else:
++        confidence = "low"
++
++    # Determine scope: public if no private indicators
++    private_indicators = [
++        "chat_id", "token", "密码", "password", "key", "secret",
++        "api_key", "我的", "my ", "用户", "user_id", "telegram",
++        "个人", "private",
++    ]
++    is_private = any(ind in text_lower for ind in private_indicators)
++    scope = "private" if is_private else "public"
++
++    reasoning = f"Matched {best_score} keywords for {best_type}. "
++    reasoning += "Contains private indicators." if is_private else "No private indicators."
++
++    return (best_type, scope, confidence, reasoning)
++
++
++def suggest_policy_patch(lesson_text: str,
++                         user_context: Optional[Dict] = None) -> LessonSuggestion:
++    """Generate a policy suggestion from a lesson text.
++
++    Returns a LessonSuggestion that can be reviewed before applying.
++    Does NOT modify any files.
++    """
++    lesson_type, scope, confidence, reasoning = classify_lesson(lesson_text)
++
++    suggestion: Dict[str, Any] = {}
++
++    if lesson_type == "query_expansion":
++        # Extract potential keywords from the lesson
++        # Simple heuristic: look for quoted terms or key phrases
++        import re
++        quoted = re.findall(r'[""\'](.*?)[""\']|「(.*?)」|『(.*?)』', lesson_text)
++        keywords = [q[0] or q[1] or q[2] for q in quoted]
++        if not keywords:
++            # Fallback: use significant words
++            stopwords = {"的", "是", "在", "了", "和", "与", "或", "不", "要", "会",
++                         "the", "a", "an", "is", "are", "was", "were", "be", "been",
++                         "to", "of", "in", "for", "on", "with", "at", "by", "from"}
++            words = re.findall(r'[\w\u4e00-\u9fff]+', lesson_text)
++            keywords = [w for w in words if len(w) > 1 and w.lower() not in stopwords][:5]
++
++        suggestion = {
++            "section": "query_expansion",
++            "action": "add_expansions",
++            "keywords": keywords[:5],
++            "note": "Review keywords before adding to policy.",
++        }
++
++    elif lesson_type == "task_routing":
++        # Extract trigger patterns and preferred method
++        import re
++        urls = re.findall(r'https?://[^\s]+', lesson_text)
++        domains = re.findall(r'[\w-]+\.(com|org|net|io|do|me|cn)', lesson_text)
++
++        suggestion = {
++            "section": "routing_preflight",
++            "action": "add_rule",
++            "trigger_patterns": urls[:3] or domains[:3] or [lesson_text[:50]],
++            "preferred_method": "",
++            "avoid_methods": [],
++            "note": "Fill in preferred_method and avoid_methods before applying.",
++        }
++
++    elif lesson_type == "preflight":
++        suggestion = {
++            "section": "preflight",
++            "action": "add_rule",
++            "tool": "",
++            "task_type": "",
++            "checks": [],
++            "note": "Fill in tool, task_type, and checks before applying.",
++        }
++
++    else:  # memory_recall
++        suggestion = {
++            "section": "memory_only",
++            "action": "retain_as_memory",
++            "note": "No policy change. Store as hindsight memory for recall.",
++        }
++
++    return LessonSuggestion(
++        lesson_text=lesson_text,
++        lesson_type=lesson_type,
++        scope=scope,
++        suggestion=suggestion,
++        confidence=confidence,
++        reasoning=reasoning,
++    )
++
++
++def apply_suggestion(suggestion: LessonSuggestion,
++                     user_context: Optional[Dict] = None,
++                     dry_run: bool = True) -> Dict[str, Any]:
++    """Apply a confirmed lesson suggestion to the appropriate policy file.
++
++    dry_run=True (default): returns what WOULD be written, without writing.
++    dry_run=False: writes to the appropriate policy file.
++
++    Returns dict with: status, file_path, diff_preview, errors.
++    """
++    if suggestion.applied:
++        return {"status": "already_applied", "errors": []}
++
++    # Determine target file
++    scope = suggestion.scope
++    if user_context and user_context.get("user_id"):
++        target_path = _get_user_policy_path(user_context["user_id"])
++        if not target_path:
++            target_path = os.path.join(
++                os.path.expanduser("~"), ".hermes", "memories",
++                f"user_{user_context['user_id']}", "memory_policy.yaml"
++            )
++    else:
++        target_path = os.path.join(
++            os.path.expanduser("~"), ".hermes", "memory_policy.yaml"
++        )
++
++    # Build the patch
++    section = suggestion.suggestion.get("section", "")
++    action = suggestion.suggestion.get("action", "")
++
++    if action == "retain_as_memory":
++        return {
++            "status": "no_policy_change",
++            "message": "Lesson stored as memory only. No policy modification needed.",
++            "file_path": None,
++            "dry_run": dry_run,
++        }
++
++    # For other actions, build a YAML patch preview
++    patch_preview = {
++        section: {
++            "_lesson_source": suggestion.lesson_text[:100],
++            "_confidence": suggestion.confidence,
++            **{k: v for k, v in suggestion.suggestion.items()
++               if k not in ("section", "action", "note")},
++        }
++    }
++
++    if dry_run:
++        return {
++            "status": "dry_run",
++            "file_path": target_path,
++            "would_write": patch_preview,
++            "note": suggestion.suggestion.get("note", ""),
++            "dry_run": True,
++        }
++
++    # Actually write (requires explicit dry_run=False)
++    try:
++        import yaml
++        os.makedirs(os.path.dirname(target_path), exist_ok=True)
++
++        existing = {}
++        if os.path.exists(target_path):
++            with open(target_path) as f:
++                existing = yaml.safe_load(f) or {}
++
++        _deep_merge(existing, patch_preview)
++
++        with open(target_path, "w") as f:
++            yaml.dump(existing, f, default_flow_style=False, allow_unicode=True)
++
++        suggestion.applied = True
++        _POLICY_CACHE.pop(user_context.get("user_id") if user_context else None, None)
++
++        return {
++            "status": "applied",
++            "file_path": target_path,
++            "dry_run": False,
++        }
++    except Exception as e:
++        return {
++            "status": "error",
++            "errors": [str(e)],
++            "dry_run": False,
++        }
+diff --git a/tests/test_memory_metacognition_upstream.py b/tests/test_memory_metacognition_upstream.py
+index 007255ffe..1228c1cb7 100644
+--- a/tests/test_memory_metacognition_upstream.py
++++ b/tests/test_memory_metacognition_upstream.py
+@@ -388,3 +388,66 @@ class TestStructuredChecks(unittest.TestCase):
+ 
+ if __name__ == "__main__":
+     unittest.main(verbosity=2)
++
++
++class TestLessonPromotion(unittest.TestCase):
++    """Test lesson classification and policy suggestion."""
++
++    def test_classify_query_expansion(self):
++        from agent.memory_metacognition import classify_lesson
++        ltype, scope, conf, _ = classify_lesson("搜 linux.do 的时候要扩展搜索 camoufox 和 cloudflare 关键词")
++        self.assertEqual(ltype, "query_expansion")
++
++    def test_classify_task_routing(self):
++        from agent.memory_metacognition import classify_lesson
++        ltype, scope, conf, _ = classify_lesson("linux.do 应该优先用 camoufox，不要用 curl 和 browser_navigate")
++        self.assertEqual(ltype, "task_routing")
++
++    def test_classify_preflight(self):
++        from agent.memory_metacognition import classify_lesson
++        ltype, scope, conf, _ = classify_lesson("执行 rm -rf 之前必须检查 backup 字段，不能直接执行")
++        self.assertEqual(ltype, "preflight")
++
++    def test_classify_memory_recall(self):
++        from agent.memory_metacognition import classify_lesson
++        ltype, scope, conf, _ = classify_lesson("今天天气不错")
++        self.assertEqual(ltype, "memory_recall")
++
++    def test_scope_private_with_chat_id(self):
++        from agent.memory_metacognition import classify_lesson
++        _, scope, _, _ = classify_lesson("chat_id 12345 对应用户 A")
++        self.assertEqual(scope, "private")
++
++    def test_scope_public_without_private_data(self):
++        from agent.memory_metacognition import classify_lesson
++        _, scope, _, _ = classify_lesson("linux.do 需要 camoufox 访问")
++        self.assertEqual(scope, "public")
++
++    def test_suggest_returns_lesson_suggestion(self):
++        from agent.memory_metacognition import suggest_policy_patch, LessonSuggestion
++        result = suggest_policy_patch("搜配置的时候要扩展搜索 provider 和 gateway")
++        self.assertIsInstance(result, LessonSuggestion)
++        self.assertEqual(result.lesson_type, "query_expansion")
++
++    def test_suggest_does_not_write_files(self):
++        from agent.memory_metacognition import suggest_policy_patch
++        result = suggest_policy_patch("test lesson")
++        self.assertFalse(result.applied)
++        # No files should have been modified
++
++    def test_apply_dry_run_default(self):
++        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
++        suggestion = suggest_policy_patch("搜 linux.do 要扩展 camoufox")
++        result = apply_suggestion(suggestion)
++        self.assertTrue(result["dry_run"])
++        self.assertEqual(result["status"], "dry_run")
++
++    def test_apply_memory_only_no_policy_change(self):
++        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
++        suggestion = suggest_policy_patch("今天天气不错")
++        result = apply_suggestion(suggestion)
++        self.assertEqual(result["status"], "no_policy_change")
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
 -- 
 2.39.5
 
