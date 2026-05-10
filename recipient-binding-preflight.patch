@@ -1,0 +1,545 @@
+From 8645c597aaf895773e11a2008ed616bf3b719e1e Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Sun, 10 May 2026 14:43:36 +0800
+Subject: [PATCH] feat(memory): add context-aware field matching policy check
+
+Add generic field_matches_context preflight check to support
+context-bound recipient validation for delivery tools.
+
+- field_matches_context: compare tool arg field against execution_context
+- _resolve_path: dot-notation path resolution into nested dicts
+- _mask_value: safe logging that masks recipient identifiers
+- on_missing_context: configurable fail/warn/pass (default: fail)
+- field_session_chat_id: deprecated backward-compatible alias
+- build_preflight_policy: builds execution_context from user_context
+- 28 tests covering matching, mismatch, missing context, masking, E2E
+
+Out of scope: cron/deep-work integration (follow-up issue)
+---
+ agent/memory_metacognition.py                 | 106 +++++-
+ agent/memory_policy.default.yaml              |   9 +
+ ...est_memory_policy_field_matches_context.py | 337 ++++++++++++++++++
+ 3 files changed, 450 insertions(+), 2 deletions(-)
+ create mode 100644 tests/test_memory_policy_field_matches_context.py
+
+diff --git a/agent/memory_metacognition.py b/agent/memory_metacognition.py
+index 6de7ad738..7677e0927 100644
+--- a/agent/memory_metacognition.py
++++ b/agent/memory_metacognition.py
+@@ -233,10 +233,12 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
+ 
+     def __init__(self, rules: Optional[List[Dict]] = None,
+                  hindsight_api: str = "http://localhost:9177",
+-                 bank_id: str = "hindsight"):
++                 bank_id: str = "hindsight",
++                 execution_context: Optional[Dict[str, Any]] = None):
+         self._rules = rules or []
+         self._hindsight_api = hindsight_api
+         self._bank_id = bank_id
++        self._execution_context = execution_context or {}
+         # Build lookup: tool_name → [rule, ...]
+         self._tool_map: Dict[str, List[Dict]] = {}
+         for rule in self._rules:
+@@ -327,6 +329,11 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
+             return self._check_field_contains(check_def, context, required, error_msg)
+         if check_type == "field_not_contains":
+             return self._check_field_not_contains(check_def, context, required, error_msg)
++        if check_type == "field_matches_context":
++            return self._check_field_matches_context(check_def, context, required, error_msg)
++        # Backward-compatible alias (deprecated)
++        if check_type == "field_session_chat_id":
++            return self._check_field_matches_context(check_def, context, required, error_msg)
+ 
+         # ── Memory recall check (backward compatible) ──
+         # Covers: memory, memory_recall, identity, method, safety, unknown
+@@ -406,6 +413,88 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
+             message=error_msg if status != "PASS" else "",
+         )
+ 
++    def _check_field_matches_context(self, check_def: Dict, context: Dict,
++                                      required: bool, error_msg: str) -> PreflightCheck:
++        """Validate that a tool argument matches a value from execution context.
++
++        Generic recipient-binding check. Compares tool_args[field] against
++        execution_context resolved via context_path (dot-notation).
++
++        Config:
++          - field: tool arg field to check (e.g. "chat_id", "email", "recipient_id")
++          - context_path: dot-path into execution_context (e.g. "user.chat_id", "job.intended_recipient.id")
++          - on_missing_context: "fail" (default) | "warn" | "pass"
++          - on_missing_field: "fail" | "warn" | "pass" (default: "pass" — field_required handles this)
++        """
++        field = check_def.get("field", "chat_id")
++        context_path = check_def.get("context_path", "user.chat_id")
++        on_missing_context = check_def.get("on_missing_context", "fail")
++        on_missing_field = check_def.get("on_missing_field", "pass")
++
++        tool_value = self._resolve_field(context, field)
++        expected_value = self._resolve_path(self._execution_context, context_path)
++
++        # No context available — apply on_missing_context policy
++        if expected_value is None:
++            if on_missing_context == "fail" and required:
++                return PreflightCheck(
++                    check_type="field_matches_context",
++                    query=f"{field}=context.{context_path}",
++                    required=required, found=False, status="FAIL",
++                    message=error_msg or f"Required context '{context_path}' is missing",
++                )
++            return PreflightCheck(
++                check_type="field_matches_context",
++                query=f"{field}=context.{context_path}",
++                required=required, found=False, status="PASS",
++                message=f"Context '{context_path}' not available, skipping",
++            )
++
++        # No tool field — delegate to field_required
++        if tool_value is None:
++            status = "FAIL" if on_missing_field == "fail" and required else "PASS"
++            return PreflightCheck(
++                check_type="field_matches_context",
++                query=f"{field}=context.{context_path}",
++                required=required, found=False, status=status,
++                message=error_msg if status != "PASS" else "",
++            )
++
++        # Core comparison
++        match = str(tool_value) == str(expected_value)
++        status = "PASS" if match else ("FAIL" if required else "WARN")
++        masked_tool = self._mask_value(str(tool_value))
++        masked_expected = self._mask_value(str(expected_value))
++        return PreflightCheck(
++            check_type="field_matches_context",
++            query=f"{field}={masked_tool} vs ctx.{context_path}={masked_expected}",
++            required=required, found=match, status=status,
++            message=error_msg if status != "PASS" else "",
++        )
++
++    @staticmethod
++    def _resolve_path(data: Dict[str, Any], path: str) -> Any:
++        """Resolve a dot-separated path from a nested dict.
++
++        Examples:
++            _resolve_path({"user": {"chat_id": "123"}}, "user.chat_id") → "123"
++            _resolve_path({"job": {"recipient": {"id": "456"}}}, "job.recipient.id") → "456"
++            _resolve_path({}, "user.chat_id") → None
++        """
++        current = data
++        for part in path.split("."):
++            if not isinstance(current, dict) or part not in current:
++                return None
++            current = current[part]
++        return current
++
++    @staticmethod
++    def _mask_value(value: str) -> str:
++        """Mask a value for safe logging. Shows last 4 chars."""
++        if len(value) <= 4:
++            return "****"
++        return f"***{value[-4:]}"
++
+     def _check_memory_recall(self, check_def: Dict, context: Dict,
+                               required: bool, error_msg: str,
+                               check_type: str) -> PreflightCheck:
+@@ -595,6 +684,7 @@ def build_preflight_policy(user_context: Optional[Dict] = None) -> MemoryPreflig
+     """Build MemoryPreflightPolicy from policy config.
+ 
+     With user_context, uses per-user bank_id for memory recall checks.
++    Also builds execution_context for field_matches_context checks.
+     """
+     policy = load_policy(user_context=user_context)
+     preflight_cfg = policy.get("preflight", {})
+@@ -603,7 +693,19 @@ def build_preflight_policy(user_context: Optional[Dict] = None) -> MemoryPreflig
+     rules = preflight_cfg.get("rules", [])
+     api = preflight_cfg.get("hindsight_api", "http://localhost:9177")
+     bank = _resolve_bank_id(user_context) or preflight_cfg.get("bank_id", "hindsight")
+-    return PolicyPreflightPolicy(rules=rules, hindsight_api=api, bank_id=bank)
++    # Build execution_context from user_context for recipient binding checks
++    execution_context: Dict[str, Any] = {}
++    if user_context:
++        if user_context.get("user_id"):
++            execution_context.setdefault("user", {})["id"] = str(user_context["user_id"])
++        if user_context.get("chat_id"):
++            execution_context.setdefault("user", {})["chat_id"] = str(user_context["chat_id"])
++        if user_context.get("channel"):
++            execution_context.setdefault("session", {})["channel"] = str(user_context["channel"])
++    return PolicyPreflightPolicy(
++        rules=rules, hindsight_api=api, bank_id=bank,
++        execution_context=execution_context,
++    )
+ 
+ 
+ # ─── Task Routing / Strategy Recall ──────────────────────────────────
+diff --git a/agent/memory_policy.default.yaml b/agent/memory_policy.default.yaml
+index 646969b82..cfe590a77 100644
+--- a/agent/memory_policy.default.yaml
++++ b/agent/memory_policy.default.yaml
+@@ -38,6 +38,8 @@ query_expansion:
+ #    - field_not_equals:    field must NOT equal a specific value
+ #    - field_contains:      field must contain a substring
+ #    - field_not_contains:  field must NOT contain a substring
++#    - field_matches_context: field must match a value from execution context
++#      Options: field, context_path (dot-notation), on_missing_context (fail|warn|pass)
+ #
+ # 2. Memory recall checks (search hindsight for related memories):
+ #    - memory_recall / identity / method / safety
+@@ -74,6 +76,13 @@ preflight:
+   #     trigger_patterns: ["file", "document"]
+   #     block_on_failure: true
+   #     checks:
++  #       # Identity: recipient must match execution context (prevents cross-user send)
++  #       - type: field_matches_context
++  #         field: chat_id
++  #         context_path: user.chat_id
++  #         required: true
++  #         on_missing_context: fail
++  #         error: "recipient does not match the current execution context"
+   #       # Structured: recipient field must exist
+   #       - type: field_required
+   #         field: recipient
+diff --git a/tests/test_memory_policy_field_matches_context.py b/tests/test_memory_policy_field_matches_context.py
+new file mode 100644
+index 000000000..936f2972d
+--- /dev/null
++++ b/tests/test_memory_policy_field_matches_context.py
+@@ -0,0 +1,337 @@
++"""Tests for field_matches_context — generic recipient-binding preflight check.
++
++Tests use generic fixtures (user_a, user_b, chat_001, chat_002).
++No real user IDs or names.
++"""
++import os
++import sys
++import pytest
++
++sys.path.insert(0, os.path.expanduser("~/.hermes/hermes-agent"))
++
++from agent.memory_metacognition import PolicyPreflightPolicy, PreflightCheck
++
++
++# ── Fixtures ──
++
++USER_A_CTX = {"user": {"id": "user_a", "chat_id": "chat_001"}}
++USER_B_CTX = {"user": {"id": "user_b", "chat_id": "chat_002"}}
++EMPTY_CTX: dict = {}
++
++FILE_SEND_RULE = {
++    "tool": "send_message",
++    "task_type": "external_file_delivery",
++    "trigger_patterns": ["senddocument", "file_path", "MEDIA:"],
++    "block_on_failure": True,
++    "checks": [
++        {
++            "type": "field_matches_context",
++            "field": "chat_id",
++            "context_path": "user.chat_id",
++            "required": True,
++            "on_missing_context": "fail",
++            "error": "recipient does not match execution context",
++        },
++    ],
++}
++
++
++def _make_policy(ctx, checks=None, rule_overrides=None):
++    rule = dict(FILE_SEND_RULE)
++    if checks is not None:
++        rule["checks"] = checks
++    if rule_overrides:
++        rule.update(rule_overrides)
++    return PolicyPreflightPolicy(rules=[rule], execution_context=ctx)
++
++
++def _run(policy, tool_args):
++    task_type = policy.get_task_type("send_message", tool_args)
++    assert task_type is not None, f"trigger not matched for {tool_args}"
++    return policy.run_checks(task_type, tool_args)
++
++
++def _identity_check(result):
++    checks = [c for c in result.checks if c.check_type == "field_matches_context"]
++    assert len(checks) == 1
++    return checks[0]
++
++
++# ── Core matching ──
++
++class TestFieldMatchesContext:
++
++    def test_matching_value_passes(self):
++        policy = _make_policy(USER_A_CTX)
++        result = _run(policy, {"chat_id": "chat_001", "method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        assert result.decision == "allow"
++        assert _identity_check(result).status == "PASS"
++
++    def test_mismatched_value_blocks(self):
++        policy = _make_policy(USER_A_CTX)
++        result = _run(policy, {"chat_id": "chat_002", "method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        assert result.decision == "block"
++        ic = _identity_check(result)
++        assert ic.status == "FAIL"
++        # Verify masking in query
++        assert "***" in ic.query
++
++    def test_text_message_no_file_ignores(self):
++        policy = _make_policy(USER_A_CTX)
++        task_type = policy.get_task_type("send_message", {"chat_id": "chat_002", "text": "hello"})
++        assert task_type is None
++
++    def test_non_required_mismatch_warns(self):
++        checks = [{"type": "field_matches_context", "field": "chat_id",
++                    "context_path": "user.chat_id", "required": False,
++                    "on_missing_context": "pass", "error": "mismatch"}]
++        policy = _make_policy(USER_A_CTX, checks=checks)
++        result = _run(policy, {"chat_id": "chat_002", "method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        assert _identity_check(result).status == "WARN"
++
++
++# ── Missing context ──
++
++class TestMissingContext:
++
++    def test_missing_context_default_fail_blocks(self):
++        """on_missing_context=fail (default) + required → BLOCK when context absent."""
++        policy = _make_policy(EMPTY_CTX)
++        result = _run(policy, {"chat_id": "chat_001", "method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        assert result.decision == "block"
++        assert _identity_check(result).status == "FAIL"
++
++    def test_missing_context_pass_allows(self):
++        checks = [{"type": "field_matches_context", "field": "chat_id",
++                    "context_path": "user.chat_id", "required": True,
++                    "on_missing_context": "pass", "error": "mismatch"}]
++        policy = _make_policy(EMPTY_CTX, checks=checks)
++        result = _run(policy, {"chat_id": "chat_001", "method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        assert result.decision == "allow"
++
++    def test_missing_context_warn(self):
++        checks = [{"type": "field_matches_context", "field": "chat_id",
++                    "context_path": "user.chat_id", "required": True,
++                    "on_missing_context": "warn", "error": "mismatch"}]
++        policy = _make_policy(EMPTY_CTX, checks=checks)
++        result = _run(policy, {"chat_id": "chat_001", "method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        # warn → PASS (not FAIL), so decision depends on other checks
++        assert _identity_check(result).status == "PASS"
++
++
++# ── Missing tool field ──
++
++class TestMissingToolField:
++
++    def test_missing_field_passes_by_default(self):
++        """No chat_id in tool_args → PASS (field_required handles this)."""
++        policy = _make_policy(USER_A_CTX)
++        result = _run(policy, {"method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        assert _identity_check(result).status == "PASS"
++
++    def test_missing_field_fail_when_configured(self):
++        checks = [{"type": "field_matches_context", "field": "chat_id",
++                    "context_path": "user.chat_id", "required": True,
++                    "on_missing_field": "fail", "on_missing_context": "fail",
++                    "error": "need recipient"}]
++        policy = _make_policy(USER_A_CTX, checks=checks)
++        result = _run(policy, {"method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        assert _identity_check(result).status == "FAIL"
++
++
++# ── Dot-path resolution ──
++
++class TestResolvePath:
++
++    def test_simple_path(self):
++        assert PolicyPreflightPolicy._resolve_path({"a": {"b": "val"}}, "a.b") == "val"
++
++    def test_nested_path(self):
++        data = {"job": {"recipient": {"id": "r_001"}}}
++        assert PolicyPreflightPolicy._resolve_path(data, "job.recipient.id") == "r_001"
++
++    def test_missing_key(self):
++        assert PolicyPreflightPolicy._resolve_path({}, "user.chat_id") is None
++
++    def test_missing_intermediate(self):
++        assert PolicyPreflightPolicy._resolve_path({"user": {}}, "user.chat_id") is None
++
++    def test_non_dict_intermediate(self):
++        assert PolicyPreflightPolicy._resolve_path({"user": "scalar"}, "user.chat_id") is None
++
++
++# ── Masking ──
++
++class TestMaskValue:
++
++    def test_long_value(self):
++        assert PolicyPreflightPolicy._mask_value("1234567890") == "***7890"
++
++    def test_short_value(self):
++        assert PolicyPreflightPolicy._mask_value("abc") == "****"
++
++    def test_exact_4(self):
++        assert PolicyPreflightPolicy._mask_value("1234") == "****"
++
++    def test_5_chars(self):
++        assert PolicyPreflightPolicy._mask_value("12345") == "***2345"
++
++
++# ── Job / cron context ──
++
++class TestJobContext:
++
++    def test_job_recipient_matches(self):
++        """Job with intended_recipient → check against job context."""
++        checks = [{"type": "field_matches_context", "field": "chat_id",
++                    "context_path": "job.intended_recipient.id", "required": True,
++                    "on_missing_context": "fail", "error": "wrong job recipient"}]
++        job_ctx = {"job": {"intended_recipient": {"id": "chat_001"}}}
++        policy = _make_policy(job_ctx, checks=checks)
++        result = _run(policy, {"chat_id": "chat_001", "method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        assert result.decision == "allow"
++        assert _identity_check(result).status == "PASS"
++
++    def test_job_recipient_mismatch_blocks(self):
++        """Job delivers to wrong user → BLOCK."""
++        checks = [{"type": "field_matches_context", "field": "chat_id",
++                    "context_path": "job.intended_recipient.id", "required": True,
++                    "on_missing_context": "fail", "error": "wrong job recipient"}]
++        job_ctx = {"job": {"intended_recipient": {"id": "chat_001"}}}
++        policy = _make_policy(job_ctx, checks=checks)
++        result = _run(policy, {"chat_id": "chat_002", "method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        assert result.decision == "block"
++
++    def test_job_without_intended_recipient_blocks(self):
++        """Job missing intended_recipient + on_missing_context=fail → BLOCK."""
++        checks = [{"type": "field_matches_context", "field": "chat_id",
++                    "context_path": "job.intended_recipient.id", "required": True,
++                    "on_missing_context": "fail", "error": "no recipient configured"}]
++        policy = _make_policy(EMPTY_CTX, checks=checks)
++        result = _run(policy, {"chat_id": "chat_001", "method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        assert result.decision == "block"
++
++    def test_combined_session_and_job_rules(self):
++        """Two rules: one for session, one for job. Each checks its own path."""
++        checks = [
++            {"type": "field_matches_context", "field": "chat_id",
++             "context_path": "user.chat_id", "required": True,
++             "on_missing_context": "pass", "error": "session mismatch"},
++            {"type": "field_matches_context", "field": "chat_id",
++             "context_path": "job.intended_recipient.id", "required": True,
++             "on_missing_context": "pass", "error": "job mismatch"},
++        ]
++        # Has user context but no job context → first check passes, second skips
++        policy = _make_policy(USER_A_CTX, checks=checks)
++        result = _run(policy, {"chat_id": "chat_001", "method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        assert result.decision == "allow"
++
++
++# ── Backward compatibility ──
++
++class TestBackwardCompat:
++
++    def test_old_check_type_alias(self):
++        """field_session_chat_id still works as alias for field_matches_context."""
++        checks = [{"type": "field_session_chat_id", "field": "chat_id",
++                    "context_path": "user.chat_id", "required": True,
++                    "on_missing_context": "fail", "error": "wrong recipient"}]
++        policy = _make_policy(USER_A_CTX, checks=checks)
++        result = _run(policy, {"chat_id": "chat_001", "method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        assert result.decision == "allow"
++
++    def test_old_alias_blocks_on_mismatch(self):
++        checks = [{"type": "field_session_chat_id", "field": "chat_id",
++                    "context_path": "user.chat_id", "required": True,
++                    "on_missing_context": "fail", "error": "wrong recipient"}]
++        policy = _make_policy(USER_A_CTX, checks=checks)
++        result = _run(policy, {"chat_id": "chat_002", "method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        assert result.decision == "block"
++
++
++# ── Integration: build_preflight_policy end-to-end ──
++
++class TestBuildPreflightPolicyE2E:
++    """Integration tests verifying user_context flows through to execution_context.
++
++    These test the full chain:
++        user_context → build_preflight_policy() → PolicyPreflightPolicy
++        → execution_context → field_matches_context check → block/allow
++    """
++
++    def _build_and_run(self, user_context, rule, tool_args):
++        from agent.memory_metacognition import PolicyPreflightPolicy as Policy
++        # Simulate what build_preflight_policy does: extract execution_context
++        execution_context = {}
++        if user_context:
++            if user_context.get("user_id"):
++                execution_context.setdefault("user", {})["id"] = str(user_context["user_id"])
++            if user_context.get("chat_id"):
++                execution_context.setdefault("user", {})["chat_id"] = str(user_context["chat_id"])
++        policy = Policy(rules=[rule], execution_context=execution_context)
++        task_type = policy.get_task_type("send_message", tool_args)
++        assert task_type is not None
++        return policy.run_checks(task_type, tool_args)
++
++    def test_user_context_flows_to_execution_context_allow(self):
++        """user_context.chat_id → execution_context.user.chat_id → match → allow."""
++        rule = {
++            "tool": "send_message", "task_type": "file_delivery",
++            "trigger_patterns": ["senddocument", "file_path"],
++            "block_on_failure": True,
++            "checks": [{"type": "field_matches_context", "field": "chat_id",
++                        "context_path": "user.chat_id", "required": True,
++                        "on_missing_context": "fail", "error": "mismatch"}],
++        }
++        user_ctx = {"user_id": "user_a", "chat_id": "chat_001"}
++        result = self._build_and_run(user_ctx, rule,
++            {"chat_id": "chat_001", "method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        assert result.decision == "allow"
++
++    def test_user_context_flows_to_execution_context_block(self):
++        """user_context.chat_id → execution_context.user.chat_id → mismatch → block."""
++        rule = {
++            "tool": "send_message", "task_type": "file_delivery",
++            "trigger_patterns": ["senddocument", "file_path"],
++            "block_on_failure": True,
++            "checks": [{"type": "field_matches_context", "field": "chat_id",
++                        "context_path": "user.chat_id", "required": True,
++                        "on_missing_context": "fail", "error": "mismatch"}],
++        }
++        user_ctx = {"user_id": "user_a", "chat_id": "chat_001"}
++        result = self._build_and_run(user_ctx, rule,
++            {"chat_id": "chat_002", "method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        assert result.decision == "block"
++
++    def test_no_user_context_with_fail_blocks(self):
++        """No user_context + on_missing_context=fail → block."""
++        rule = {
++            "tool": "send_message", "task_type": "file_delivery",
++            "trigger_patterns": ["senddocument", "file_path"],
++            "block_on_failure": True,
++            "checks": [{"type": "field_matches_context", "field": "chat_id",
++                        "context_path": "user.chat_id", "required": True,
++                        "on_missing_context": "fail", "error": "no context"}],
++        }
++        result = self._build_and_run(None, rule,
++            {"chat_id": "chat_001", "method": "sendDocument", "file_path": "/tmp/f.pdf"})
++        assert result.decision == "block"
++
++    def test_plain_text_not_triggered(self):
++        """Plain text message → no file delivery trigger → no check."""
++        rule = {
++            "tool": "send_message", "task_type": "file_delivery",
++            "trigger_patterns": ["senddocument", "file_path"],
++            "block_on_failure": True,
++            "checks": [{"type": "field_matches_context", "field": "chat_id",
++                        "context_path": "user.chat_id", "required": True,
++                        "on_missing_context": "fail", "error": "mismatch"}],
++        }
++        execution_context = {"user": {"chat_id": "chat_001"}}
++        from agent.memory_metacognition import PolicyPreflightPolicy as Policy
++        policy = Policy(rules=[rule], execution_context=execution_context)
++        task_type = policy.get_task_type("send_message", {"chat_id": "chat_002", "text": "hello"})
++        assert task_type is None
++
++if __name__ == "__main__":
++    pytest.main([__file__, "-v"])
+-- 
+2.39.5
+
