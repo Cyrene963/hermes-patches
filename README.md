@@ -164,18 +164,40 @@ bash <(curl -sL https://raw.githubusercontent.com/Cyrene963/hermes-patches/main/
 
 ## 与 hermes update 配合
 
-在 `~/.bashrc` 中添加：
+`hermes update` 会把本地源码更新到上游最新版本，可能覆盖本补丁集。建议给 `hermes update` 加一个 shell wrapper：先正常更新，再自动重新运行补丁安装脚本。
+
+### 临时使用（无需本地克隆）
+
+如果你是直接用一行命令安装补丁，可以把下面内容加入 `~/.bashrc` 或 `~/.zshrc`：
 
 ```bash
 hermes() {
     if [ "$1" = "update" ]; then
         command hermes update "${@:2}"
+        bash <(curl -sL https://raw.githubusercontent.com/Cyrene963/hermes-patches/main/install.sh)
+    else
+        command hermes "$@"
+    fi
+}
+```
+
+### 本地克隆使用（可选择性删补丁）
+
+如果你已经把仓库克隆到 `~/hermes-patches`，想保留/删除某些 `.patch` 后再安装，用这个版本：
+
+```bash
+hermes() {
+    if [ "$1" = "update" ]; then
+        command hermes update "${@:2}"
+        git -C ~/hermes-patches pull --ff-only
         bash ~/hermes-patches/install.sh
     else
         command hermes "$@"
     fi
 }
 ```
+
+添加后执行 `source ~/.bashrc` 或 `source ~/.zshrc` 生效。以后运行 `hermes update` 时，会自动在更新完成后重新打补丁。
 
 ## 许可
 
