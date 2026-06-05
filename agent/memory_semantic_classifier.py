@@ -172,6 +172,14 @@ def _fallback_classify(user_message: str, assistant_message: str = "") -> Semant
             "tool/auth mention requires safe credential-route memory",
         )
 
+    if re.search(r"(open[- ]source|generic|portable|public|private special[- ]casing|hardcod|hard-code|vendor neutral|adapter[- ]based)", text, re.I) and re.search(r"(memory architecture|architecture|system|core|framework|must|should|remain|avoid|not)", text, re.I):
+        return SemanticMemoryClassification(
+            "target_function", "long_term", 0.87, text, "review", "memory_os/target_functions/open_source_genericity",
+            True, "shared_public", _queries("memory_architecture_standard", text, "target_function"),
+            "Before changing memory infrastructure, verify the design remains generic, configurable, adapter-based, and free of private special-casing.",
+            "user stated an open-source-safe architecture target function",
+        )
+
     if re.search(r"(纠正|错了|错错错|不对|不是|又没|太气人|防复发|根因|通用.*解决|reject gate|数字替身|外置大脑|有必要吗|之前.*聊过|先回忆|先召回|项目目标)", text, re.I):
         return SemanticMemoryClassification(
             "correction_learning_event", "long_term", 0.88, text, "memory_graph", "用户档案/程序性记忆",
