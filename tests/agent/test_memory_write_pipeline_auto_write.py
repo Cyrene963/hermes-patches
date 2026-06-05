@@ -98,6 +98,52 @@ def test_limited_auto_refuses_core_namespace_by_policy():
     assert graph.calls == []
 
 
+def test_auto_store_heuristic_adds_default_on_candidate_but_shadow_does_not_write():
+    graph = FakeGraphClient()
+    pipeline = MemoryWritePipeline(graph_client=graph, config={"mode": "shadow"})
+
+    reflection = pipeline.reflect_and_extract("记住我喜欢用 PostgreSQL", "好的")
+
+    candidate = next(
+        c for c in reflection["candidates"]
+        if c.subject == "auto_store_heuristic"
+    )
+    assert candidate.memory_type == "preference"
+    assert candidate.target_store == "memory_graph"
+    assert candidate.source_type == "user_direct"
+    classification = pipeline.classify_write(candidate, namespace="telegram:u1")
+    result = pipeline.write_and_verify(candidate, classification)
+    assert result["auto_write_allowed"] is False
+    assert result["written"] is False
+    assert graph.calls == []
+
+
+def test_auto_store_heuristic_preference_can_write_through_limited_auto_gate():
+    graph = FakeGraphClient()
+    pipeline = MemoryWritePipeline(
+        graph_client=graph,
+        config={
+            "mode": "limited_auto",
+            "auto_write_threshold": 0.85,
+            "allowed_auto_types": ["explicit_preference"],
+            "never_auto_write_to_core": True,
+        },
+    )
+
+    reflection = pipeline.reflect_and_extract("记住我喜欢用 PostgreSQL", "好的")
+    candidate = next(
+        c for c in reflection["candidates"]
+        if c.subject == "auto_store_heuristic"
+    )
+    classification = pipeline.classify_write(candidate, namespace="telegram:u1")
+    result = pipeline.write_and_verify(candidate, classification)
+
+    assert result["auto_write_allowed"] is True
+    assert result["written"] is True
+    assert result["readback_ok"] is True
+    assert len(graph.calls) == 1
+
+
 def test_user_correction_maps_to_explicit_correction_policy_type():
     graph = FakeGraphClient()
     pipeline = MemoryWritePipeline(

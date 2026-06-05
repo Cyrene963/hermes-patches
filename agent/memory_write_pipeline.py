@@ -195,6 +195,41 @@ class MemoryWritePipeline:
 
         candidates = []
 
+        # Claude Code-derived auto-store heuristic: use it as a default-on
+        # candidate discovery signal, not as a direct write path. The normal
+        # MemoryWritePipeline gates below still decide shadow/review/write, so
+        # this widens recall of explicit "remember/prefer/correction" messages
+        # without bypassing namespace, review, readback, or auto-write policy.
+        try:
+            from agent.auto_store_heuristic import detect_auto_store
+            _should_store, _auto_confidence, _auto_patterns = detect_auto_store(user_msg)
+        except Exception:
+            _should_store, _auto_confidence, _auto_patterns = False, 0.0, []
+        if _should_store:
+            _auto_type = 'preference' if any(
+                'preference' in p.lower() or 'habit' in p.lower()
+                for p in _auto_patterns
+            ) else 'procedural_memory'
+            _auto_source = 'user_correction' if any(
+                'correction' in p.lower()
+                for p in _auto_patterns
+            ) else 'user_direct'
+            _auto_target_path = '用户档案/偏好' if _auto_type == 'preference' else '用户档案/程序性记忆'
+            candidates.append(CandidateFact(
+                subject='auto_store_heuristic',
+                predicate='explicit_memory_signal',
+                object_value=user_msg.strip()[:1000],
+                importance=max(0.85, min(0.98, _auto_confidence)),
+                memory_type=_auto_type,
+                target_store='memory_graph',
+                target_path=_auto_target_path,
+                evidence_quote=user_msg[:1000],
+                confidence=max(0.85, min(0.98, _auto_confidence)),
+                source_type=_auto_source,
+                requires_review=_auto_type != 'preference',
+                reason='; '.join(_auto_patterns[:5]),
+            ))
+
         # Extract durable meta-learning / target-function signals from the user
         # message. These are not ordinary facts; they are reusable operating
         # constraints that should later become procedural memory, skills, or

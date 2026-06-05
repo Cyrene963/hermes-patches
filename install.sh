@@ -205,17 +205,19 @@ if [ -f "$PATCHES_DIR/plugins/image_gen/openai/__init__.py" ]; then
     echo "   ✅ OpenAI image_gen provider 已复制"
 fi
 
-# Optional memory-tencentdb provider overlay. Keep it explicit: the provider can
-# spawn a Node.js Gateway sidecar and perform automatic memory extraction, so a
-# normal hermes update should copy the code only when the operator opts in.
+# memory-tencentdb provider overlay. Install the provider by default so the
+# feature survives hermes update; activation still depends on memory.provider
+# and Gateway availability, so this does not replace Hindsight or auto-start a
+# sidecar unless the operator configures it. Set HERMES_INSTALL_MEMORY_TENCENTDB=0
+# to opt out of installing the provider files.
 if [ -d "$PATCHES_DIR/plugins/memory/memory_tencentdb" ]; then
-    if [ "${HERMES_INSTALL_MEMORY_TENCENTDB:-0}" = "1" ]; then
+    if [ "${HERMES_INSTALL_MEMORY_TENCENTDB:-1}" != "0" ]; then
         mkdir -p "$HERMES_DIR/plugins/memory"
         rm -rf "$HERMES_DIR/plugins/memory/memory_tencentdb"
         cp -R "$PATCHES_DIR/plugins/memory/memory_tencentdb" "$HERMES_DIR/plugins/memory/"
-        echo "   ✅ memory_tencentdb provider 已复制（显式启用）"
+        echo "   ✅ memory_tencentdb provider 已复制"
     else
-        echo "   ⏭️ memory_tencentdb provider skipped (set HERMES_INSTALL_MEMORY_TENCENTDB=1 to install)"
+        echo "   ⏭️ memory_tencentdb provider skipped (HERMES_INSTALL_MEMORY_TENCENTDB=0)"
     fi
 fi
 
