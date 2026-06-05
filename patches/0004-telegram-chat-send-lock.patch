@@ -1,0 +1,255 @@
+diff --git a/gateway/platforms/telegram.py b/gateway/platforms/telegram.py
+index fa55f2db0..5f751d0ee 100644
+--- a/gateway/platforms/telegram.py
++++ b/gateway/platforms/telegram.py
+@@ -15,6 +15,7 @@ import os
+ import tempfile
+ import html as _html
+ import re
++from collections import defaultdict
+ from datetime import datetime, timezone
+ from typing import Dict, List, Optional, Set, Any
+ 
+@@ -491,6 +492,27 @@ class TelegramAdapter(BasePlatformAdapter):
+         # Tracks status bubbles owned by this adapter so subsequent calls with the
+         # same key edit the same message instead of appending new ones (#30045).
+         self._status_message_ids: Dict[tuple, str] = {}
++        # Telegram applies flood limits per chat as well as globally. Serialize
++        # outbound send/edit calls for the same chat so streaming edits, final
++        # sends, and status updates do not race into the same flood window.
++        self._chat_send_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
++
++    def _chat_send_lock(self, chat_id: str) -> asyncio.Lock:
++        locks = getattr(self, "_chat_send_locks", None)
++        if locks is None:
++            # Some tests instantiate adapters via object.__new__(); keep the
++            # helper robust without making test fixtures mirror __init__.
++            locks = defaultdict(asyncio.Lock)
++            self._chat_send_locks = locks
++        return locks[str(chat_id)]
++
++    async def _send_message_locked(self, lock_chat_id: str, **kwargs):
++        async with self._chat_send_lock(lock_chat_id):
++            return await self._bot.send_message(**kwargs)
++
++    async def _edit_message_text_locked(self, lock_chat_id: str, **kwargs):
++        async with self._chat_send_lock(lock_chat_id):
++            return await self._bot.edit_message_text(**kwargs)
+ 
+     def _notification_kwargs(
+         self, metadata: Optional[Dict[str, Any]]
+@@ -1942,7 +1964,8 @@ class TelegramAdapter(BasePlatformAdapter):
+                     try:
+                         # Try Markdown first, fall back to plain text if it fails
+                         try:
+-                            msg = await self._bot.send_message(
++                            msg = await self._send_message_locked(
++                                chat_id,
+                                 chat_id=int(chat_id),
+                                 text=chunk,
+                                 parse_mode=ParseMode.MARKDOWN_V2,
+@@ -1956,7 +1979,8 @@ class TelegramAdapter(BasePlatformAdapter):
+                             if "parse" in str(md_error).lower() or "markdown" in str(md_error).lower():
+                                 logger.warning("[%s] MarkdownV2 parse failed, falling back to plain text: %s", self.name, md_error)
+                                 plain_chunk = _strip_mdv2(chunk)
+-                                msg = await self._bot.send_message(
++                                msg = await self._send_message_locked(
++                                    chat_id,
+                                     chat_id=int(chat_id),
+                                     text=plain_chunk,
+                                     parse_mode=None,
+@@ -2182,7 +2206,8 @@ class TelegramAdapter(BasePlatformAdapter):
+ 
+         try:
+             if not finalize:
+-                await self._bot.edit_message_text(
++                await self._edit_message_text_locked(
++                    chat_id,
+                     chat_id=int(chat_id),
+                     message_id=int(message_id),
+                     text=content,
+@@ -2191,7 +2216,8 @@ class TelegramAdapter(BasePlatformAdapter):
+ 
+             formatted = self.format_message(content)
+             try:
+-                await self._bot.edit_message_text(
++                await self._edit_message_text_locked(
++                    chat_id,
+                     chat_id=int(chat_id),
+                     message_id=int(message_id),
+                     text=formatted,
+@@ -2202,7 +2228,8 @@ class TelegramAdapter(BasePlatformAdapter):
+                 if "not modified" in str(fmt_err).lower():
+                     return SendResult(success=True, message_id=message_id)
+                 # Fallback: retry without markdown formatting
+-                await self._bot.edit_message_text(
++                await self._edit_message_text_locked(
++                    chat_id,
+                     chat_id=int(chat_id),
+                     message_id=int(message_id),
+                     text=content,
+@@ -2238,7 +2265,8 @@ class TelegramAdapter(BasePlatformAdapter):
+                     return SendResult(success=False, error=f"flood_control:{wait}")
+                 await asyncio.sleep(wait)
+                 try:
+-                    await self._bot.edit_message_text(
++                    await self._edit_message_text_locked(
++                        chat_id,
+                         chat_id=int(chat_id),
+                         message_id=int(message_id),
+                         text=content,
+@@ -2325,7 +2353,8 @@ class TelegramAdapter(BasePlatformAdapter):
+                 # mirror edit_message's main happy-path.
+                 formatted = self.format_message(first_chunk)
+                 try:
+-                    await self._bot.edit_message_text(
++                    await self._edit_message_text_locked(
++                        chat_id,
+                         chat_id=int(chat_id),
+                         message_id=int(message_id),
+                         text=formatted,
+@@ -2333,13 +2362,15 @@ class TelegramAdapter(BasePlatformAdapter):
+                     )
+                 except Exception as fmt_err:
+                     if "not modified" not in str(fmt_err).lower():
+-                        await self._bot.edit_message_text(
++                        await self._edit_message_text_locked(
++                            chat_id,
+                             chat_id=int(chat_id),
+                             message_id=int(message_id),
+                             text=first_chunk,
+                         )
+             else:
+-                await self._bot.edit_message_text(
++                await self._edit_message_text_locked(
++                    chat_id,
+                     chat_id=int(chat_id),
+                     message_id=int(message_id),
+                     text=first_chunk,
+@@ -2378,7 +2409,8 @@ class TelegramAdapter(BasePlatformAdapter):
+             for use_markdown in (True, False) if finalize else (False,):
+                 try:
+                     text = self.format_message(chunk) if use_markdown else chunk
+-                    sent_msg = await self._bot.send_message(
++                    sent_msg = await self._send_message_locked(
++                        chat_id,
+                         chat_id=int(chat_id),
+                         text=text,
+                         parse_mode=ParseMode.MARKDOWN_V2 if use_markdown else None,
+@@ -2401,7 +2433,8 @@ class TelegramAdapter(BasePlatformAdapter):
+                             )
+                         )
+                         try:
+-                            sent_msg = await self._bot.send_message(
++                            sent_msg = await self._send_message_locked(
++                                chat_id,
+                                 chat_id=int(chat_id),
+                                 text=chunk,
+                                 **retry_thread_kwargs,
+@@ -2585,8 +2618,11 @@ class TelegramAdapter(BasePlatformAdapter):
+             raise RuntimeError("Not connected")
+ 
+         message_thread_id = kwargs.get("message_thread_id")
++        chat_id = kwargs.get("chat_id")
++        if chat_id is None:
++            raise RuntimeError("chat_id is required")
+         try:
+-            return await self._bot.send_message(**kwargs)
++            return await self._send_message_locked(str(chat_id), **kwargs)
+         except Exception as send_err:
+             if (
+                 message_thread_id is not None
+@@ -2600,7 +2636,7 @@ class TelegramAdapter(BasePlatformAdapter):
+                 )
+                 retry_kwargs = dict(kwargs)
+                 retry_kwargs.pop("message_thread_id", None)
+-                return await self._bot.send_message(**retry_kwargs)
++                return await self._send_message_locked(str(chat_id), **retry_kwargs)
+             raise
+ 
+     async def send_update_prompt(
+diff --git a/tests/gateway/test_telegram_chat_send_lock.py b/tests/gateway/test_telegram_chat_send_lock.py
+new file mode 100644
+index 000000000..f607b1282
+--- /dev/null
++++ b/tests/gateway/test_telegram_chat_send_lock.py
+@@ -0,0 +1,79 @@
++import asyncio
++from types import SimpleNamespace
++from unittest.mock import AsyncMock
++
++import pytest
++
++from gateway.config import PlatformConfig
++from gateway.platforms.telegram import TelegramAdapter
++
++
++@pytest.mark.asyncio
++async def test_telegram_send_and_edit_are_serialized_per_chat():
++    adapter = TelegramAdapter(PlatformConfig(enabled=True, token="test-token", extra={}))
++
++    active = 0
++    max_active = 0
++    calls = []
++
++    async def send_message(**kwargs):
++        nonlocal active, max_active
++        active += 1
++        max_active = max(max_active, active)
++        calls.append(("send", kwargs["text"]))
++        await asyncio.sleep(0.01)
++        active -= 1
++        return SimpleNamespace(message_id=1)
++
++    async def edit_message_text(**kwargs):
++        nonlocal active, max_active
++        active += 1
++        max_active = max(max_active, active)
++        calls.append(("edit", kwargs["text"]))
++        await asyncio.sleep(0.01)
++        active -= 1
++        return SimpleNamespace(message_id=2)
++
++    adapter._bot = SimpleNamespace(
++        send_message=AsyncMock(side_effect=send_message),
++        edit_message_text=AsyncMock(side_effect=edit_message_text),
++    )
++
++    await asyncio.gather(
++        adapter._send_message_locked("123", chat_id=123, text="a"),
++        adapter._edit_message_text_locked("123", chat_id=123, message_id=1, text="b"),
++        adapter._send_message_locked("123", chat_id=123, text="c"),
++    )
++
++    assert max_active == 1
++    assert calls == [("send", "a"), ("edit", "b"), ("send", "c")]
++
++
++@pytest.mark.asyncio
++async def test_telegram_send_lock_is_per_chat_not_global():
++    adapter = TelegramAdapter(PlatformConfig(enabled=True, token="test-token", extra={}))
++
++    entered = asyncio.Event()
++    release = asyncio.Event()
++    chat_2_completed = asyncio.Event()
++
++    async def send_message(**kwargs):
++        if kwargs["chat_id"] == 1:
++            entered.set()
++            await release.wait()
++        else:
++            chat_2_completed.set()
++        return SimpleNamespace(message_id=kwargs["chat_id"])
++
++    adapter._bot = SimpleNamespace(
++        send_message=AsyncMock(side_effect=send_message),
++        edit_message_text=AsyncMock(),
++    )
++
++    task_1 = asyncio.create_task(adapter._send_message_locked("1", chat_id=1, text="slow"))
++    await entered.wait()
++    await adapter._send_message_locked("2", chat_id=2, text="fast")
++
++    assert chat_2_completed.is_set()
++    release.set()
++    await task_1

@@ -1,0 +1,21 @@
+diff --git a/toolsets.py b/toolsets.py
+--- a/toolsets.py
++++ b/toolsets.py
+@@ -30,7 +30,7 @@
+ # Edit this once to update all platforms simultaneously.
+ _HERMES_CORE_TOOLS = [
+     # Web
+-    "web_search", "web_extract",
++    "web_search", "web_extract", "deep_research",
+     # Terminal + process management
+     "terminal", "process",
+     # File manipulation
+@@ -85,7 +85,7 @@
+     # Basic toolsets - individual tool categories
+     "web": {
+         "description": "Web research and content extraction tools",
+-        "tools": ["web_search", "web_extract"],
++        "tools": ["web_search", "web_extract", "deep_research"],
+         "includes": []  # No other toolsets included
+     },
+ 

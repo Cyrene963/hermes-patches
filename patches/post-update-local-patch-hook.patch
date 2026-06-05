@@ -1,0 +1,192 @@
+diff --git a/hermes_cli/main.py b/hermes_cli/main.py
+index ae83d7546..0bd7307f0 100644
+--- a/hermes_cli/main.py
++++ b/hermes_cli/main.py
+@@ -8283,8 +8283,36 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
+         print("  ✗ Could not compare branches. Skipping upstream sync.")
+         return
+ 
+-    # If origin/main has commits not on upstream, don't trample
++    # If origin/main has commits not on upstream, the conservative upstream
++    # default is to avoid trampling a user's fork work.  Local patch-stack
++    # installs are different: the fork is expected to contain generated/local
++    # patch commits, while ``~/.hermes/patches/install.sh`` is the durable
++    # source of truth that will be re-run after update.  In that case, sync the
++    # working tree to upstream/main and let the post-update patch hook reapply
++    # overlays/targeted patches so `hermes update` remains the only command the
++    # maintainer needs to run.
+     if origin_ahead > 0:
++        if _local_post_update_patch_installer() is not None and upstream_ahead > 0:
++            print()
++            print(
++                f"ℹ Fork has {origin_ahead} local patch commit(s) and "
++                f"upstream has {upstream_ahead} new commit(s)."
++            )
++            print("  Local patch installer detected; syncing to upstream/main before reapplying patches.")
++            reset_result = subprocess.run(
++                git_cmd + ["reset", "--hard", "upstream/main"],
++                cwd=cwd,
++                capture_output=True,
++                text=True,
++            )
++            if reset_result.returncode != 0:
++                print("  ✗ Failed to reset to upstream/main. Skipping upstream sync.")
++                if reset_result.stderr.strip():
++                    print(f"    {reset_result.stderr.strip().splitlines()[0]}")
++                return
++            print("  ✓ Synced working tree to upstream/main; local patch hook will reapply overlays")
++            return
++
+         print()
+         print(f"ℹ Your fork has {origin_ahead} commit(s) not on upstream.")
+         print("  Skipping upstream sync to preserve your changes.")
+@@ -9514,6 +9542,54 @@ def _run_pre_update_backup(args) -> None:
+     print()
+ 
+ 
++def _local_post_update_patch_installer() -> Path | None:
++    """Return the local patch installer path when this profile has one."""
++    try:
++        from hermes_constants import get_hermes_home
++
++        hermes_home = get_hermes_home()
++    except Exception:
++        hermes_home = Path.home() / ".hermes"
++
++    installer = hermes_home / "patches" / "install.sh"
++    return installer if installer.exists() else None
++
++
++def _run_local_post_update_patch_hook() -> None:
++    """Run a local Hermes patch installer after a successful source update.
++
++    This is intentionally opt-in by presence: upstream users without
++    ``~/.hermes/patches/install.sh`` see no behavior change. Patch-stack
++    maintainers can keep ``hermes update`` as the only command they need to
++    remember; the local installer remains the source of truth for overlay
++    files, targeted patches, bytecode cleanup, and smoke checks.
++    """
++    installer = _local_post_update_patch_installer()
++    if installer is None:
++        return
++    if not os.access(installer, os.X_OK):
++        print()
++        print(f"  ⚠ Local patch installer exists but is not executable: {installer}")
++        print("    Run manually: bash ~/.hermes/patches/install.sh")
++        return
++
++    print()
++    print("→ Applying local Hermes patch overlay...")
++    env = {**os.environ, "HERMES_HOME": str(PROJECT_ROOT)}
++    result = subprocess.run(
++        ["bash", str(installer)],
++        cwd=PROJECT_ROOT,
++        env=env,
++        text=True,
++    )
++    if result.returncode != 0:
++        print("✗ Local patch installer failed.")
++        print("  Your upstream update completed, but custom patches were not reapplied.")
++        print(f"  Retry manually: HERMES_HOME={PROJECT_ROOT} bash {installer}")
++        sys.exit(result.returncode)
++    print("  ✓ Local patch overlay applied")
++
++
+ def _discard_lockfile_churn(git_cmd, repo_root):
+     """Restore tracked ``package-lock.json`` files that npm dirtied locally.
+ 
+@@ -9867,9 +9943,13 @@ def _cmd_update_impl(args, gateway_mode: bool):
+         if commit_count == 0:
+             _invalidate_update_cache()
+ 
+-            # Even if origin is up to date, the fork may be behind upstream
++            # Even if origin is up to date, the fork may be behind upstream.
++            # If a local patch installer is configured, this may reset the
++            # worktree to upstream/main; immediately run the post-update hook
++            # before returning so `hermes update` remains one command.
+             if is_fork and branch == "main":
+                 _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
++                _run_local_post_update_patch_hook()
+ 
+             # Restore stash and switch back to original branch if we moved
+             if auto_stash_ref is not None:
+diff --git a/tests/gateway/test_update_streaming.py b/tests/gateway/test_update_streaming.py
+index e15e1c3f1..23dcf5f84 100644
+--- a/tests/gateway/test_update_streaming.py
++++ b/tests/gateway/test_update_streaming.py
+@@ -11,6 +11,7 @@ import json
+ import os
+ import time
+ import asyncio
++from pathlib import Path
+ from unittest.mock import patch, MagicMock, AsyncMock
+ 
+ import pytest
+@@ -738,3 +739,67 @@ class TestCmdUpdateGatewayMode:
+         from types import SimpleNamespace
+         args = SimpleNamespace(gateway=True)
+         assert args.gateway is True
++
++    def test_local_post_update_patch_hook_runs_profile_installer(self, tmp_path, monkeypatch, capsys):
++        """A bare hermes update should re-apply a local patch overlay when present."""
++        from hermes_cli import main as cli_main
++
++        hermes_home = tmp_path / "home"
++        installer = hermes_home / "patches" / "install.sh"
++        installer.parent.mkdir(parents=True)
++        installer.write_text("#!/bin/sh\nexit 0\n")
++        installer.chmod(0o755)
++
++        calls = []
++
++        class _FakeCompleted:
++            returncode = 0
++
++        def fake_run(cmd, **kwargs):
++            calls.append((cmd, kwargs))
++            return _FakeCompleted()
++
++        monkeypatch.setattr(cli_main, "PROJECT_ROOT", tmp_path / "repo")
++        monkeypatch.setattr(cli_main.subprocess, "run", fake_run)
++        monkeypatch.setitem(os.environ, "HERMES_HOME", str(hermes_home))
++        monkeypatch.setattr(
++            "hermes_constants.get_hermes_home",
++            lambda: Path(os.environ["HERMES_HOME"]),
++        )
++
++        cli_main._run_local_post_update_patch_hook()
++
++        assert calls
++        cmd, kwargs = calls[0]
++        assert cmd == ["bash", str(installer)]
++        assert kwargs["cwd"] == tmp_path / "repo"
++        assert kwargs["env"]["HERMES_HOME"] == str(tmp_path / "repo")
++        assert "Local patch overlay applied" in capsys.readouterr().out
++
++    def test_upstream_sync_resets_patch_fork_when_local_installer_exists(self, tmp_path, monkeypatch, capsys):
++        """Patch-stack forks should not require manual upstream reset after hermes update."""
++        from hermes_cli import main as cli_main
++
++        calls = []
++
++        class _FakeCompleted:
++            returncode = 0
++            stdout = ""
++            stderr = ""
++
++        def fake_run(cmd, **kwargs):
++            calls.append(cmd)
++            return _FakeCompleted()
++
++        monkeypatch.setattr(cli_main, "_has_upstream_remote", lambda *a: True)
++        monkeypatch.setattr(cli_main, "_count_commits_between", lambda _git, _cwd, base, head: 3 if base == "upstream/main" else 18)
++        monkeypatch.setattr(cli_main, "_local_post_update_patch_installer", lambda: tmp_path / "home" / "patches" / "install.sh")
++        monkeypatch.setattr(cli_main.subprocess, "run", fake_run)
++
++        cli_main._sync_with_upstream_if_needed(["git"], tmp_path / "repo")
++
++        assert ["git", "fetch", "upstream", "--quiet"] in calls
++        assert ["git", "reset", "--hard", "upstream/main"] in calls
++        out = capsys.readouterr().out
++        assert "Local patch installer detected" in out
++        assert "Synced working tree to upstream/main" in out

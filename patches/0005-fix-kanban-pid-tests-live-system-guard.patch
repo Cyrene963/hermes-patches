@@ -1,0 +1,61 @@
+diff --git a/tests/hermes_cli/test_kanban_core_functionality.py b/tests/hermes_cli/test_kanban_core_functionality.py
+index c28671dde..5d3cac126 100644
+--- a/tests/hermes_cli/test_kanban_core_functionality.py
++++ b/tests/hermes_cli/test_kanban_core_functionality.py
+@@ -366,7 +366,13 @@ def test_workspace_resolution_failure_also_counts(kanban_home, all_assignees_spa
+ # Worker aliveness / crash detection
+ # ---------------------------------------------------------------------------
+ 
+-def test_pid_alive_helper():
++def test_pid_alive_helper(monkeypatch):
++    import gateway.status as status
++
++    def fake_pid_exists(pid: int) -> bool:
++        return int(pid) == os.getpid()
++
++    monkeypatch.setattr(status, "_pid_exists", fake_pid_exists)
+     # Our own pid is alive.
+     assert kb._pid_alive(os.getpid())
+     # PID 0 / None / negative.
+@@ -2435,6 +2441,7 @@ def test_build_worker_context_role_history_bounded_to_5(kanban_home):
+ 
+ @pytest.mark.skipif("linux" not in __import__("sys").platform,
+                     reason="zombie detection is Linux-specific")
++@pytest.mark.live_system_guard_bypass
+ def test_pid_alive_detects_zombie(kanban_home):
+     """_pid_alive must return False for a zombie process.
+ 
+@@ -4321,13 +4328,14 @@ def test_repeated_timeouts_trip_the_circuit_breaker(kanban_home, monkeypatch):
+         conn.close()
+ 
+ 
+-def test_detect_crashed_workers_increments_counter(kanban_home):
++def test_detect_crashed_workers_increments_counter(kanban_home, monkeypatch):
+     """A single crash increments the consecutive_failures counter."""
+     conn = kb.connect()
+     try:
+         tid = kb.create_task(conn, title="crashy", assignee="worker")
+         kb.claim_task(conn, tid)
+         kb._set_worker_pid(conn, tid, 99999)  # fake pid — not alive
++        monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+ 
+         kb.detect_crashed_workers(conn)
+ 
+@@ -4475,6 +4483,17 @@ def test_dispatch_once_integrates_stale_detection(kanban_home, monkeypatch):
+     import hermes_cli.kanban_db as _kb
+ 
+     monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
++    monkeypatch.setattr(
++        _kb,
++        "_terminate_reclaimed_worker",
++        lambda pid, claim_lock, **kwargs: {
++            "prev_pid": pid,
++            "host_local": True,
++            "termination_attempted": False,
++            "terminated": False,
++            "sigkill": False,
++        },
++    )
+ 
+     with kb.connect() as conn:
+         t = kb.create_task(conn, title="stale-dispatch", assignee="worker")

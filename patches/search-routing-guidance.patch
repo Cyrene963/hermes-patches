@@ -1,0 +1,71 @@
+diff --git a/agent/prompt_builder.py b/agent/prompt_builder.py
+index 7ba2edfa1..a21b4a2fc 100644
+--- a/agent/prompt_builder.py
++++ b/agent/prompt_builder.py
+@@ -162,6 +162,19 @@ SESSION_SEARCH_GUIDANCE = (
+     "asking them to repeat themselves."
+ )
+ 
++SEARCH_ROUTING_GUIDANCE = (
++    "# Search routing\n"
++    "When current or web-backed information is needed, choose the research path by task depth. "
++    "Use web_search for simple lookup tasks where a short list of search results is enough. "
++    "Use deep_research for serious research, source-backed analysis, multi-source verification, "
++    "official documentation/paper/company/product comparisons, market/news/technical due diligence, "
++    "or when search snippets are insufficient. For deep_research, prefer mode='auto' so the "
++    "restricted Search-as-Code evidence sidecar is tried first and classic research is used as "
++    "the fallback. If the user explicitly asks for Search-as-Code or maximum evidence quality, "
++    "use mode='code_plan'. Do not replace browser escalation with ordinary search when pages need "
++    "rendering or anti-bot handling."
++)
++
+ SKILLS_GUIDANCE = (
+     "After completing a complex task (5+ tool calls), fixing a tricky error, "
+     "or discovering a non-trivial workflow, save the approach as a "
+diff --git a/agent/system_prompt.py b/agent/system_prompt.py
+index 4a61a2ee0..d9fad3e46 100644
+--- a/agent/system_prompt.py
++++ b/agent/system_prompt.py
+@@ -40,6 +40,7 @@ from agent.prompt_builder import (
+     TASK_COMPLETION_GUIDANCE,
+     TOOL_USE_ENFORCEMENT_GUIDANCE,
+     TOOL_USE_ENFORCEMENT_MODELS,
++    SEARCH_ROUTING_GUIDANCE,
+ )
+ 
+ 
+@@ -116,6 +117,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None)
+         tool_guidance.append(MEMORY_GUIDANCE)
+     if "session_search" in agent.valid_tool_names:
+         tool_guidance.append(SESSION_SEARCH_GUIDANCE)
++    if "deep_research" in agent.valid_tool_names:
++        tool_guidance.append(SEARCH_ROUTING_GUIDANCE)
+     if "skill_manage" in agent.valid_tool_names:
+         tool_guidance.append(SKILLS_GUIDANCE)
+     # Kanban worker/orchestrator lifecycle — only present when the
+diff --git a/tests/agent/test_prompt_builder.py b/tests/agent/test_prompt_builder.py
+index 3f4b0f462..e1fc3ba53 100644
+--- a/tests/agent/test_prompt_builder.py
++++ b/tests/agent/test_prompt_builder.py
+@@ -25,6 +25,7 @@ from agent.prompt_builder import (
+     OPENAI_MODEL_EXECUTION_GUIDANCE,
+     MEMORY_GUIDANCE,
+     SESSION_SEARCH_GUIDANCE,
++    SEARCH_ROUTING_GUIDANCE,
+     PLATFORM_HINTS,
+     WSL_ENVIRONMENT_HINT,
+ )
+@@ -48,6 +49,13 @@ class TestGuidanceConstants:
+         assert "relevant cross-session context exists" in SESSION_SEARCH_GUIDANCE
+         assert "recent turns of the current session" not in SESSION_SEARCH_GUIDANCE
+ 
++    def test_search_routing_guidance_prefers_deep_research_for_serious_research(self):
++        assert "Use web_search for simple lookup" in SEARCH_ROUTING_GUIDANCE
++        assert "Use deep_research for serious research" in SEARCH_ROUTING_GUIDANCE
++        assert "mode='auto'" in SEARCH_ROUTING_GUIDANCE
++        assert "mode='code_plan'" in SEARCH_ROUTING_GUIDANCE
++        assert "Search-as-Code" in SEARCH_ROUTING_GUIDANCE
++
+ 
+ # =========================================================================
+ # Context injection scanning

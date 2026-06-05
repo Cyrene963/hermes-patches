@@ -1,0 +1,10 @@
+id: python-broad-except-pass
+language: Python
+severity: warning
+message: "Avoid `except Exception: pass`; this hides runtime failures in patched code. Log, re-raise, or return an explicit degraded state."
+rule:
+  pattern: |
+    try:
+      $$$BODY
+    except Exception:
+      pass

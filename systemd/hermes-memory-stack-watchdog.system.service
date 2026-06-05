@@ -1,0 +1,10 @@
+[Unit]
+Description=Hermes Memory Stack Health Watchdog
+Documentation=https://hermes-agent.nousresearch.com/docs
+Wants=postgresql@15-main.service hindsight.service hermes-memory-graph.service
+After=postgresql@15-main.service hindsight.service hermes-memory-graph.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-__HERMES_HOME__/.env
+ExecStart=__HERMES_HOME__/scripts/hermes-memory-stack-watchdog.sh

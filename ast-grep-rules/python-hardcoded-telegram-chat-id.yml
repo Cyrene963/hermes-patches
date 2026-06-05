@@ -1,0 +1,10 @@
+id: python-hardcoded-telegram-chat-id
+language: Python
+severity: warning
+message: "Avoid hardcoded Telegram/chat IDs in reusable patches; keep deployment-specific IDs in user config or private memory."
+rule:
+  any:
+    - kind: integer
+      regex: '^-?100[0-9]{9,}|^[0-9]{9,}$'
+    - kind: string
+      regex: '^-?100[0-9]{9,}|^[0-9]{9,}$'

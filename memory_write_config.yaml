@@ -1,0 +1,47 @@
+# Memory Write Pipeline Configuration
+# Auto-write is disabled after a 2026-05-25 pollution incident where the
+# extractor misclassified ordinary dialogue as project tech_stack memories.
+# Keep shadow-only until extraction uses semantic validation and passes an
+# audited precision/readback suite on real shadow logs.
+
+memory_write:
+  # Mode: shadow | limited_auto | full_auto
+  mode: shadow
+
+  # Minimum importance score for future auto-write experiments.
+  auto_write_threshold: 0.95
+
+  # Types allowed for automatic writing when limited_auto is deliberately re-enabled.
+  # project_fact is intentionally excluded until project/entity validation is fixed.
+  allowed_auto_types:
+    - explicit_correction
+    - explicit_preference
+
+  # Types that always require review
+  always_review_types:
+    - project_fact
+    - inferred_preference
+    - sensitive_rule
+    - hindsight_import
+    - low_confidence_fact
+
+  # Never auto-write to core namespace
+  never_auto_write_to_core: true
+
+  # MEMORY.md size limit
+  memory_md_max_bytes: 5000
+
+  # Shadow mode settings
+  shadow:
+    log_dir: ~/.hermes/logs/shadow_writes
+    max_entries_per_day: 1000
+    enable_readback_dryrun: true
+
+  # Quality thresholds to pass shadow mode
+  quality_thresholds:
+    precision_min: 0.95
+    important_fact_recall_min: 0.85
+    wrong_store_rate_max: 0.02
+    wrong_path_rate_max: 0.05
+    namespace_risk_count_max: 0
+    memory_md_overuse_count_max: 0

@@ -1,0 +1,17 @@
+name: Privacy Guard
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  privacy-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run public patch privacy guard
+        run: bash scripts/hermes-public-patch-privacy-guard.sh "$GITHUB_WORKSPACE"

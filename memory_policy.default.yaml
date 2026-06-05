@@ -1,0 +1,71 @@
+# Memory Metacognition Policy
+#
+# Installed by hermes-patches. 自定义或删除此文件可关闭功能。
+# 详细配置说明见 examples/memory_policy.example.yaml
+
+memory_index:
+  enabled: true
+  timeout: 5
+
+query_expansion:
+  enabled: true
+  max_queries: 8
+  expansions:
+    "发文件": ["sendDocument", "telegram", "file-delivery", "curl", "chat_id"]
+    "发个文件": ["sendDocument", "telegram", "file-delivery", "curl", "chat_id"]
+    "传文件": ["sendDocument", "telegram", "file-delivery", "curl", "chat_id"]
+    "发到Telegram": ["sendDocument", "telegram", "chat_id", "Bot API"]
+    "配置": ["config.yaml", "hermes config", "provider"]
+    "改配置": ["config.yaml", "hermes config", "provider", "gateway"]
+    "provider": ["credential_pool", "config.yaml", "auth.json"]
+    "报错": ["error", "bug", "fix", "workaround"]
+    "错误": ["error", "bug", "fix", "workaround"]
+    "cron": ["cronjob", "schedule", "deep-work"]
+    "重启": ["gateway", "restart", "service", "systemctl"]
+    "gateway": ["restart", "service", "systemctl"]
+    "restart": ["gateway", "service", "systemctl", "rollback"]
+    "patch": ["补丁", "git", "PR", "branch"]
+    "补丁": ["patch", "git", "hermes-patches"]
+    "删除": ["delete", "backup", "safety"]
+    "delete": ["backup", "safety"]
+    "benchmark": ["eval", "performance", "model benchmark"]
+    "credential": ["credential pool", "api key", "provider"]
+
+preflight:
+  enabled: true
+  hindsight_api: http://localhost:9177
+  bank_id: hindsight
+  rules:
+    - tool: terminal
+      task_type: destructive_command
+      trigger_patterns:
+        - "rm -rf"
+        - "rm -r /"
+        - "git push --force"
+        - "git reset --hard"
+        - "drop table"
+        - "drop database"
+      block_on_failure: true
+      checks:
+        - type: field_not_contains
+          field: command
+          value: "rm -rf"
+          required: true
+          error: "Raw rm -rf is blocked. Use a safer deletion workflow."
+        - type: field_not_contains
+          field: command
+          value: "git push --force"
+          required: true
+          error: "Force push is blocked. Use --force-with-lease."
+    - tool: terminal
+      task_type: cloudflare_curl_html_block
+      trigger_patterns:
+        - "linux.do"
+      block_on_failure: true
+      checks:
+        - type: field_not_contains
+          field: command
+          value: "linux.do/t"
+          unless_contains: ".json"
+          required: true
+          error: "curl on a linux.do HTML path will hit Cloudflare 403. Only .json Discourse endpoints work via curl; for HTML use AsyncCamoufox."

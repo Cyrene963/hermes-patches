@@ -1,0 +1,16 @@
+id: python-hardcoded-root-hermes
+language: Python
+severity: warning
+message: "Avoid hardcoding ${HOME}/.hermes in reusable patches; use get_hermes_home(), Path.home(), config, or an environment variable."
+rule:
+  any:
+    - pattern: '"${HOME}/.hermes"'
+    - pattern: "'${HOME}/.hermes'"
+    - pattern: '"${HOME}/.hermes/$PATH"'
+    - pattern: "'${HOME}/.hermes/$PATH'"
+    - pattern: '"${HOME}/.hermes/$A/$B"'
+    - pattern: "'${HOME}/.hermes/$A/$B'"
+    - pattern: '"${HOME}/.hermes/$A/$B/$C"'
+    - pattern: "'${HOME}/.hermes/$A/$B/$C'"
+    - pattern: '"${HOME}/.hermes/$A/$B/$C/$D"'
+    - pattern: "'${HOME}/.hermes/$A/$B/$C/$D'"

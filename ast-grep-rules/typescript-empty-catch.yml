@@ -1,0 +1,10 @@
+id: typescript-empty-catch
+language: TypeScript
+severity: warning
+message: "Avoid empty catch blocks in dashboard/frontend code; surface a fallback, log, or return an explicit degraded state."
+rule:
+  pattern: |
+    try {
+      $$$BODY
+    } catch ($$$ERR) {
+    }

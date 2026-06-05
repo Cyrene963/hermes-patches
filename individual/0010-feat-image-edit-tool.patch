@@ -1,0 +1,512 @@
+diff --git a/agent/image_gen_provider.py b/agent/image_gen_provider.py
+index 47f65c1b3..08c911e8b 100644
+--- a/agent/image_gen_provider.py
++++ b/agent/image_gen_provider.py
+@@ -24,6 +24,13 @@ produce. The tool wrapper JSON-serializes it. Keys:
+     provider       str              provider name (for diagnostics)
+     error          str              only when success=False
+     error_type     str              only when success=False
++
++Image editing
++-------------
++Providers that support image-to-image / inpainting can override
++``edit(...)``. The base implementation returns an explicit unsupported error
++so the public ``image_edit`` tool can dispatch uniformly without relying on
++``hasattr`` checks or provider-specific type tests.
+ """
+ 
+ from __future__ import annotations
+@@ -142,6 +149,31 @@ class ImageGenProvider(abc.ABC):
+         should ignore unknown keys.
+         """
+ 
++    def edit(
++        self,
++        prompt: str,
++        image_path: str,
++        aspect_ratio: str = DEFAULT_ASPECT_RATIO,
++        mask_path: Optional[str] = None,
++        **kwargs: Any,
++    ) -> Dict[str, Any]:
++        """Edit an input image using a prompt.
++
++        Backends that expose image-to-image / inpainting should override this.
++        ``image_path`` and ``mask_path`` are local filesystem paths or backend-
++        accepted URLs, depending on the provider. The default is a structured
++        error rather than ``NotImplementedError`` so agent-facing tools can
++        return useful diagnostics to the user.
++        """
++        return error_response(
++            error=f"Image editing is not supported by provider '{self.name}'",
++            error_type="unsupported_operation",
++            provider=self.name,
++            model=self.default_model() or self.name,
++            prompt=prompt,
++            aspect_ratio=resolve_aspect_ratio(aspect_ratio),
++        )
++
+ 
+ # ---------------------------------------------------------------------------
+ # Helpers
+diff --git a/plugins/image_gen/openai/__init__.py b/plugins/image_gen/openai/__init__.py
+index c1a719f91..dfdba9242 100644
+--- a/plugins/image_gen/openai/__init__.py
++++ b/plugins/image_gen/openai/__init__.py
+@@ -25,6 +25,7 @@ from __future__ import annotations
+ 
+ import logging
+ import os
++from pathlib import Path
+ from typing import Any, Dict, List, Optional, Tuple
+ 
+ from agent.image_gen_provider import (
+@@ -223,7 +224,20 @@ class OpenAIImageGenProvider(ImageGenProvider):
+         }
+ 
+         try:
+-            client = openai.OpenAI()
++            client_kwargs: Dict[str, Any] = {}
++            api_key = os.environ.get("OPENAI_API_KEY")
++            if api_key:
++                client_kwargs["api_key"] = api_key
++            cfg = _load_openai_config()
++            openai_cfg = cfg.get("openai") if isinstance(cfg.get("openai"), dict) else {}
++            base_url = os.environ.get("OPENAI_BASE_URL")
++            if not base_url and isinstance(openai_cfg, dict):
++                raw_base = openai_cfg.get("base_url")
++                if isinstance(raw_base, str) and raw_base.strip():
++                    base_url = raw_base.strip()
++            if base_url:
++                client_kwargs["base_url"] = base_url.rstrip("/")
++            client = openai.OpenAI(**client_kwargs)
+             response = client.images.generate(**payload)
+         except Exception as exc:
+             logger.debug("OpenAI image generation failed", exc_info=True)
+@@ -293,6 +307,199 @@ class OpenAIImageGenProvider(ImageGenProvider):
+         )
+ 
+ 
++    def edit(
++        self,
++        prompt: str,
++        image_path: str,
++        aspect_ratio: str = DEFAULT_ASPECT_RATIO,
++        mask_path: Optional[str] = None,
++        **kwargs: Any,
++    ) -> Dict[str, Any]:
++        """Edit an existing image via OpenAI-compatible ``/images/edits``.
++
++        This is the true image-to-image path: the input pixels are uploaded to
++        the backend rather than being summarized into a text prompt. It supports
++        optional masks when the upstream gateway/model accepts them.
++        """
++        prompt = (prompt or "").strip()
++        aspect = resolve_aspect_ratio(aspect_ratio)
++        if not prompt:
++            return error_response(
++                error="Prompt is required and must be a non-empty string",
++                error_type="invalid_argument",
++                provider="openai",
++                aspect_ratio=aspect,
++            )
++        if not image_path or not isinstance(image_path, str):
++            return error_response(
++                error="image_path is required for image editing",
++                error_type="invalid_argument",
++                provider="openai",
++                prompt=prompt,
++                aspect_ratio=aspect,
++            )
++
++        input_path = Path(image_path).expanduser()
++        if not input_path.exists() or not input_path.is_file():
++            return error_response(
++                error=f"Input image not found: {image_path}",
++                error_type="file_not_found",
++                provider="openai",
++                prompt=prompt,
++                aspect_ratio=aspect,
++            )
++
++        mask_file_path: Optional[Path] = None
++        if mask_path:
++            mask_file_path = Path(str(mask_path)).expanduser()
++            if not mask_file_path.exists() or not mask_file_path.is_file():
++                return error_response(
++                    error=f"Mask image not found: {mask_path}",
++                    error_type="file_not_found",
++                    provider="openai",
++                    prompt=prompt,
++                    aspect_ratio=aspect,
++                )
++
++        if not os.environ.get("OPENAI_API_KEY"):
++            return error_response(
++                error=(
++                    "OPENAI_API_KEY not set. Run `hermes tools` → Image "
++                    "Generation → OpenAI to configure, or `hermes setup` "
++                    "to add the key."
++                ),
++                error_type="auth_required",
++                provider="openai",
++                prompt=prompt,
++                aspect_ratio=aspect,
++            )
++        try:
++            import openai
++        except ImportError:
++            return error_response(
++                error="openai Python package not installed (pip install openai)",
++                error_type="missing_dependency",
++                provider="openai",
++                prompt=prompt,
++                aspect_ratio=aspect,
++            )
++
++        tier_id, meta = _resolve_model()
++        size = _SIZES.get(aspect, _SIZES["square"])
++        payload: Dict[str, Any] = {
++            "model": API_MODEL,
++            "prompt": prompt,
++            "size": size,
++            "n": 1,
++            "quality": meta["quality"],
++        }
++        api_model = kwargs.get("model")
++        if isinstance(api_model, str) and api_model in _MODELS:
++            tier_id = api_model
++            meta = _MODELS[api_model]
++            payload["quality"] = meta["quality"]
++        elif (
++            isinstance(api_model, str)
++            and api_model.strip() in {"gpt-image-1", "gpt-image-1.5", "gpt-image-2"}
++        ):
++            payload["model"] = api_model.strip()
++
++        try:
++            client_kwargs: Dict[str, Any] = {}
++            api_key = os.environ.get("OPENAI_API_KEY")
++            if api_key:
++                client_kwargs["api_key"] = api_key
++            cfg = _load_openai_config()
++            openai_cfg = cfg.get("openai") if isinstance(cfg.get("openai"), dict) else {}
++            base_url = os.environ.get("OPENAI_BASE_URL")
++            if not base_url and isinstance(openai_cfg, dict):
++                raw_base = openai_cfg.get("base_url")
++                if isinstance(raw_base, str) and raw_base.strip():
++                    base_url = raw_base.strip()
++            if base_url:
++                client_kwargs["base_url"] = base_url.rstrip("/")
++            client = openai.OpenAI(**client_kwargs)
++            with input_path.open("rb") as image_file:
++                opened_mask = mask_file_path.open("rb") if mask_file_path else None
++                try:
++                    if opened_mask:
++                        response = client.images.edit(
++                            image=image_file,
++                            mask=opened_mask,
++                            **payload,
++                        )
++                    else:
++                        response = client.images.edit(image=image_file, **payload)
++                finally:
++                    if opened_mask:
++                        opened_mask.close()
++        except Exception as exc:
++            logger.debug("OpenAI image edit failed", exc_info=True)
++            return error_response(
++                error=f"OpenAI image edit failed: {exc}",
++                error_type="api_error",
++                provider="openai",
++                model=tier_id,
++                prompt=prompt,
++                aspect_ratio=aspect,
++            )
++
++        data = getattr(response, "data", None) or []
++        if not data:
++            return error_response(
++                error="OpenAI returned no image data",
++                error_type="empty_response",
++                provider="openai",
++                model=tier_id,
++                prompt=prompt,
++                aspect_ratio=aspect,
++            )
++        first = data[0]
++        b64 = getattr(first, "b64_json", None)
++        url = getattr(first, "url", None)
++        if b64:
++            try:
++                path = save_b64_image(b64, prefix=f"openai_{tier_id}_edit")
++                image = str(path)
++            except Exception as exc:
++                return error_response(
++                    error=f"Failed to save OpenAI image edit output: {exc}",
++                    error_type="save_failed",
++                    provider="openai",
++                    model=tier_id,
++                    prompt=prompt,
++                    aspect_ratio=aspect,
++                )
++        elif url:
++            image = url
++        else:
++            return error_response(
++                error="OpenAI returned image data without b64_json or url",
++                error_type="invalid_response",
++                provider="openai",
++                model=tier_id,
++                prompt=prompt,
++                aspect_ratio=aspect,
++            )
++        extra: Dict[str, Any] = {
++            "size": size,
++            "quality": meta["quality"],
++            "mode": "edit",
++            "input_image": str(input_path),
++        }
++        revised = getattr(first, "revised_prompt", None)
++        if revised:
++            extra["revised_prompt"] = revised
++        return success_response(
++            image=image,
++            model=tier_id,
++            prompt=prompt,
++            aspect_ratio=aspect,
++            provider="openai",
++            extra=extra,
++        )
++
++
+ # ---------------------------------------------------------------------------
+ # Plugin entry point
+ # ---------------------------------------------------------------------------
+diff --git a/tests/plugins/image_gen/test_openai_provider.py b/tests/plugins/image_gen/test_openai_provider.py
+index 670722efb..92801d666 100644
+--- a/tests/plugins/image_gen/test_openai_provider.py
++++ b/tests/plugins/image_gen/test_openai_provider.py
+@@ -241,3 +241,54 @@ class TestGenerate:
+ 
+         assert result["success"] is True
+         assert result["image"] == "https://example.com/img.png"
++
++
++class TestEdit:
++    def test_missing_image_path_rejected(self, provider):
++        result = provider.edit("clean acne", "")
++        assert result["success"] is False
++        assert result["error_type"] == "invalid_argument"
++
++    def test_input_file_not_found(self, provider):
++        result = provider.edit("clean acne", "/tmp/does-not-exist.png")
++        assert result["success"] is False
++        assert result["error_type"] == "file_not_found"
++
++    def test_edit_b64_saves_to_cache_and_calls_images_edit(self, provider, tmp_path):
++        input_path = tmp_path / "input.png"
++        input_path.write_bytes(bytes.fromhex(_PNG_HEX))
++        fake_client = MagicMock()
++        fake_client.images.edit.return_value = _fake_response(b64=_b64_png(), revised_prompt="cleaned portrait")
++
++        with _patched_openai(fake_client):
++            result = provider.edit("remove blemishes, preserve face", str(input_path), aspect_ratio="square")
++
++        assert result["success"] is True
++        assert result["provider"] == "openai"
++        assert result["mode"] == "edit"
++        assert result["input_image"] == str(input_path)
++        assert result["quality"] == "medium"
++        assert result["revised_prompt"] == "cleaned portrait"
++        saved = Path(result["image"])
++        assert saved.exists()
++        assert saved.read_bytes() == bytes.fromhex(_PNG_HEX)
++        call_kwargs = fake_client.images.edit.call_args.kwargs
++        assert call_kwargs["model"] == "gpt-image-2"
++        assert call_kwargs["quality"] == "medium"
++        assert call_kwargs["size"] == "1024x1024"
++        assert "response_format" not in call_kwargs
++
++    def test_edit_accepts_mask(self, provider, tmp_path):
++        input_path = tmp_path / "input.png"
++        mask_path = tmp_path / "mask.png"
++        input_path.write_bytes(bytes.fromhex(_PNG_HEX))
++        mask_path.write_bytes(bytes.fromhex(_PNG_HEX))
++        fake_client = MagicMock()
++        fake_client.images.edit.return_value = _fake_response(url="https://example.com/edited.png")
++
++        with _patched_openai(fake_client):
++            result = provider.edit("change background", str(input_path), mask_path=str(mask_path))
++
++        assert result["success"] is True
++        assert result["image"] == "https://example.com/edited.png"
++        assert "mask" in fake_client.images.edit.call_args.kwargs
+diff --git a/tests/tools/test_image_generation_plugin_dispatch.py b/tests/tools/test_image_generation_plugin_dispatch.py
+index fa8ca9d95..0a5dc24d7 100644
+--- a/tests/tools/test_image_generation_plugin_dispatch.py
++++ b/tests/tools/test_image_generation_plugin_dispatch.py
+@@ -29,6 +29,18 @@ class _FakeCodexProvider(ImageGenProvider):
+             "provider": "codex",
+         }
+ 
++    def edit(self, prompt, image_path, aspect_ratio="landscape", mask_path=None, **kwargs):
++        return {
++            "success": True,
++            "image": "/tmp/codex-edited.png",
++            "model": "gpt-5.2-codex",
++            "prompt": prompt,
++            "aspect_ratio": aspect_ratio,
++            "provider": "codex",
++            "mode": "edit",
++            "input_image": image_path,
++        }
++
+ 
+ class TestPluginDispatch:
+     def test_dispatch_routes_to_codex_provider(self, monkeypatch, tmp_path):
+@@ -97,3 +109,29 @@ class TestPluginDispatch:
+         assert payload["success"] is True
+         assert payload["provider"] == "codex"
+         assert payload["aspect_ratio"] == "portrait"
++
++
++    def test_image_edit_handler_routes_to_provider_edit(self, monkeypatch, tmp_path):
++        from tools import image_generation_tool
++        from agent import image_gen_registry as registry_module
++        from hermes_cli import plugins as plugins_module
++
++        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++        input_path = tmp_path / "input.png"
++        input_path.write_bytes(b"fake")
++        monkeypatch.setattr(image_generation_tool, "_read_configured_image_provider", lambda: "codex")
++        monkeypatch.setattr(plugins_module, "_ensure_plugins_discovered", lambda force=False: None)
++        monkeypatch.setattr(registry_module, "get_provider", lambda name: _FakeCodexProvider() if name == "codex" else None)
++
++        payload = json.loads(image_generation_tool._handle_image_edit({
++            "prompt": "clean skin",
++            "image_path": str(input_path),
++            "aspect_ratio": "square",
++        }))
++
++        assert payload["success"] is True
++        assert payload["provider"] == "codex"
++        assert payload["mode"] == "edit"
++        assert payload["image"] == "/tmp/codex-edited.png"
++        assert payload["input_image"] == str(input_path)
++        assert payload["aspect_ratio"] == "square"
+diff --git a/tools/image_generation_tool.py b/tools/image_generation_tool.py
+index 584f5e9fa..70ef4c875 100644
+--- a/tools/image_generation_tool.py
++++ b/tools/image_generation_tool.py
+@@ -887,7 +887,7 @@ def _read_configured_image_provider():
+     return None
+ 
+ 
+-def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
++def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str, *, image_path: Optional[str] = None, mask_path: Optional[str] = None, mode: str = "generate"):
+     """Route the call to a plugin-registered provider when one is selected.
+ 
+     Returns a JSON string on dispatch, or ``None`` to fall through to the
+@@ -944,7 +944,16 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
+         kwargs = {"prompt": prompt, "aspect_ratio": aspect_ratio}
+         if configured_model:
+             kwargs["model"] = configured_model
+-        result = provider.generate(**kwargs)
++        if mode == "edit":
++            result = provider.edit(
++                prompt=prompt,
++                image_path=image_path or "",
++                aspect_ratio=aspect_ratio,
++                mask_path=mask_path,
++                **({"model": configured_model} if configured_model else {}),
++            )
++        else:
++            result = provider.generate(**kwargs)
+     except Exception as exc:
+         logger.warning(
+             "Image gen provider '%s' raised: %s",
+@@ -984,6 +993,69 @@ def _handle_image_generate(args, **kw):
+     )
+ 
+ 
++IMAGE_EDIT_SCHEMA = {
++    "name": "image_edit",
++    "description": (
++        "Edit an existing image using the configured image backend. This is true "
++        "image-to-image / inpainting when the provider supports it: the input "
++        "image file is uploaded to the image edit endpoint rather than being "
++        "converted to a text description. Returns a URL or absolute file path "
++        "in the `image` field."
++    ),
++    "parameters": {
++        "type": "object",
++        "properties": {
++            "prompt": {
++                "type": "string",
++                "description": "Instructions for how to edit the input image. Be explicit about what to preserve and what to change.",
++            },
++            "image_path": {
++                "type": "string",
++                "description": "Absolute or relative local path to the input image to edit.",
++            },
++            "mask_path": {
++                "type": "string",
++                "description": "Optional local path to an inpainting mask image. Transparent/marked areas are edited according to backend semantics.",
++            },
++            "aspect_ratio": {
++                "type": "string",
++                "enum": list(VALID_ASPECT_RATIOS),
++                "description": "Desired output aspect ratio: landscape, square, or portrait.",
++                "default": DEFAULT_ASPECT_RATIO,
++            },
++        },
++        "required": ["prompt", "image_path"],
++    },
++}
++
++
++def _handle_image_edit(args, **kw):
++    prompt = args.get("prompt", "")
++    if not prompt:
++        return tool_error("prompt is required for image editing")
++    image_path = args.get("image_path", "")
++    if not image_path:
++        return tool_error("image_path is required for image editing")
++    aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
++    mask_path = args.get("mask_path") or None
++    dispatched = _dispatch_to_plugin_provider(
++        prompt,
++        aspect_ratio,
++        image_path=image_path,
++        mask_path=mask_path,
++        mode="edit",
++    )
++    if dispatched is not None:
++        return dispatched
++    return json.dumps({
++        "success": False,
++        "image": None,
++        "error": "No configured image_gen provider supports image editing. Configure image_gen.provider (for example 'openai').",
++        "error_type": "provider_not_configured",
++    })
++
++
++
+ registry.register(
+     name="image_generate",
+     toolset="image_gen",
+@@ -994,3 +1066,14 @@ registry.register(
+     is_async=False,   # sync fal_client API to avoid "Event loop is closed" in gateway
+     emoji="🎨",
+ )
++
++registry.register(
++    name="image_edit",
++    toolset="image_gen",
++    schema=IMAGE_EDIT_SCHEMA,
++    handler=_handle_image_edit,
++    check_fn=check_image_generation_requirements,
++    requires_env=[],
++    is_async=False,
++    emoji="🖼️",
++)

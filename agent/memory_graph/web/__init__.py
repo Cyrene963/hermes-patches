@@ -1,0 +1,1 @@
+"""Memory Graph web package."""

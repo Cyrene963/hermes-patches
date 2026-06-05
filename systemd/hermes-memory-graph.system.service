@@ -1,0 +1,21 @@
+[Unit]
+Description=Hermes Memory Graph Server
+Documentation=https://hermes-agent.nousresearch.com/docs
+After=network-online.target postgresql@15-main.service hindsight.service
+Wants=network-online.target postgresql@15-main.service hindsight.service
+PartOf=hermes-memory-stack.target
+
+[Service]
+Type=simple
+WorkingDirectory=__HERMES_REPO__
+EnvironmentFile=-__HERMES_HOME__/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=HERMES_HOME=__HERMES_HOME__
+ExecStart=__HERMES_REPO__/venv/bin/python -m agent.memory_graph.server --host 127.0.0.1 --port 8900
+Restart=always
+RestartSec=5
+TimeoutStartSec=30
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

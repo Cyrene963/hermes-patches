@@ -1,0 +1,10 @@
+[Unit]
+Description=Hermes Memory Stack Health Watchdog
+Documentation=https://hermes-agent.nousresearch.com/docs
+Wants=hermes-memory-graph.service
+After=hermes-memory-graph.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.hermes/.env
+ExecStart=%h/.hermes/scripts/hermes-memory-stack-watchdog.sh

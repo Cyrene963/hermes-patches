@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Hermes Memory Stack Health Watchdog periodically
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=2min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

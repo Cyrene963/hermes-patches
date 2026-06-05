@@ -1,0 +1,33 @@
+{
+  "academic_triggers": ["exam", "revision", "study", "homework", "practice", "DSE", "考试", "考試", "温书", "溫書", "复习", "復習", "学业", "學業", "科目"],
+  "subject_catalog": {
+    "English": ["English", "英文", "英语", "英語"],
+    "Chinese": ["Chinese", "中文", "中国语文", "中國語文"],
+    "Maths": ["Maths", "Mathematics", "数学", "數學"],
+    "Physics": ["Physics", "物理"],
+    "Chemistry": ["Chemistry", "化学", "化學"],
+    "Biology": ["Biology", "Bio", "生物"],
+    "Economics": ["Economics", "Econ", "经济", "經濟"],
+    "Geography": ["Geography", "地理"],
+    "History": ["History", "歷史", "历史"],
+    "Chinese History": ["Chinese History", "中史", "中国历史", "中國歷史"],
+    "ICT": ["ICT"],
+    "CSD": ["CSD", "公民", "社会发展", "社會發展"],
+    "M1": ["M1"],
+    "M2": ["M2"]
+  },
+  "users": {
+    "student_a_id": {
+      "label": "StudentA",
+      "aliases": ["StudentA", "Student A", "student_a_id"],
+      "allowed_subjects": ["English", "Chinese", "Maths", "Physics", "Economics", "ICT", "CSD"],
+      "rationale": "Example only: replace with verified user facts before enabling. Cron jobs delivered to this user cannot target another user's aliases or include subjects outside allowed_subjects."
+    },
+    "student_b_id": {
+      "label": "StudentB",
+      "aliases": ["StudentB", "Student B", "student_b_id"],
+      "allowed_subjects": ["English", "Chinese", "Maths", "Economics", "Chinese History"],
+      "rationale": "Example sibling user for cross-user report clone detection."
+    }
+  }
+}

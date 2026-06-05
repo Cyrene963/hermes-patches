@@ -1,0 +1,54 @@
+diff --git a/hermes_cli/config.py b/hermes_cli/config.py
+index 4cb822b19..8d192a012 100644
+--- a/hermes_cli/config.py
++++ b/hermes_cli/config.py
+@@ -3568,7 +3568,7 @@ def _normalize_custom_provider_entry(
+         "api_mode", "transport", "model", "default_model", "models",
+         "context_length", "rate_limit_delay",
+         "request_timeout_seconds", "stale_timeout_seconds",
+-        "discover_models", "extra_body",
++        "discover_models", "extra_body", "default_headers", "anthropic_beta",
+     }
+     for camel, snake in _CAMEL_ALIASES.items():
+         if camel in entry and snake not in entry:
+@@ -3667,6 +3667,14 @@ def _normalize_custom_provider_entry(
+     if isinstance(extra_body, dict):
+         normalized["extra_body"] = dict(extra_body)
+ 
++    default_headers = entry.get("default_headers")
++    if isinstance(default_headers, dict):
++        normalized["default_headers"] = dict(default_headers)
++
++    anthropic_beta = entry.get("anthropic_beta")
++    if isinstance(anthropic_beta, str) and anthropic_beta.strip():
++        normalized["anthropic_beta"] = anthropic_beta.strip()
++
+     return normalized
+ 
+ 
+diff --git a/tests/hermes_cli/test_provider_config_validation.py b/tests/hermes_cli/test_provider_config_validation.py
+index 50cc283d9..340a35771 100644
+--- a/tests/hermes_cli/test_provider_config_validation.py
++++ b/tests/hermes_cli/test_provider_config_validation.py
+@@ -102,6 +102,21 @@ class TestNormalizeCustomProviderEntry:
+         assert result is not None
+         assert not any("unknown config keys" in r.message.lower() for r in caplog.records)
+ 
++    def test_anthropic_headers_not_flagged_unknown_and_preserved(self, caplog):
++        """Anthropic-compatible provider metadata should normalize without warnings."""
++        entry = {
++            "base_url": "https://api.example.com/v1",
++            "api_mode": "anthropic_messages",
++            "default_headers": {"X-Test-Header": "enabled"},
++            "anthropic_beta": "context-1m-2025-08-07",
++        }
++        with caplog.at_level(logging.WARNING):
++            result = _normalize_custom_provider_entry(entry, provider_key="claude-relay")
++        assert result is not None
++        assert result["default_headers"] == {"X-Test-Header": "enabled"}
++        assert result["anthropic_beta"] == "context-1m-2025-08-07"
++        assert not any("unknown config keys" in r.message.lower() for r in caplog.records)
++
+     def test_camel_case_warning_logged(self, caplog):
+         """camelCase alias mapping should produce a warning."""
+         entry = {

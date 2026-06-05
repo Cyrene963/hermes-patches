@@ -1,0 +1,8 @@
+[Unit]
+Description=Hermes Memory Stack (Hindsight + Memory Graph)
+Documentation=https://hermes-agent.nousresearch.com/docs
+Wants=hermes-memory-graph.service
+After=hermes-memory-graph.service
+
+[Install]
+WantedBy=default.target

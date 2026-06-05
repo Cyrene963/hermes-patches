@@ -1,0 +1,165 @@
+diff --git a/hermes_cli/web_server.py b/hermes_cli/web_server.py
+index 872546196..ce94edb35 100644
+--- a/hermes_cli/web_server.py
++++ b/hermes_cli/web_server.py
+@@ -820,20 +820,29 @@ async def get_action_status(name: str, lines: int = 200):
+ 
+ 
+ @app.get("/api/sessions")
+-async def get_sessions(limit: int = 20, offset: int = 0):
++async def get_sessions(limit: int = 20, offset: int = 0, source: str = ""):
+     try:
+         from hermes_state import SessionDB
+         db = SessionDB()
+         try:
+-            sessions = db.list_sessions_rich(limit=limit, offset=offset)
+-            total = db.session_count()
++            source_filter = source.strip() or None
++            sessions = db.list_sessions_rich(limit=limit, offset=offset, source=source_filter)
++            total = db.session_count(source=source_filter)
++            sources = db.session_source_counts()
+             now = time.time()
+             for s in sessions:
+                 s["is_active"] = (
+                     s.get("ended_at") is None
+                     and (now - s.get("last_active", s.get("started_at", 0))) < 300
+                 )
+-            return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
++            return {
++                "sessions": sessions,
++                "total": total,
++                "limit": limit,
++                "offset": offset,
++                "source": source_filter or "",
++                "sources": sources,
++            }
+         finally:
+             db.close()
+     except Exception:
+diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
+index f475201d1..55ffe7653 100644
+--- a/web/src/lib/api.ts
++++ b/web/src/lib/api.ts
+@@ -226,8 +226,11 @@ export const api = {
+       window.location.assign("/login");
+       return r;
+     }),
+-  getSessions: (limit = 20, offset = 0) =>
+-    fetchJSON<PaginatedSessions>(`/api/sessions?limit=${limit}&offset=${offset}`),
++  getSessions: (limit = 20, offset = 0, source = "") => {
++    const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
++    if (source) qs.set("source", source);
++    return fetchJSON<PaginatedSessions>(`/api/sessions?${qs.toString()}`);
++  },
+   getSessionMessages: (id: string) =>
+     fetchJSON<SessionMessagesResponse>(`/api/sessions/${encodeURIComponent(id)}/messages`),
+   getSessionLatestDescendant: (id: string) =>
+@@ -596,6 +599,11 @@ export interface SessionInfo {
+   parent_session_id?: string | null;
+ }
+ 
++export interface SessionSourceCount {
++  source: string;
++  count: number;
++}
++
+ export interface SessionLatestDescendantResponse {
+   requested_session_id: string;
+   session_id: string;
+@@ -608,6 +616,8 @@ export interface PaginatedSessions {
+   total: number;
+   limit: number;
+   offset: number;
++  source?: string;
++  sources?: SessionSourceCount[];
+ }
+ 
+ export interface EnvVarInfo {
+diff --git a/web/src/pages/SessionsPage.tsx b/web/src/pages/SessionsPage.tsx
+index 5535d1fe9..8faee0bdd 100644
+--- a/web/src/pages/SessionsPage.tsx
++++ b/web/src/pages/SessionsPage.tsx
+@@ -29,6 +29,7 @@ import type {
+   SessionInfo,
+   SessionMessage,
+   SessionSearchResult,
++  SessionSourceCount,
+   StatusResponse,
+ } from "@/lib/api";
+ import { timeAgo } from "@/lib/utils";
+@@ -491,6 +492,8 @@ export default function SessionsPage() {
+   const logScrollRef = useRef<HTMLPreElement | null>(null);
+   const [status, setStatus] = useState<StatusResponse | null>(null);
+   const [overviewSessions, setOverviewSessions] = useState<SessionInfo[]>([]);
++  const [selectedSource, setSelectedSource] = useState("");
++  const [sourceCounts, setSourceCounts] = useState<SessionSourceCount[]>([]);
+   const [view, setView] = useState<SessionsView>("overview");
+   const { toast, showToast } = useToast();
+   const { t } = useI18n();
+@@ -516,14 +519,15 @@ export default function SessionsPage() {
+   const loadSessions = useCallback((p: number) => {
+     setLoading(true);
+     api
+-      .getSessions(PAGE_SIZE, p * PAGE_SIZE)
++      .getSessions(PAGE_SIZE, p * PAGE_SIZE, selectedSource)
+       .then((resp) => {
+         setSessions(resp.sessions);
+         setTotal(resp.total);
++        setSourceCounts(resp.sources ?? []);
+       })
+       .catch(() => {})
+       .finally(() => setLoading(false));
+-  }, []);
++  }, [selectedSource]);
+ 
+   useEffect(() => {
+     loadSessions(page);
+@@ -537,7 +541,10 @@ export default function SessionsPage() {
+         .catch(() => {});
+       api
+         .getSessions(50)
+-        .then((r) => setOverviewSessions(r.sessions))
++        .then((r) => {
++          setOverviewSessions(r.sessions);
++          setSourceCounts(r.sources ?? []);
++        })
+         .catch(() => {});
+     };
+     loadOverview();
+@@ -811,6 +818,36 @@ export default function SessionsPage() {
+             )}
+           </div>
+ 
++          {sourceCounts.length > 0 && (
++            <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5 overflow-hidden">
++              <Button
++                type="button"
++                size="sm"
++                outlined={selectedSource !== ""}
++                onClick={() => {
++                  setSelectedSource("");
++                  setPage(0);
++                }}
++              >
++                All Platforms
++              </Button>
++              {sourceCounts.map((entry) => (
++                <Button
++                  key={entry.source}
++                  type="button"
++                  size="sm"
++                  outlined={selectedSource !== entry.source}
++                  onClick={() => {
++                    setSelectedSource(entry.source);
++                    setPage(0);
++                  }}
++                >
++                  <span className="max-w-[10rem] truncate">{entry.source}</span> ({entry.count})
++                </Button>
++              ))}
++            </div>
++          )}
++
+           {showPagination && (
+             <SessionsPagination
+               compact

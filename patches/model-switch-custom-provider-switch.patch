@@ -1,0 +1,151 @@
+diff --git a/gateway/run.py b/gateway/run.py
+index 0f56ad61c..7587a0410 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -9895,7 +9895,7 @@ class GatewayRunner:
+             if cfg:
+                 model_cfg = cfg.get("model", {})
+                 if isinstance(model_cfg, dict):
+-                    current_model = model_cfg.get("default", "")
++                    current_model = model_cfg.get("model") or model_cfg.get("default", "")
+                     current_provider = model_cfg.get("provider", current_provider)
+                     current_base_url = model_cfg.get("base_url", "")
+                 user_provs = cfg.get("providers")
+diff --git a/hermes_cli/model_switch.py b/hermes_cli/model_switch.py
+index 0e01903eb..32e8fa5ea 100644
+--- a/hermes_cli/model_switch.py
++++ b/hermes_cli/model_switch.py
+@@ -546,6 +546,51 @@ def get_authenticated_provider_slugs(
+         return []
+ 
+ 
++
++
++def _custom_provider_entry(provider: str, base_url: str = "", custom_providers: list | None = None) -> Optional[dict]:
++    """Return the config entry for a custom provider slug/name/base_url."""
++    if not custom_providers or not isinstance(custom_providers, list):
++        return None
++    wanted = str(provider or "").strip().lower()
++    wanted_url = str(base_url or "").strip().rstrip("/").lower()
++    for entry in custom_providers:
++        if not isinstance(entry, dict):
++            continue
++        name = str(entry.get("name") or "").strip()
++        slug = custom_provider_slug(name).lower() if name else ""
++        url = str(entry.get("base_url") or entry.get("url") or entry.get("api") or "").strip().rstrip("/").lower()
++        if wanted and wanted in {name.lower(), slug}:
++            return entry
++        if wanted_url and url and wanted_url == url:
++            return entry
++    return None
++
++
++def _custom_provider_default_model(provider: str, base_url: str = "", custom_providers: list | None = None) -> str:
++    """Return the configured default model for a custom provider, if any."""
++    entry = _custom_provider_entry(provider, base_url, custom_providers)
++    if not entry:
++        return ""
++    for key in ("model", "default_model", "default"):
++        value = str(entry.get(key) or "").strip()
++        if value:
++            return value
++    models = entry.get("models")
++    if isinstance(models, dict):
++        for mid in models:
++            if mid:
++                return str(mid)
++    if isinstance(models, list):
++        for item in models:
++            if isinstance(item, str) and item.strip():
++                return item.strip()
++            if isinstance(item, dict):
++                val = str(item.get("name") or item.get("id") or "").strip()
++                if val:
++                    return val
++    return ""
++
+ def _resolve_alias_fallback(
+     raw_input: str,
+     authenticated_providers: list[str] = (),
+@@ -672,6 +717,17 @@ def switch_model(
+     new_model = raw_input.strip()
+     target_provider = current_provider
+ 
++    # Treat a typed custom provider slug/name as a provider-only switch.
++    # Without this, `/model custom:foo` is interpreted as a model id and users
++    # cannot actively switch to a saved custom provider from chat. Keep this
++    # intentionally scoped to custom providers so model aliases like `claude`
++    # continue to behave as model aliases.
++    if not explicit_provider and new_model:
++        _typed_custom_entry = _custom_provider_entry(new_model, custom_providers=custom_providers)
++        if _typed_custom_entry is not None:
++            explicit_provider = new_model
++            new_model = ""
++
+     # =================================================================
+     # PATH A: Explicit --provider given
+     # =================================================================
+@@ -706,13 +762,33 @@ def switch_model(
+ 
+         target_provider = pdef.id
+ 
+-        # If no model specified, try auto-detect from endpoint
++        # If no model specified, prefer the provider's configured default model,
++        # then try live auto-detect from the endpoint. Custom OpenAI-compatible
++        # relays often list utility models first; using /models[0] can switch
++        # to the wrong backend (e.g. `codex-auto-review` instead of `gpt-5.5`).
+         if not new_model:
+-            if pdef.base_url:
+-                from hermes_cli.runtime_provider import _auto_detect_local_model
+-                detected = _auto_detect_local_model(pdef.base_url)
+-                if detected:
+-                    new_model = detected
++            new_model = _custom_provider_default_model(
++                target_provider,
++                base_url=pdef.base_url,
++                custom_providers=custom_providers,
++            )
++            if not new_model:
++                if pdef.base_url:
++                    from hermes_cli.runtime_provider import _auto_detect_local_model
++                    detected = _auto_detect_local_model(pdef.base_url)
++                    if detected:
++                        new_model = detected
++                    else:
++                        return ModelSwitchResult(
++                            success=False,
++                            target_provider=target_provider,
++                            provider_label=pdef.name,
++                            is_global=is_global,
++                            error_message=(
++                                f"No model detected on {pdef.name} ({pdef.base_url}). "
++                                f"Specify the model explicitly: /model <model-name> --provider {explicit_provider}"
++                            ),
++                        )
+                 else:
+                     return ModelSwitchResult(
+                         success=False,
+@@ -720,21 +796,10 @@ def switch_model(
+                         provider_label=pdef.name,
+                         is_global=is_global,
+                         error_message=(
+-                            f"No model detected on {pdef.name} ({pdef.base_url}). "
+-                            f"Specify the model explicitly: /model <model-name> --provider {explicit_provider}"
++                            f"Provider '{pdef.name}' has no base URL configured. "
++                            f"Specify a model: /model <model-name> --provider {explicit_provider}"
+                         ),
+                     )
+-            else:
+-                return ModelSwitchResult(
+-                    success=False,
+-                    target_provider=target_provider,
+-                    provider_label=pdef.name,
+-                    is_global=is_global,
+-                    error_message=(
+-                        f"Provider '{pdef.name}' has no base URL configured. "
+-                        f"Specify a model: /model <model-name> --provider {explicit_provider}"
+-                    ),
+-                )
+ 
+         # Resolve alias on the TARGET provider
+         alias_result = resolve_alias(new_model, target_provider)
