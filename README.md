@@ -59,9 +59,6 @@
 - **真实验证状态**：2026-06-03 CLI dogfood 中，`mode=auto` 和 `mode=code_plan` 都返回 `overall_status=Verified working`；`code_plan` 路径 privacy scan PASS。
 - **边界**：reviewer lane 只有在显式 `review=true` 且 reviewer credential 可用时才算外部审查；route smoke 不等于 reviewer approval。
 
-**🧩 官方 Kanban / multi-agent 能力说明**
-Kanban 多任务板、swarm、dispatcher/worker、runs/heartbeat 等属于 Hermes Agent v0.16.0 官方上游能力，不是本补丁新增功能。本补丁仓库只保留一个维护边界：如果你用官方 Kanban 并行审计本补丁链，同一个 runtime / patch checkout 上仍建议只允许一个 writer，避免多个 agent 同时改 overlay、README 或 installer。
-
 **🧭 安装后的加载边界**
 Hermes 有多个运行进程。安装补丁后，新的 CLI/Python 进程会重新 import 已更新的文件；已经在运行的 gateway / Telegram worker 需要重启后才会加载 Python 代码变更。本文档的验证表会区分 clean install、new process smoke 与 gateway-loaded state，避免把源码存在误写成线上已生效。
 
