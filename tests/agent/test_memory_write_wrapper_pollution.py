@@ -25,3 +25,13 @@ def test_assistant_response_project_label_does_not_create_project_fact():
     )
 
     assert not any(c.memory_type == "project_fact" for c in reflection["candidates"])
+
+
+def test_skill_injection_wrapper_does_not_create_memory_candidate():
+    pipeline = MemoryWritePipeline(config={"mode": "shadow", "semantic_classifier": {"model_enabled": False}})
+    reflection = pipeline.reflect_and_extract(
+        '[IMPORTANT: The user has invoked the "student-task-management" skill, indicating they want you to follow its instructions. The full skill content is loaded below.]\n\n---\nname: student-task-management',
+        '',
+    )
+    assert reflection["candidates"] == []
+    assert reflection.get("ignored_reason") == "system_or_skill_wrapper_not_user_text"

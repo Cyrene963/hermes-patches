@@ -174,10 +174,19 @@ fi
 if ! check_http "$MG_URL"; then
     log "Memory Graph HTTP unhealthy: $MG_URL"
     if is_root; then
-        restart_system_service hermes-memory-graph.service
+        # Only restart the system unit if it is explicitly enabled. On this
+        # deployment 8900 is normally owned by the user unit memory-graph.service;
+        # starting hermes-memory-graph.service creates an address-in-use loop.
+        if systemctl is-enabled hermes-memory-graph.service >/dev/null 2>&1; then
+            restart_system_service hermes-memory-graph.service
+        elif systemctl --user is-active memory-graph.service >/dev/null 2>&1; then
+            log "Memory Graph system unit disabled; preserving user unit owner"
+        else
+            systemctl --user restart memory-graph.service || true
+        fi
         sleep 3
     else
-        systemctl --user restart hermes-memory-graph.service || true
+        systemctl --user restart memory-graph.service || systemctl --user restart hermes-memory-graph.service || true
         sleep 3
     fi
 fi

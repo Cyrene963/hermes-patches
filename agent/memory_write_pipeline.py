@@ -193,6 +193,25 @@ class MemoryWritePipeline:
         combined = f"{user_msg} {assistant_msg}"
         mtype, importance = score_importance(combined)
 
+        # System/skill wrapper text can be injected into the user-message channel
+        # by the runtime. It is not a user-authored learning event and must never
+        # become a ReviewProposal or Memory Graph candidate. Keep this fail-closed:
+        # return no candidates rather than trying to extract around wrapper text.
+        wrapper_markers = (
+            '[IMPORTANT: The user has invoked the',
+            'The full skill content is loaded below',
+            '<available_skills>',
+            'metadata:\n  hermes:',
+        )
+        if any(marker in user_msg for marker in wrapper_markers):
+            return {
+                'candidates': [],
+                'importance': 0.0,
+                'memory_type': 'ignore',
+                'evidence': '',
+                'ignored_reason': 'system_or_skill_wrapper_not_user_text',
+            }
+
         candidates = []
 
         # Claude Code-derived auto-store heuristic: use it as a default-on

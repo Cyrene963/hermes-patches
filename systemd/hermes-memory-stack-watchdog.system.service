@@ -1,8 +1,8 @@
 [Unit]
 Description=Hermes Memory Stack Health Watchdog
 Documentation=https://hermes-agent.nousresearch.com/docs
-Wants=postgresql@15-main.service hindsight.service hermes-memory-graph.service
-After=postgresql@15-main.service hindsight.service hermes-memory-graph.service
+Wants=postgresql@15-main.service hindsight.service
+After=postgresql@15-main.service hindsight.service
 
 [Service]
 Type=oneshot

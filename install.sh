@@ -580,16 +580,28 @@ if [ "${HERMES_INSTALL_SYSTEMD:-1}" != "0" ] && command -v systemctl >/dev/null 
             cp "$PATCHES_DIR/systemd/hermes-memory-stack-watchdog.system.timer" /etc/systemd/system/hermes-memory-stack-watchdog.timer
         fi
         systemctl daemon-reload || true
-        systemctl enable hermes-memory-graph.service hermes-memory-stack.target >/dev/null 2>&1 || true
-        systemctl restart hermes-memory-graph.service >/dev/null 2>&1 || true
-        for _i in $(seq 1 15); do
-            curl -fsS -m 2 http://127.0.0.1:8900/health >/dev/null 2>&1 && break
-            sleep 1
-        done
+        # Avoid duplicate 8900 owners: this deployment may already run Memory Graph
+        # as a user unit (memory-graph.service). The root watchdog checks HTTP
+        # health and must not start a second hermes-memory-graph.service when
+        # 127.0.0.1:8900 is already healthy. Install the system unit for
+        # optional fallback, but leave it disabled by default unless explicitly
+        # requested.
+        if [ "${HERMES_ENABLE_SYSTEM_MEMORY_GRAPH:-0}" = "1" ]; then
+            systemctl enable hermes-memory-graph.service hermes-memory-stack.target >/dev/null 2>&1 || true
+            systemctl restart hermes-memory-graph.service >/dev/null 2>&1 || true
+            for _i in $(seq 1 15); do
+                curl -fsS -m 2 http://127.0.0.1:8900/health >/dev/null 2>&1 && break
+                sleep 1
+            done
+        else
+            systemctl stop hermes-memory-graph.service hermes-memory-stack.target >/dev/null 2>&1 || true
+            systemctl disable hermes-memory-graph.service hermes-memory-stack.target >/dev/null 2>&1 || true
+            systemctl reset-failed hermes-memory-graph.service hermes-memory-stack.target >/dev/null 2>&1 || true
+        fi
         if [ -f /etc/systemd/system/hermes-memory-stack-watchdog.timer ]; then
             systemctl enable --now hermes-memory-stack-watchdog.timer >/dev/null 2>&1 || true
         fi
-        echo "   ✅ hermes-memory-graph systemd service/watchdog 已安装/启动"
+        echo "   ✅ hermes memory stack system watchdog installed; system Memory Graph owner is opt-in"
     else
         USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
         mkdir -p "$USER_SYSTEMD_DIR"

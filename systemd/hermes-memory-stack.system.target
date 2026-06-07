@@ -1,8 +1,8 @@
 [Unit]
-Description=Hermes Memory Stack (PostgreSQL + Hindsight + Memory Graph)
+Description=Hermes Memory Stack (PostgreSQL + Hindsight; Memory Graph may be user-unit owned)
 Documentation=https://hermes-agent.nousresearch.com/docs
-Wants=postgresql@15-main.service hindsight.service hermes-memory-graph.service
-After=postgresql@15-main.service hindsight.service hermes-memory-graph.service
+Wants=postgresql@15-main.service hindsight.service
+After=postgresql@15-main.service hindsight.service
 
 [Install]
 WantedBy=multi-user.target
