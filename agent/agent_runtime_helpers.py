@@ -1605,7 +1605,9 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
 
 def invoke_tool(agent, function_name: str, function_args: dict, effective_task_id: str,
                  tool_call_id: Optional[str] = None, messages: list = None,
-                 pre_tool_block_checked: bool = False) -> str:
+                 pre_tool_block_checked: bool = False,
+                 skip_tool_request_middleware: bool = False,
+                 tool_request_middleware_trace: Optional[list[dict[str, Any]]] = None) -> str:
     """Invoke a single tool and return the result string. No display logic.
 
     Handles both agent-level tools (todo, memory, etc.) and registry-dispatched

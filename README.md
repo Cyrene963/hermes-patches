@@ -2,7 +2,7 @@
 
 > 一键安装，补全上游尚未合并的修复和增强。已合并的补丁会自动跳过。
 >
-> **适配状态：2026-06-07 复核。补丁仓库当前 commit `4ce07a1b` 已 remote readback；本轮“数字替身 / 外置大脑 99%”加固的关键补丁已做到四端同步：live runtime 服务状态、`~/.hermes/patches` overlay、`install.sh`/systemd/watchdog 持久化、GitHub patch repo 均已验证。Memory Graph 8900 当前由 user unit `memory-graph.service` 持有，重复 root unit `hermes-memory-graph.service` 保持 `inactive/disabled`；strict baseline 通过且 `stop_the_line=[]`；`/review` WebUI 已验证候选、审批资格、readback、rollback 状态展示。边界：Hermes live checkout 仍落后官方 `upstream/main`（本次检查为 `2/1021` ahead/behind），所以这里的“四端同步”指本轮已验证修复的 runtime/overlay/installer/patch-repo 同步，不等于已经完成最新 upstream 全量 rebase。README 只按证据分级：Verified/Partially verified/Risk，不再声称“每个细节完美可用”。本机 live runtime 是否加载补丁必须看运行版本、served asset hash、API/browser smoke 和 gateway/dashboard 重启时间，不能只凭仓库文件判断。**
+> **适配状态：2026-06-07 最新 upstream + gateway-loaded closure。补丁仓库当前已完成 latest-upstream clean smoke、live runtime reset 到官方 `upstream/main` `846821d8c`、重打 overlay、focused regression、Memory Graph canary、strict baseline、gateway restart 后 loaded-state 验证。本轮“数字替身 / 外置大脑 99%”加固的关键补丁已做到四端同步：live runtime 服务状态、`~/.hermes/patches` overlay、`install.sh`/systemd/watchdog 持久化、GitHub patch repo 均已验证。Memory Graph 8900 当前由 user unit `memory-graph.service` 持有，重复 root unit `hermes-memory-graph.service` 保持 `inactive/disabled`；strict baseline 通过且 `stop_the_line=[]`；`/review` WebUI 已验证候选、审批资格、readback、rollback 状态展示。README 只按证据分级：Verified/Partially verified/Risk，不再声称“每个细节完美可用”。本机 live runtime 是否加载补丁必须看运行版本、served asset hash、API/browser smoke 和 gateway/dashboard 重启时间，不能只凭仓库文件判断。**
 
 ## 装有什么用？
 
