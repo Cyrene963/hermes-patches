@@ -425,7 +425,7 @@ See [SEARCH_AS_CODE.md](./SEARCH_AS_CODE.md) for:
 ### "Memory Graph search returns no results"
 1. Verify GIN index exists: `\d+ mg_search_documents` in psql
 2. Check tsvector population: `SELECT search_vector FROM mg_search_documents LIMIT 1;`
-3. Run migration: `psql -f agent/memory_graph/migrations/001_add_search_index.sql`
+3. Re-run the idempotent schema initializer if tables/indexes are missing: `psql -f agent/memory_graph/db/init.sql`
 
 ### "memory_tencentdb Gateway not starting"
 1. Check auto-discovery: `~/.hermes/logs/memory_tencentdb/gateway.stderr.log`
@@ -451,7 +451,7 @@ See [SEARCH_AS_CODE.md](./SEARCH_AS_CODE.md) for:
 
 - [SEARCH_AS_CODE.md](./SEARCH_AS_CODE.md) — Full-text search implementation details
 - [plugins/memory/memory_tencentdb/README.md](../plugins/memory/memory_tencentdb/README.md) — memory_tencentdb provider setup
-- [agent/memory_graph/README.md](../agent/memory_graph/README.md) — Memory Graph API reference
+- `agent/memory_graph/` — Memory Graph DB/services/web implementation; API details are in `tools/memory_graph_tool.py` and the server routes.
 
 ---
 

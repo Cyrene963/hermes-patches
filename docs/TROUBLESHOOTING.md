@@ -32,7 +32,7 @@ Common issues and solutions for Hermes Agent community patches.
 3. **Run the PostgreSQL migration if the index is missing**:
    ```bash
    cd ~/.hermes/hermes-agent
-   sudo -u postgres psql -d hindsight -f agent/memory_graph/migrations/001_add_search_index.sql
+   sudo -u postgres psql -d hindsight -f agent/memory_graph/db/init.sql
    ```
 
 4. **Vacuum/analyze PostgreSQL tables after large migrations**:

@@ -43,7 +43,14 @@ def create_app(graph_service=None, search_indexer=None, glossary_service=None):
     from .db.models import ROOT_NODE_UUID
 
     app = FastAPI(title="Memory Graph", docs_url="/docs")
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+    cors_origins_raw = os.getenv("MEMORY_GRAPH_CORS_ORIGINS", "http://127.0.0.1,http://localhost")
+    cors_origins = [origin.strip() for origin in cors_origins_raw.split(",") if origin.strip()]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins or ["http://127.0.0.1", "http://localhost"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/health")
     async def health():
@@ -87,6 +94,14 @@ def create_app(graph_service=None, search_indexer=None, glossary_service=None):
             return RedirectResponse("/", status_code=302)
         return LOGIN_HTML
 
+    def _secure_cookie(request: Request) -> bool:
+        raw = os.getenv("MEMORY_GRAPH_COOKIE_SECURE", "auto").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+        return request.url.scheme == "https"
+
     @app.post("/api/auth/login")
     async def api_login(request: Request, response: Response):
         body = await request.json()
@@ -99,7 +114,15 @@ def create_app(graph_service=None, search_indexer=None, glossary_service=None):
             raise HTTPException(401, "Invalid credentials")
         token = create_session_token(username)
         response = JSONResponse({"ok": True, "username": username, "namespace": user.get("namespace", "")})
-        response.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax", max_age=86400 * 7, path="/")
+        response.set_cookie(
+            COOKIE_NAME,
+            token,
+            httponly=True,
+            secure=_secure_cookie(request),
+            samesite="lax",
+            max_age=86400 * 7,
+            path="/",
+        )
         return response
 
     @app.post("/api/auth/logout")

@@ -190,8 +190,8 @@ curl -fsS http://127.0.0.1:9177/health
 - CJK 搜索 user_id 隔离
 - Credential pool /model 切换保持
 - Cron 多用户投递隔离
-- Telegram 群聊 visible-but-ignored 上下文窗口（非全量历史回填）
-- Telegram personal workspace 群：显式配置或 Bot API 实时验证“1 个已授权用户 + bot”的群，可像 CLI 多窗口一样免唤醒词触发；session/记忆归属授权用户，真实 Telegram 群 ID 独立保存用于回群投递
+- Telegram 群聊 visible-but-ignored 上下文窗口（可选 individual patch；非全量历史回填）
+- Telegram personal workspace 群（可选/高漂移 gateway patch；显式配置或 Bot API 实时验证“1 个已授权用户 + bot”的群，session/记忆归属授权用户，真实 Telegram 群 ID 独立保存用于回群投递）
 - ast-grep 结构化代码审计（补丁链 guard 集成；用于发现宽泛异常吞噬、硬编码私有路径/ID、空 catch 等高风险结构）
 
 ## 安装内容
@@ -235,8 +235,8 @@ curl -fsS http://127.0.0.1:9177/health
 - session_search 工具增强
 - toolsets.py 记忆工具集定义
 - ast-grep 结构化代码审计：`scripts/hermes-ast-grep-audit.sh` + `ast-grep-rules/*.yml`，安装后集成到 patch-chain guard。默认只报告 warning，不阻断安装；需要硬阻断时设置 `AST_GREP_FAIL_ON_WARNINGS=1`。
-- Telegram 群聊 visible-but-ignored context window：privacy mode 关闭后，普通群消息虽被 `require_mention` 忽略，也会进入短期同群/同 topic 缓存；下一次 @bot 时通过 `MessageEvent.channel_context` 注入。不是 Bot API 全量历史回填，Telegram 未送达的消息仍无法恢复。
-- Telegram personal workspace group：当群被显式配置为 personal workspace，或运行时通过 Bot API 证明群里当前只有一个已授权 sender 加 Hermes bot 时，该群作为该用户的私聊/CLI 多窗口处理。普通文本无需 `@bot`、唤醒词、回复或 slash command；`SessionSource.chat_id` 保持授权用户 ID 以复用个人 session/记忆，`thread_id=group:<chat_id>[:topic]` 用于窗口隔离，真实 Telegram 群投递目标保存在 `parent_chat_id` 并由发送层派生，避免把内部 `group:<chat_id>` 标记传给 Telegram topic 参数。
+- Telegram 群聊 visible-but-ignored context window：可选 individual patch。privacy mode 关闭后，普通群消息虽被 `require_mention` 忽略，也会进入短期同群/同 topic 缓存；下一次 @bot 时通过 `MessageEvent.channel_context` 注入。不是 Bot API 全量历史回填，Telegram 未送达的消息仍无法恢复。默认安装器不应用 `individual/*.patch`；需要时设置 `HERMES_INDIVIDUAL_PATCH_ALLOWLIST=0007` 或 `HERMES_APPLY_INDIVIDUAL_PATCHES=1`。
+- Telegram personal workspace group：可选/高漂移 gateway patch。启用后，当群被显式配置为 personal workspace，或运行时通过 Bot API 证明群里当前只有一个已授权 sender 加 Hermes bot 时，该群作为该用户的私聊/CLI 多窗口处理。普通文本无需 `@bot`、唤醒词、回复或 slash command；`SessionSource.chat_id` 保持授权用户 ID 以复用个人 session/记忆，`thread_id=group:<chat_id>[:topic]` 用于窗口隔离，真实 Telegram 群投递目标保存在 `parent_chat_id` 并由发送层派生，避免把内部 `group:<chat_id>` 标记传给 Telegram topic 参数。默认安装不保证该 gateway 行为已启用，必须配合 individual patch/overlay 和 gateway tests 验证。
 
 #### Telegram 群上下文配置
 

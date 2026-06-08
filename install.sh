@@ -119,6 +119,35 @@ for targeted_patch in "$PATCHES_DIR"/patches/*.patch; do
     fi
 done
 
+# Apply opt-in verified individual patches. These are maintained as public
+# feature patches but are not always safe as default overlays because some touch
+# high-drift gateway/tool surfaces. Operators can enable all with
+# HERMES_APPLY_INDIVIDUAL_PATCHES=1 or select a comma/space-separated allowlist
+# with HERMES_INDIVIDUAL_PATCH_ALLOWLIST="0007 0010".
+if [ "${HERMES_APPLY_INDIVIDUAL_PATCHES:-0}" = "1" ] || [ -n "${HERMES_INDIVIDUAL_PATCH_ALLOWLIST:-}" ]; then
+    for individual_patch in "$PATCHES_DIR"/individual/*.patch; do
+        [ -e "$individual_patch" ] || continue
+        patch_name="$(basename "$individual_patch")"
+        patch_id="${patch_name%%-*}"
+        if [ -n "${HERMES_INDIVIDUAL_PATCH_ALLOWLIST:-}" ]; then
+            case " ${HERMES_INDIVIDUAL_PATCH_ALLOWLIST//,/ } " in
+                *" $patch_id "*|*" $patch_name "*) ;;
+                *) echo "   ⏭️ individual patch $patch_name not in allowlist"; continue ;;
+            esac
+        fi
+        echo "📦 尝试应用 individual patch $patch_name..."
+        cd "$HERMES_DIR"
+        if git apply --check "$individual_patch" 2>/dev/null; then
+            git apply "$individual_patch"
+            echo "   ✅ individual patch $patch_name 已应用"
+        else
+            echo "   ⏭️ individual patch $patch_name 不兼容或已应用"
+        fi
+    done
+else
+    echo "   ⏭️ individual patches 默认跳过（设置 HERMES_APPLY_INDIVIDUAL_PATCHES=1 或 HERMES_INDIVIDUAL_PATCH_ALLOWLIST 可启用）"
+fi
+
 # 2. Copy verified Memory OS modules / surgically rebased core hooks.
 # Avoid broad stale full-file overlays (agent_init, auxiliary_client, dashboard,
 # gateway, etc.) unless they have been surgically rebased onto this upstream.

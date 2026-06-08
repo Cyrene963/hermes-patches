@@ -16,8 +16,9 @@ The installer is overlay-first with targeted patch support:
 1. Run `scripts/hermes-patch-env-preflight.py` against the target Hermes checkout/profile.
 2. Optionally apply a legacy combined patch only when `HERMES_APPLY_COMBINED_PATCH=1` and `git apply --check` passes.
 3. Apply every `patches/*.patch` with `git apply --check` first; incompatible or already-applied patches are skipped.
-4. Copy maintained overlays from `agent/`, `tools/`, `cron/`, `hermes_cli/`, `standalone-memory-graph-webui/`, config templates, scripts, and systemd units.
-5. Remove stale `.pyc` files, install scripts/config defaults, and run guard/smoke checks where available.
+4. Optionally apply `individual/*.patch` only when `HERMES_APPLY_INDIVIDUAL_PATCHES=1` or `HERMES_INDIVIDUAL_PATCH_ALLOWLIST` names a patch/id. These are documented feature patches, not default install claims.
+5. Copy maintained overlays from `agent/`, `tools/`, `cron/`, `hermes_cli/`, `standalone-memory-graph-webui/`, config templates, scripts, and systemd units.
+6. Remove stale `.pyc` files, install scripts/config defaults, and run guard/smoke checks where available.
 
 Rollback baseline: if the target checkout was clean before install, run `cd ~/.hermes/hermes-agent && git reset --hard ORIG_HEAD` or reset to the desired upstream commit, then restart long-running gateway/services only if they loaded patched Python code.
 
@@ -33,8 +34,8 @@ Rollback baseline: if the target checkout was clean before install, run `cd ~/.h
 | `patches/model-switch-custom-provider-switch.patch` | model/provider switching | Keep custom-provider route metadata coherent when switching models/providers. | Focused route-state regression should pass. | `git apply -R` if applied. |
 | `patches/post-update-local-patch-hook.patch` | update/install lifecycle | Reapply local patch installer after `hermes update` in installed-hook environments. | Clean update-path smoke and README remote readback. | `git apply -R` if applied. |
 | `patches/search-routing-guidance.patch` | prompt/tool guidance | Route current research through stronger search/deep-research lanes when needed. | Prompt/import smoke; behavior depends on model/tool choice. | `git apply -R` if applied. |
-| `individual/0007-telegram-visible-ignored-group-context.patch` | Telegram gateway context | Cache visible-but-ignored delivered group messages for later mention-triggered context. | Gateway tests cover delivered-message cache boundaries; Telegram Bot API cannot backfill undelivered history. | `git apply -R` if applied. |
-| `individual/0010-feat-image-edit-tool.patch` | image tool surface | Add image edit dispatch support where provider capabilities allow it. | Focused image tool dispatch tests; provider-specific runtime still needs capability smoke. | `git apply -R` if applied. |
+| `individual/0007-telegram-visible-ignored-group-context.patch` | Telegram gateway context | Optional patch: cache visible-but-ignored delivered group messages for later mention-triggered context. Not installed by default. | Gateway tests cover delivered-message cache boundaries; Telegram Bot API cannot backfill undelivered history. | `git apply -R` if applied. |
+| `individual/0010-feat-image-edit-tool.patch` | image tool surface | Optional patch: add image edit dispatch support where provider capabilities allow it. Not installed by default. | Focused image tool dispatch tests; provider-specific runtime still needs capability smoke. | `git apply -R` if applied. |
 
 ## Full-File Runtime Overlays
 

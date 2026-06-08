@@ -1,0 +1,6 @@
+*.sh text eol=lf
+*.bash text eol=lf
+install.sh text eol=lf
+scripts/* text eol=lf
+*.patch text eol=lf
+*.md text eol=lf

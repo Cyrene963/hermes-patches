@@ -1,9 +1,12 @@
 """Memory Graph tools — registered with Hermes Agent tool registry.
 
-Provides 9 tools for URI-tree memory operations:
+Provides 14 tools for URI-tree memory operations:
   memory_graph_read, memory_graph_create, memory_graph_update,
   memory_graph_delete, memory_graph_list, memory_graph_search,
-  memory_graph_alias, memory_graph_glossary_add, memory_graph_glossary_scan
+  memory_graph_alias, memory_graph_glossary_add, memory_graph_glossary_scan,
+  memory_graph_manage_triggers, memory_graph_recall,
+  memory_graph_orphans, memory_graph_random, memory_graph_diagnostics,
+  memory_graph_purge
 """
 
 import json
