@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+sqlalchemy[asyncio]
+asyncpg
+bcrypt
+itsdangerous
+pyahocorasick
+jieba
+filelock
+diff-match-patch

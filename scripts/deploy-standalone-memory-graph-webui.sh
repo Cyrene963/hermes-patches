@@ -4,6 +4,7 @@
 # embedded Hermes patch server on port 8900.
 set -euo pipefail
 
+PATCHES_DIR="${PATCHES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 MG_PROJECT_DIR="${MG_PROJECT_DIR:-}"
 if [ -z "$MG_PROJECT_DIR" ]; then
   echo "MG_PROJECT_DIR must be set" >&2
@@ -17,9 +18,21 @@ NGINX_BIN="${NGINX_BIN:-/www/server/nginx/sbin/nginx}"
 NGINX_MAIN_CONF="${NGINX_MAIN_CONF:-/www/server/nginx/conf/nginx.conf}"
 UNIT_PATH="/etc/systemd/system/memory-graph-webui.service"
 
+OVERLAY_DIR="$PATCHES_DIR/standalone-memory-graph-webui"
+if [ -d "$OVERLAY_DIR" ]; then
+  mkdir -p "$MG_PROJECT_DIR"
+  cp -R "$OVERLAY_DIR/." "$MG_PROJECT_DIR/"
+  echo "✅ standalone Memory Graph WebUI overlay copied from $OVERLAY_DIR"
+fi
+
 if [ ! -f "$MG_BACKEND_DIR/main.py" ]; then
   echo "❌ standalone Memory Graph backend missing: $MG_BACKEND_DIR/main.py" >&2
   exit 1
+fi
+
+if [ -f "$MG_PROJECT_DIR/frontend/package.json" ] && command -v npm >/dev/null 2>&1; then
+  (cd "$MG_PROJECT_DIR/frontend" && npm install >/dev/null 2>&1 && npm run build)
+  echo "✅ standalone Memory Graph frontend built"
 fi
 
 # Runtime deps used by the standalone backend. Debian package names differ from

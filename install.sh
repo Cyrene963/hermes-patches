@@ -468,13 +468,19 @@ if [ -f "$PATCHES_DIR/scripts/hermes_search_as_code_research.py" ]; then
     chmod +x "$PROFILE_DIR/scripts/hermes_search_as_code_research.py"
     echo "   ✅ hermes_search_as_code_research.py 已安装"
 fi
+if [ -d "$PATCHES_DIR/standalone-memory-graph-webui" ]; then
+    rm -rf "$PROFILE_DIR/standalone-memory-graph-webui"
+    mkdir -p "$PROFILE_DIR/standalone-memory-graph-webui"
+    cp -R "$PATCHES_DIR/standalone-memory-graph-webui/." "$PROFILE_DIR/standalone-memory-graph-webui/"
+    echo "   ✅ standalone Memory Graph WebUI overlay 已复制"
+fi
 if [ -f "$PATCHES_DIR/scripts/deploy-standalone-memory-graph-webui.sh" ]; then
     mkdir -p "$PROFILE_DIR/scripts"
     cp "$PATCHES_DIR/scripts/deploy-standalone-memory-graph-webui.sh" "$PROFILE_DIR/scripts/deploy-standalone-memory-graph-webui.sh"
     chmod +x "$PROFILE_DIR/scripts/deploy-standalone-memory-graph-webui.sh"
     echo "   ✅ deploy-standalone-memory-graph-webui.sh 已安装"
     if [ "${HERMES_DEPLOY_STANDALONE_MG_WEBUI:-0}" = "1" ] && [ -n "${MG_PROJECT_DIR:-}" ] && [ "$(id -u)" -eq 0 ]; then
-        "$PROFILE_DIR/scripts/deploy-standalone-memory-graph-webui.sh" || echo "   ⚠️ standalone Memory Graph WebUI 部署失败，请手动运行 $PROFILE_DIR/scripts/deploy-standalone-memory-graph-webui.sh"
+        PATCHES_DIR="$PROFILE_DIR" "$PROFILE_DIR/scripts/deploy-standalone-memory-graph-webui.sh" || echo "   ⚠️ standalone Memory Graph WebUI 部署失败，请手动运行 $PROFILE_DIR/scripts/deploy-standalone-memory-graph-webui.sh"
     fi
 fi
 
