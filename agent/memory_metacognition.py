@@ -561,7 +561,7 @@ def load_policy(force_reload: bool = False,
     default_path = _find_default_policy()
     if default_path:
         try:
-            with open(default_path) as f:
+            with open(default_path, encoding="utf-8") as f:
                 merged = yaml.safe_load(f) or {}
         except Exception as e:
             logger.warning("Failed to load default memory policy: %s", e)
@@ -573,7 +573,7 @@ def load_policy(force_reload: bool = False,
         for path in _POLICY_FILE_PATHS:
             if os.path.exists(path):
                 try:
-                    with open(path) as f:
+                    with open(path, encoding="utf-8") as f:
                         local = yaml.safe_load(f) or {}
                     _deep_merge(merged, local)
                     logger.info("Loaded memory policy from %s", path)
@@ -585,7 +585,7 @@ def load_policy(force_reload: bool = False,
             user_path = _get_user_policy_path(user_context["user_id"])
             if user_path and os.path.exists(user_path):
                 try:
-                    with open(user_path) as f:
+                    with open(user_path, encoding="utf-8") as f:
                         user_policy = yaml.safe_load(f) or {}
                     _deep_merge(merged, user_policy)
                     logger.info("Loaded user policy from %s", user_path)
@@ -1053,12 +1053,12 @@ def apply_suggestion(suggestion: LessonSuggestion,
 
         existing = {}
         if os.path.exists(target_path):
-            with open(target_path) as f:
+            with open(target_path, encoding="utf-8") as f:
                 existing = yaml.safe_load(f) or {}
 
         _deep_merge(existing, patch_preview)
 
-        with open(target_path, "w") as f:
+        with open(target_path, "w", encoding="utf-8") as f:
             yaml.dump(existing, f, default_flow_style=False, allow_unicode=True)
 
         suggestion.applied = True

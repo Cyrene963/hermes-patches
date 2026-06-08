@@ -135,7 +135,7 @@ bash <(curl -sL https://raw.githubusercontent.com/Cyrene963/hermes-patches/main/
 
 - 必须项：`HERMES_HOME` / `~/.hermes/hermes-agent` 是真实 Hermes repo，且存在 `toolsets.py`
 - 基础命令：`git`、`python3`、`curl`
-- Python 运行依赖：`bcrypt`、`jieba`、`asyncpg`、`ahocorasick`
+- Python 运行依赖：`bcrypt`、`itsdangerous`、`SQLAlchemy`、`asyncpg`、`jieba`、`ahocorasick`
 - profile 配置：`~/.hermes/.env`，必要时生成 `MEMORY_GRAPH_DB_PASSWORD`
 - 数据库/服务面：PostgreSQL `5432`、Memory Graph `127.0.0.1:8900/health`、Hindsight `127.0.0.1:9177/health`
 - 可选能力：`psql`/`sudo` 用于自动初始化 `mg_app` 最小权限 DB role；`systemctl` 用于安装/启动 Memory Graph service/watchdog；`npm` 用于 ast-grep 或 dashboard rebuild

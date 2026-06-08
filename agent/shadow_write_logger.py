@@ -78,7 +78,7 @@ def log_shadow_write(
     date_str = datetime.now().strftime("%Y-%m-%d")
     log_file = os.path.join(_SHADOW_LOG_DIR, f"shadow_{date_str}.jsonl")
 
-    with open(log_file, "a") as f:
+    with open(log_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     logger.debug("Shadow write logged: %d candidates, would_write=%s",
@@ -131,7 +131,7 @@ def get_shadow_stats(date_str: Optional[str] = None) -> Dict[str, Any]:
         return {"date": date_str, "entries": 0}
 
     entries = []
-    with open(log_file) as f:
+    with open(log_file, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:

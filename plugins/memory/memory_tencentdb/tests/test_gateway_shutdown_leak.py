@@ -66,6 +66,8 @@ import time
 import unittest
 from typing import Dict, List, Optional
 
+import psutil
+
 
 # ---------------------------------------------------------------------------
 # Path setup
@@ -196,13 +198,7 @@ def _make_fake_gateway_script(tmpdir: pathlib.Path, pid_file: pathlib.Path) -> p
 
 def _pid_alive(pid: int) -> bool:
     """Return True if the OS says this pid is still a live process."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    return psutil.pid_exists(pid)
 
 
 def _wait_for_pid_file(pid_file: pathlib.Path, timeout: float = 5.0) -> int:
@@ -235,7 +231,7 @@ def _kill_if_alive(pid: int) -> None:
         os.kill(pid, signal.SIGTERM)
         time.sleep(0.2)
         if _pid_alive(pid):
-            os.kill(pid, signal.SIGKILL)
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
     except ProcessLookupError:
         pass
 

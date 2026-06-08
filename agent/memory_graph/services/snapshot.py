@@ -31,13 +31,13 @@ class ChangesetStore:
         path = self._changeset_path(changeset_id)
         if not os.path.exists(path):
             return None
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 
     def save(self, changeset_id: str, data: Dict[str, Any]) -> str:
         """Save a changeset and return its path."""
         path = self._changeset_path(changeset_id)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False, default=str)
         return path
 
@@ -69,7 +69,7 @@ class ChangesetStore:
                 continue
             path = os.path.join(self._base_dir, fname)
             try:
-                with open(path, "r") as f:
+                with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if node_uuid and data.get("node_uuid") != node_uuid:
                     continue
