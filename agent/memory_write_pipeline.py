@@ -64,6 +64,8 @@ def _auto_type(candidate: "CandidateFact") -> str:
         return "explicit_correction"
     if candidate.memory_type == "preference" and candidate.source_type == "user_direct":
         return "explicit_preference"
+    if candidate.memory_type in {"target_function", "procedural_memory", "decision", "user_fact"} and candidate.source_type == "user_direct":
+        return candidate.memory_type
     return candidate.memory_type
 
 # ─── Data Classes ────────────────────────────────────────────────
@@ -509,13 +511,36 @@ class MemoryWritePipeline:
         """Apply 5 gates to determine if and where to write."""
         existing = existing_facts or []
 
-        # Gate 1: Importance
+        # Gate 1: Candidate quality / pollution guard. This only rejects obvious
+        # wrappers, logs, empty fragments, or system events; durable user-authored
+        # signals continue into the normal review/auto-write policy below.
+        try:
+            from agent.memory_write_filters import evaluate_memory_candidate_quality
+            quality = evaluate_memory_candidate_quality(
+                subject=candidate.subject,
+                predicate=candidate.predicate,
+                object_value=candidate.object_value,
+                memory_type=candidate.memory_type,
+                source_type=candidate.source_type,
+                evidence_quote=candidate.evidence_quote,
+                importance=candidate.importance,
+                confidence=candidate.confidence,
+            )
+        except Exception as exc:
+            logger.debug('Memory quality filter failed open to review: %s', exc)
+            quality = None
+        if quality is not None and not quality.accepted:
+            return {'action': 'ignore', 'reason': quality.reason, 'target_store': 'ignore'}
+        if quality is not None and quality.requires_review:
+            candidate.requires_review = True
+
+        # Gate 2: Importance
         if candidate.importance < 0.40:
             return {'action': 'ignore', 'reason': 'Low importance'}
 
-        # Gate 2: Type (already classified)
+        # Gate 3: Type (already classified)
 
-        # Gate 3: Conflict
+        # Gate 4: Conflict
         conflict_uri = detect_conflict(candidate, existing)
         if conflict_uri:
             candidate.conflict_with = conflict_uri
@@ -531,15 +556,18 @@ class MemoryWritePipeline:
         candidate.dedup_key = make_dedup_key(candidate)
         # (dedup check would query existing facts)
 
-        # Gate 5: Review
+        # Gate 5: Clarification-on-use instead of low-ROI batch review.
+        # Uncertain memories should not pile up for manual WebUI approval. Keep
+        # them as pending clarification candidates and surface them only when a
+        # future task would rely on them.
         if candidate.source_type == 'agent_inference':
             candidate.requires_review = True
-            return {'action': 'review', 'target_store': 'review', 'reason': 'Agent inference requires review'}
+            return {'action': 'clarify_later', 'target_store': 'clarification', 'reason': 'Agent inference should be confirmed when relevant'}
         # Check for sensitive rules
         sensitive_patterns = ['跳过', '绕过', '忽略', '不需要确认', '自动']
         if any(p in candidate.object_value for p in sensitive_patterns):
             candidate.requires_review = True
-            return {'action': 'review', 'target_store': 'review', 'reason': 'Sensitive rule requires review'}
+            return {'action': 'clarify_later', 'target_store': 'clarification', 'reason': 'Sensitive rule should be confirmed when relevant'}
 
         # Determine target store
         target = route_target(candidate.memory_type, candidate.importance,
@@ -549,9 +577,11 @@ class MemoryWritePipeline:
         if candidate.target_store and candidate.target_store != 'ignore':
             target = candidate.target_store
 
-        # If requires_review, override target to review queue
+        # If requires_review, route to clarification-on-use rather than a batch
+        # WebUI approval queue. This preserves safety while avoiding low-ROI
+        # manual review work.
         if candidate.requires_review:
-            target = 'review'
+            target = 'clarification'
 
         return {
             'action': 'write',
@@ -683,28 +713,61 @@ class MemoryWritePipeline:
         }
 
     def _record_repair_queue(self, candidate: CandidateFact, classification: Dict[str, Any], result: Dict[str, Any]) -> None:
-        """Append a redacted readback-repair item for failed writes/canaries. No Graph mutation."""
+        """Append a redacted repair/review item for blocked or failed memory writes."""
         try:
             from datetime import datetime, timezone
             import hashlib
+
             path = Path(os.path.expanduser(str(self.config.get('repair_queue_path') or '~/.hermes/logs/memory_repair_queue.jsonl')))
             path.parent.mkdir(parents=True, exist_ok=True)
+
             raw_value = candidate.object_value or ''
-            secret_like = bool(re.search(r'(sk-[A-Za-z0-9]|ghp_[A-Za-z0-9]|github_pat_|xox[baprs]-|AKIA[0-9A-Z]{16}|token\s*[:=]|api[_ -]?key\s*[:=])', raw_value, re.I))
+            raw_evidence = candidate.evidence_quote or ''
+            sensitive_route = bool(re.search(
+                r'(credential|credentials|secret|token|api[_ -]?key|密钥|凭据|密码)',
+                f"{candidate.subject}\n{candidate.predicate}\n{candidate.target_path}\n{classification.get('target_path', '')}",
+                re.I,
+            ))
+            raw_secret_detected = bool(re.search(
+                r'(sk-[A-Za-z0-9]|ghp_[A-Za-z0-9]|github_pat_|xox[baprs]-|AKIA[0-9A-Z]{16}|token\s*[:=]|api[_ -]?key\s*[:=])',
+                f"{raw_value}\n{raw_evidence}",
+                re.I,
+            ))
+            preview_redacted = sensitive_route or raw_secret_detected
+
+            def _preview(text: str, limit: int = 500) -> str:
+                text = re.sub(r'\s+', ' ', text or '').strip()
+                if not text:
+                    return ''
+                if preview_redacted:
+                    return '[redacted: sensitive review content]'
+                return text[:limit]
+
+            failure_reason = result.get('failure_reason') or result.get('reason') or 'readback not verified'
             item = {
+                'schema_version': 2,
                 'timestamp': datetime.now(timezone.utc).isoformat(),
                 'namespace': classification.get('namespace') or candidate.namespace or '',
                 'subject': candidate.subject,
                 'predicate': candidate.predicate,
                 'memory_type': candidate.memory_type,
+                'source_type': candidate.source_type,
+                'importance': candidate.importance,
+                'confidence': candidate.confidence,
                 'target_store': classification.get('target_store'),
                 'target_path': classification.get('target_path') or candidate.target_path,
+                'requires_review': bool(candidate.requires_review or classification.get('requires_review')),
+                'auto_write_allowed': bool(result.get('auto_write_allowed')),
+                'actually_written': bool(result.get('written')),
+                'readback_ok': bool(result.get('readback_ok')),
                 'readback_queries': result.get('readback_queries') or generate_readback_queries(candidate),
                 'top_uri': result.get('top_uri', ''),
                 'top_score': result.get('top_score'),
-                'failure_reason': result.get('failure_reason') or result.get('reason') or 'readback not verified',
-                'suggested_repair': 'manual_review' if secret_like or candidate.requires_review else 'alias_or_search_terms',
-                'raw_secret_redacted': secret_like,
+                'failure_reason': failure_reason,
+                'suggested_repair': 'manual_review' if preview_redacted or candidate.requires_review or classification.get('target_store') == 'review' else 'alias_or_search_terms',
+                'content_preview': _preview(raw_value),
+                'evidence_preview': _preview(raw_evidence),
+                'raw_secret_redacted': raw_secret_detected,
                 'value_sha256': hashlib.sha256(raw_value.encode('utf-8', 'ignore')).hexdigest() if raw_value else '',
             }
             with path.open('a', encoding='utf-8') as f:
@@ -727,7 +790,29 @@ class MemoryWritePipeline:
             'failure_reason': '',
         }
 
-        if classification.get('action') != 'write':
+        if classification.get('action') not in {'write', 'clarify_later'}:
+            return result
+
+        if classification.get('action') == 'clarify_later' or classification.get('target_store') == 'clarification':
+            try:
+                from agent.memory_clarification_queue import record_clarification_candidate
+                item = record_clarification_candidate(
+                    candidate,
+                    classification,
+                    queue_path=self.config.get('clarification_queue_path'),
+                )
+                result.update({
+                    'target': 'clarification',
+                    'queued_for_clarification': True,
+                    'clarification_id': item.get('id', ''),
+                    'failure_reason': classification.get('reason', 'requires clarification when relevant'),
+                })
+            except Exception as exc:
+                result.update({
+                    'target': 'clarification',
+                    'queued_for_clarification': False,
+                    'failure_reason': f'clarification queue write failed: {exc}',
+                })
             return result
 
         result['readback_queries'] = generate_readback_queries(candidate)

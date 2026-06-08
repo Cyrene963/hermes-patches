@@ -4,6 +4,26 @@
 >
 > **适配状态：2026-06-07：已适配 Hermes Agent v0.16.0 / `v2026.6.5` 后的官方 `upstream/main`。** 本仓库只补充尚未进入官方 Hermes 的 Memory OS / Memory Graph / 检索与安全门控相关能力；官方已内置的功能不会冒充为补丁成果。当前发布版已在 clean upstream worktree 与本机运行环境中验证：installer 可应用、关键 Python 模块可 import、Memory Graph 14 个工具已注册、focused regression 通过、Memory Graph create → search → delete canary 通过、gateway 重启后加载成功。README 按 `Verified / Partially verified / Risk` 标注证据，不把“文件存在”写成“功能已跑通”。**
 
+## 快速入口
+
+| 你想做什么 | 看这里 |
+|---|---|
+| 直接安装 | [一行命令安装](#一行命令安装) |
+| 快速判断当前能力是否已验证 | [当前版本实测摘要](#当前版本实测摘要2026-06-07) |
+| 审计每个补丁/overlay/回滚方式 | [`PATCHES.md`](PATCHES.md) |
+| 理解 Memory OS 架构 | [`docs/MEMORY_ARCHITECTURE.md`](docs/MEMORY_ARCHITECTURE.md) |
+| 理解 Search-as-Code/deep_research | [`docs/SEARCH_AS_CODE.md`](docs/SEARCH_AS_CODE.md) |
+| 排查安装、服务、网关、记忆问题 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) |
+
+## 维护与验证
+
+本仓库现在把“补丁存在”和“真实可用”分开维护：
+
+- `PATCHES.md` 记录 targeted `.patch`、full-file overlay、服务/config 资产、验证命令和回滚边界。
+- `.github/workflows/privacy-guard.yml` 扫描公开仓库隐私风险。
+- `.github/workflows/patch-verification.yml` 在 clean upstream checkout 上运行 no-side-effect installer smoke、关键 import/toolset 注册检查和 focused regression tests。
+- `install.sh` 默认跳过 legacy combined patch，优先使用 targeted patch + overlay；临时 clean-smoke checkout 默认不安装 systemd、不初始化 live DB。
+
 ## 装有什么用？
 
 **🏗️ 借鉴成熟 Agent Harness 架构，提升 Harness 能力**

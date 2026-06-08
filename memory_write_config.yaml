@@ -6,16 +6,22 @@
 
 memory_write:
   # Mode: shadow | limited_auto | full_auto
-  mode: shadow
+  mode: limited_auto
 
   # Minimum importance score for future auto-write experiments.
   auto_write_threshold: 0.95
 
-  # Types allowed for automatic writing when limited_auto is deliberately re-enabled.
-  # project_fact is intentionally excluded until project/entity validation is fixed.
+  # Types allowed for automatic writing when limited_auto is enabled.
+  # These are explicit, user-originated, high-confidence digital-stand-in signals.
+  # Risky/uncertain/project/conflicting items go to clarification-on-use instead
+  # of low-ROI batch WebUI review.
   allowed_auto_types:
     - explicit_correction
     - explicit_preference
+    - target_function
+    - procedural_memory
+    - decision
+    - user_fact
 
   # Types that always require review
   always_review_types:

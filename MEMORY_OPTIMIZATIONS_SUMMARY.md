@@ -20,7 +20,7 @@ This implementation addresses the gaps identified in the memory system audit:
 
 ### 1. Documentation
 
-**File**: `/root/hermes-patches/docs/MEMORY_SYSTEM_COMPARISON.md` (15 KB)
+**File**: `docs/MEMORY_SYSTEM_COMPARISON.md` (15 KB)
 
 Complete comparison guide covering:
 - Quick comparison table (hindsight vs memory_graph vs memory_tencentdb)
@@ -42,7 +42,7 @@ Complete comparison guide covering:
 
 ### 2. Tool Schema Enhancements
 
-**File**: `/root/hermes-patches/plugins/memory/memory_tencentdb/__init__.py` (modified)
+**File**: `plugins/memory/memory_tencentdb/__init__.py` (modified)
 
 **Changes**:
 
@@ -76,7 +76,7 @@ Added usage guidelines:
 
 ### 3. Auto-Store Heuristic Module
 
-**File**: `/root/hermes-patches/agent/auto_store_heuristic.py` (11 KB, new)
+**File**: `agent/auto_store_heuristic.py` (11 KB, new)
 
 **Features**:
 - Linguistic pattern detection for memory-worthy content
@@ -116,7 +116,7 @@ if should_auto_store(user_message):
 
 ### 4. Auto-Memory Integration Hooks
 
-**File**: `/root/hermes-patches/agent/memory_auto_hooks.py` (12 KB, new)
+**File**: `agent/memory_auto_hooks.py` (12 KB, new)
 
 **Features**:
 - Environment-based opt-in (`HERMES_AUTO_MEMORY=true`)

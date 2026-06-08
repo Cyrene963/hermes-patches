@@ -15,7 +15,26 @@ import bcrypt
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 
 USERS_FILE = Path.home() / ".hermes" / "memory_graph_users.json"
-SESSION_SECRET = os.environ.get("MG_SESSION_SECRET", "mg-default-change-me-in-prod")
+SESSION_SECRET_FILE = Path.home() / ".hermes" / "memory_graph_session_secret"
+
+
+def _load_session_secret() -> str:
+    """Load a per-install dashboard session secret, creating one if needed."""
+    env_secret = os.environ.get("MEMORY_GRAPH_SESSION_SECRET") or os.environ.get("MG_SESSION_SECRET")
+    if env_secret:
+        return env_secret
+    if SESSION_SECRET_FILE.exists():
+        secret = SESSION_SECRET_FILE.read_text(encoding="utf-8").strip()
+        if secret:
+            return secret
+    SESSION_SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
+    secret = secrets.token_urlsafe(48)
+    SESSION_SECRET_FILE.write_text(secret + "\n", encoding="utf-8")
+    os.chmod(SESSION_SECRET_FILE, 0o600)
+    return secret
+
+
+SESSION_SECRET = _load_session_secret()
 SESSION_MAX_AGE = 604800  # 7 days
 
 _serializer = URLSafeTimedSerializer(SESSION_SECRET)

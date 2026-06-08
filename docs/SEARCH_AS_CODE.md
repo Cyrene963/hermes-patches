@@ -515,7 +515,7 @@ tokenize='porter unicode61'
 
 ```bash
 # Run migration SQL
-psql -U your_user -d hindsight -f /root/hermes-patches/agent/memory_graph/migrations/001_add_search_index.sql
+psql -U your_user -d hindsight -f agent/memory_graph/migrations/001_add_search_index.sql
 ```
 
 **Migration steps**:

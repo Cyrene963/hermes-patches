@@ -10,11 +10,11 @@ Hermes Agent supports three complementary memory systems, each designed for diff
 
 | Feature | **hindsight** | **memory_graph** | **memory_tencentdb** |
 |---------|---------------|------------------|---------------------|
-| **Storage Type** | SQLite (local) | SQLite (local) | Local files (L0-L3) via Gateway |
-| **Memory Structure** | Raw conversation turns | Structured knowledge graph | Four-layer hierarchy (conversation → extraction → scenes → persona) |
-| **Processing** | None (raw storage) | Manual structuring | AI-powered automatic extraction |
-| **Best For** | Recent conversation context | Precise, hand-crafted knowledge | Long-term user persona & preferences |
-| **Setup Complexity** | Zero config | Low (SQLite only) | Medium (requires Node.js Gateway) |
+| **Storage Type** | SQLite/session or configured backend | PostgreSQL (`hindsight` DB, `mg_*` tables) + HTTP service | Local files / SQLite or Tencent VectorDB via Gateway |
+| **Memory Structure** | Raw/evidence memory units | Structured knowledge graph | Four-layer hierarchy (conversation → extraction → scenes → persona) |
+| **Processing** | Provider-managed retain/recall | Explicit tools + review/approval | AI-powered automatic extraction |
+| **Best For** | Evidence archive and semantic recall | Precise canonical facts/rules/projects | Long-term user persona & preferences |
+| **Setup Complexity** | Provider-dependent | Medium (PostgreSQL + Memory Graph service) | Medium (requires Node.js Gateway) |
 | **Recall Speed** | Instant (N recent turns) | Fast (indexed graph) | Fast (semantic search) |
 | **Memory Lifespan** | Short-term (sliding window) | Permanent (until deleted) | Long-term (persistent across sessions) |
 | **Content Type** | Verbatim dialogue | Facts, rules, worldview | User preferences, history, patterns |
@@ -48,9 +48,9 @@ Oldest turns automatically pruned when limit is reached
 
 **Configuration:**
 ```yaml
-memory_providers:
+memory:
+  provider: hindsight
   hindsight:
-    enabled: true
     window_size: 20  # Keep last 20 turns
 ```
 
@@ -86,12 +86,16 @@ root://
 - ✅ You want trigger-based context injection ("when user says X, remind me of Y")
 - ❌ Don't use if you want fully automatic memory extraction
 
-**Configuration:**
-```yaml
-memory_providers:
-  memory_graph:
-    enabled: true
-    db_path: ~/.hermes/memory_graph.db
+**Configuration / health check:**
+```bash
+# Memory Graph is a patched service/toolset, not a SQLite db_path provider.
+curl -fsS http://127.0.0.1:8900/health
+cd ~/.hermes/hermes-agent
+venv/bin/python - <<'PY'
+from toolsets import TOOLSETS, _HERMES_CORE_TOOLS
+print('memory_graph tools:', len(TOOLSETS.get('memory_graph', {}).get('tools', [])))
+print('memory_graph_search in core:', 'memory_graph_search' in _HERMES_CORE_TOOLS)
+PY
 ```
 
 **Example use case:**
@@ -148,11 +152,12 @@ export MEMORY_TENCENTDB_LLM_MODEL="gpt-4o"
 ```
 
 ```yaml
-# In hermes config
-memory_providers:
-  memory_tencentdb:
-    enabled: true
+# In hermes config (canonical single-provider schema)
+memory:
+  provider: memory_tencentdb
 ```
+
+> Do not mix this with legacy `memory_providers:` examples unless the specific provider README documents that schema. For the default Hermes/Hindsight path, use `memory.provider: hindsight`.
 
 **Example use case:**
 > Session 1:  
@@ -197,37 +202,47 @@ memory_providers:
 
 ## Common Configurations
 
-### Configuration 1: Minimal (Zero Setup)
-**Goal:** Basic conversation continuity within a session
+### Configuration 1: Minimal (session + evidence memory)
+**Goal:** Basic conversation continuity and evidence recall
 
 ```yaml
-memory_providers:
+memory:
+  provider: hindsight
   hindsight:
-    enabled: true
     window_size: 20
 ```
 
-**Use case:** Quick prototyping, demos, short tasks
+**Use case:** Quick prototyping, demos, short tasks, or a simple evidence archive.
 
 ---
 
-### Configuration 2: Power User (Manual Control)
-**Goal:** Precise knowledge management + recent context
+### Configuration 2: Power User (Manual Canonical Graph)
+**Goal:** Precise knowledge management + recent/evidence context
+
+Memory Graph is a patched service/toolset backed by PostgreSQL. Keep the normal memory provider config separate, then verify Memory Graph service/tool wiring:
 
 ```yaml
-memory_providers:
+memory:
+  provider: hindsight
   hindsight:
-    enabled: true
     window_size: 20
-  memory_graph:
-    enabled: true
-    db_path: ~/.hermes/memory_graph.db
+```
+
+```bash
+curl -fsS http://127.0.0.1:8900/health
+cd ~/.hermes/hermes-agent
+venv/bin/python - <<'PY'
+from toolsets import TOOLSETS, _HERMES_CORE_TOOLS
+assert 'memory_graph' in TOOLSETS
+assert 'memory_graph_search' in _HERMES_CORE_TOOLS
+print('memory_graph ready')
+PY
 ```
 
 **Use case:**
 - You maintain a "second brain" of facts, preferences, and worldview
-- You want to define exact trigger rules for context injection
-- You're willing to manually curate your memory graph
+- You want exact tools/review queues for canonical facts
+- You're willing to manually curate or approve Memory Graph changes
 
 ---
 
@@ -235,13 +250,11 @@ memory_providers:
 **Goal:** Agent learns about you automatically over time
 
 ```yaml
-memory_providers:
-  hindsight:
-    enabled: true
-    window_size: 20
-  memory_tencentdb:
-    enabled: true
+memory:
+  provider: memory_tencentdb
 ```
+
+> `memory_tencentdb` has its own provider README and sidecar requirements. Do not mix this with Memory Graph's PostgreSQL/toolset setup unless you have verified namespace, bank, and prompt-injection behavior for both.
 
 **Use case:**
 - Long-term personal assistant
@@ -251,30 +264,28 @@ memory_providers:
 
 ---
 
-### Configuration 4: Complete (All Systems)
-**Goal:** Hybrid approach with all memory types
+### Configuration 4: Hybrid (evidence + canonical graph + optional learned persona)
+**Goal:** Hybrid approach with explicit boundaries
 
 ```yaml
-memory_providers:
+memory:
+  provider: hindsight
   hindsight:
-    enabled: true
     window_size: 20
-  memory_graph:
-    enabled: true
-  memory_tencentdb:
-    enabled: true
 ```
 
+Then separately verify Memory Graph (`curl :8900/health` + toolset registration) and only enable `memory_tencentdb` if you intentionally want the extra sidecar.
+
 **Use case:**
-- **hindsight** handles immediate context ("what we just discussed")
-- **memory_graph** stores your hand-crafted worldview and rules
-- **memory_tencentdb** learns your preferences and patterns automatically
+- **hindsight** handles evidence / raw recall
+- **memory_graph** stores canonical facts, rules, projects, and approved review proposals
+- **memory_tencentdb** can optionally learn preferences/patterns, but should not be enabled casually on a multi-user instance
 
 **How they work together:**
-1. **hindsight** provides recent conversation context (last 20 turns)
-2. **memory_graph** injects relevant structured knowledge when triggers match
-3. **memory_tencentdb** adds long-term user profile and preferences
-4. All three are merged into a single context block by `MemoryManager`
+1. **hindsight** provides evidence and semantic recall
+2. **memory_graph** provides approved canonical facts and rules through tools/review queues
+3. **memory_tencentdb** is optional and provider-specific
+4. Avoid enabling multiple automatic memory writers until namespace/readback behavior is verified
 
 ---
 
@@ -379,14 +390,15 @@ Each system exposes different search capabilities:
 ### Data export/backup
 
 ```bash
-# hindsight
-sqlite3 ~/.hermes/hindsight.db ".dump" > hindsight_backup.sql
+# Hermes session store / local SQLite stores, if used
+sqlite3 ~/.hermes/state.db ".backup hermes_state_backup.db"
 
-# memory_graph
-sqlite3 ~/.hermes/memory_graph.db ".dump" > memory_graph_backup.sql
+# Hindsight / Memory Graph PostgreSQL database
+sudo -u postgres pg_dump hindsight > hindsight_memory_graph_backup.sql
 
 # memory_tencentdb
-tar -czf memory_tencentdb_backup.tar.gz ~/.memory-tencentdb/memory-tdai/
+# Follow the provider README; storage may be local SQLite/files or Tencent VectorDB.
+tar -czf memory_tencentdb_backup.tar.gz ~/.memory-tencentdb/memory-tdai/ 2>/dev/null || true
 ```
 
 ---
@@ -395,11 +407,12 @@ tar -czf memory_tencentdb_backup.tar.gz ~/.memory-tencentdb/memory-tdai/
 
 ### hindsight not recalling recent turns?
 ```bash
-# Check if enabled
-hermes config get memory_providers.hindsight.enabled
+# Check configured provider
+hermes config get memory.provider
 
-# Check database
-sqlite3 ~/.hermes/hindsight.db "SELECT COUNT(*) FROM conversations;"
+# Check Hindsight service and PostgreSQL-backed async queue
+curl -fsS http://127.0.0.1:9177/health
+sudo -u postgres psql -d hindsight -c "SELECT bank_id, COUNT(*) FROM memory_units GROUP BY bank_id ORDER BY count DESC;"
 ```
 
 ### memory_graph triggers not firing?
@@ -428,8 +441,8 @@ echo $MEMORY_TENCENTDB_LLM_API_KEY
 ## Further Reading
 
 - **hindsight**: See `hermes/agent/memory/hindsight.py`
-- **memory_graph**: See `/root/hermes-patches/docs/MEMORY_ARCHITECTURE.md`
-- **memory_tencentdb**: See `/root/hermes-patches/docs/SEARCH_AS_CODE.md`
+- **memory_graph**: See `docs/MEMORY_ARCHITECTURE.md`
+- **memory_tencentdb**: See `docs/SEARCH_AS_CODE.md`
 
 ---
 

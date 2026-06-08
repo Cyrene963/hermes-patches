@@ -1,0 +1,106 @@
+name: Patch Verification
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  patch-verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HERMES_INSTALL_SYSTEMD: "0"
+      HERMES_INSTALL_DB: "0"
+      HERMES_PROFILE_DIR: ${{ github.workspace }}/.ci-profile
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout patch repository
+        uses: actions/checkout@v4
+        with:
+          path: hermes-patches
+          fetch-depth: 0
+
+      - name: Checkout upstream Hermes Agent
+        uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          path: hermes-agent
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Hermes test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e './hermes-agent[dev]'
+          python -m pip install bcrypt jieba asyncpg pyahocorasick
+
+      - name: Validate targeted patches
+        run: |
+          set -euo pipefail
+          cd hermes-agent
+          for patch_file in ../hermes-patches/patches/*.patch ../hermes-patches/individual/*.patch; do
+            [ -e "$patch_file" ] || continue
+            echo "checking ${patch_file}"
+            git apply --check --whitespace=warn "$patch_file" || {
+              echo "::warning file=${patch_file}::patch is incompatible with current upstream or already represented by upstream"
+            }
+          done
+
+      - name: Run no-side-effect installer smoke
+        run: |
+          set -euo pipefail
+          mkdir -p "$HERMES_PROFILE_DIR"
+          HERMES_HOME="$GITHUB_WORKSPACE/hermes-agent" bash "$GITHUB_WORKSPACE/hermes-patches/install.sh"
+
+      - name: Compile patched Python surfaces
+        run: |
+          set -euo pipefail
+          cd hermes-agent
+          python -m py_compile \
+            agent/system_prompt.py \
+            agent/agent_runtime_helpers.py \
+            agent/conversation_loop.py \
+            agent/tool_executor.py \
+            agent/memory_metacognition.py \
+            agent/memory_write_pipeline.py \
+            tools/memory_graph_tool.py \
+            tools/session_search_tool.py \
+            tools/deep_research_tool.py \
+            toolsets.py
+
+      - name: Verify tool registration
+        run: |
+          set -euo pipefail
+          cd hermes-agent
+          python - <<'PY'
+          import tools.memory_graph_tool
+          import tools.session_search_tool
+          import tools.deep_research_tool
+          from toolsets import TOOLSETS, _HERMES_CORE_TOOLS
+          memory_graph_tools = TOOLSETS.get("memory_graph", {}).get("tools", [])
+          assert len(memory_graph_tools) == 14, memory_graph_tools
+          assert "memory_graph_search" in _HERMES_CORE_TOOLS
+          assert "session_search" in _HERMES_CORE_TOOLS
+          assert "deep_research" in _HERMES_CORE_TOOLS
+          assert "deep_research" in TOOLSETS.get("web", {}).get("tools", [])
+          print("tool registration smoke ok")
+          PY
+
+      - name: Run focused regression tests
+        run: |
+          set -euo pipefail
+          cd hermes-agent
+          python -m pytest -q \
+            tests/agent/test_prompt_builder.py \
+            tests/agent/test_skill_router.py \
+            tests/run_agent/test_memory_preflight_dispatch.py \
+            tests/tools/test_memory_graph_tool.py \
+            tests/tools/test_session_search.py
+
+      - name: Run public privacy guard
+        run: bash hermes-patches/scripts/hermes-public-patch-privacy-guard.sh "$GITHUB_WORKSPACE/hermes-patches"

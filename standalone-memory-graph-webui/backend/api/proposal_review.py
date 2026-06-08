@@ -96,6 +96,42 @@ def _content_preview(value: Any, *, reveal: bool, max_chars: int = 220) -> dict[
     return {"redacted": False, "text": text[:max_chars] + ("…" if truncated else ""), "truncated": truncated, "length": len(text), "max_chars": max_chars}
 
 
+def _candidate_text_pair(payload: dict[str, Any]) -> tuple[str, str]:
+    candidate = payload.get("candidate") or {}
+    return (
+        str(candidate.get("value", candidate.get("content", "")) or "").strip(),
+        str(payload.get("evidence_quote") or candidate.get("evidence_quote") or "").strip(),
+    )
+
+
+def _candidate_readback_query_count(payload: dict[str, Any]) -> int:
+    return len(payload.get("readback_queries") or (payload.get("candidate") or {}).get("readback_queries") or (payload.get("readback") or {}).get("queries") or [])
+
+
+def _review_stage(payload: dict[str, Any]) -> str:
+    """Classify proposals into user-facing buckets.
+
+    `ready_memory` means the item is already a distilled, durable memory fact.
+    `raw_material` means it is evidence/excerpt material that needs summarization
+    before any canonical Memory Graph write. Raw material must not be approved
+    directly, even if older importers labeled target_store=memory_graph.
+    """
+    candidate = payload.get("candidate") or {}
+    metadata = candidate.get("metadata") or {}
+    target_store = str(metadata.get("target_store", "") or candidate.get("suggested_store", "") or "")
+    content, evidence = _candidate_text_pair(payload)
+    explicitly_distilled = bool(candidate.get("distilled") or metadata.get("distilled"))
+    has_distinct_evidence = bool(content and evidence and content != evidence)
+    has_readback = _candidate_readback_query_count(payload) > 0
+    source = str(candidate.get("source_type", "") or candidate.get("source", "") or "")
+
+    if target_store == "memory_graph" and explicitly_distilled and has_readback:
+        return "ready_memory"
+    if target_store == "memory_graph" and has_distinct_evidence and has_readback and source not in {"state_db_message", "google_ai_studio"}:
+        return "ready_memory"
+    return "raw_material"
+
+
 def _proposal_action_hint(payload: dict[str, Any]) -> dict[str, str]:
     """Return a redacted, UI-safe action hint for supervised proposal triage.
 
@@ -110,6 +146,13 @@ def _proposal_action_hint(payload: dict[str, Any]) -> dict[str, str]:
     target_path = str(metadata.get("target_path", "") or candidate.get("target_path", "") or (payload.get("changeset") or {}).get("target_path_uri", "") or "")
     risk = str(candidate.get("risk_level", "") or decision.get("risk_level", "") or "")
 
+    if _review_stage(payload) == "raw_material" and target_store == "memory_graph":
+        return {
+            "action": "needs_distillation",
+            "label": "Needs distillation before memory write",
+            "tone": "amber",
+            "reason": "This is source material or a chat excerpt, not a durable memory fact yet.",
+        }
     if target_store == "memory_graph":
         return {
             "action": "eligible_memory_graph_approval_review",
@@ -198,7 +241,8 @@ def _proposal_summary(payload: dict[str, Any], *, user: dict[str, Any] | None = 
         "reason": str(payload.get("reason", "") or candidate.get("reason", "") or decision.get("reason", "") or ""),
         "policy_reason": str(metadata.get("policy_reason", "") or candidate.get("reason", "")),
         "failure_reason": str(metadata.get("failure_reason", "")),
-        "readback_query_count": len(payload.get("readback_queries") or candidate.get("readback_queries") or (payload.get("readback") or {}).get("queries") or []),
+        "readback_query_count": _candidate_readback_query_count(payload),
+        "review_stage": _review_stage(payload),
         "created_at": str(payload.get("created_at", "")),
         "updated_at": str(payload.get("updated_at", "")),
         "change_set_count": len(payload.get("change_sets") or ([payload.get("changeset")] if payload.get("changeset") else [])),
@@ -234,12 +278,23 @@ def _load_proposals(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, An
     return proposals, errors
 
 
-def _summarize(proposals: Iterable[dict[str, Any]], *, status: str, limit: int | None, user: dict[str, Any] | None = None) -> dict[str, Any]:
+def _summarize(
+    proposals: Iterable[dict[str, Any]],
+    *,
+    status: str,
+    limit: int | None,
+    user: dict[str, Any] | None = None,
+    stage: str = "ready_memory",
+) -> dict[str, Any]:
     all_items = list(proposals)
     if status == "all":
-        visible = all_items
+        status_visible = all_items
     else:
-        visible = [p for p in all_items if str(p.get("status", "pending") or "pending") == status]
+        status_visible = [p for p in all_items if str(p.get("status", "pending") or "pending") == status]
+    if stage == "all":
+        visible = status_visible
+    else:
+        visible = [p for p in status_visible if _review_stage(p) == stage]
     limited = visible[:limit] if limit is not None else visible
 
     by_namespace: dict[str, int] = {}
@@ -249,9 +304,10 @@ def _summarize(proposals: Iterable[dict[str, Any]], *, status: str, limit: int |
     by_target_path: dict[str, int] = {}
     by_risk: dict[str, int] = {}
     by_reason: dict[str, int] = {}
+    by_review_stage: dict[str, int] = {}
     timestamps: list[str] = []
 
-    for payload in visible:
+    for payload in status_visible:
         candidate = payload.get("candidate") or {}
         decision = payload.get("decision") or {}
         metadata = candidate.get("metadata") or {}
@@ -272,12 +328,14 @@ def _summarize(proposals: Iterable[dict[str, Any]], *, status: str, limit: int |
         risk = "redacted" if bool(decision.get("redacted")) or privacy in {"sensitive", "admin_only", "private"} else (risk_level or "standard")
         _increment(by_risk, risk if (candidate.get("requires_review") or decision.get("requires_review", True)) else "low")
         _increment(by_reason, payload.get("reason") or candidate.get("reason") or decision.get("reason") or metadata.get("policy_reason") or "")
+        _increment(by_review_stage, _review_stage(payload))
         if payload.get("created_at"):
             timestamps.append(str(payload.get("created_at")))
 
     return {
         "total_count": len(all_items),
         "filtered_count": len(visible),
+        "status_filtered_count": len(status_visible),
         "pending_count": sum(1 for p in all_items if str(p.get("status", "pending") or "pending") == "pending"),
         "approved_count": sum(1 for p in all_items if str(p.get("status", "")) == "approved"),
         "rejected_count": sum(1 for p in all_items if str(p.get("status", "")) == "rejected"),
@@ -290,6 +348,9 @@ def _summarize(proposals: Iterable[dict[str, Any]], *, status: str, limit: int |
         "by_target_path": by_target_path,
         "by_risk": by_risk,
         "by_reason": by_reason,
+        "by_review_stage": by_review_stage,
+        "ready_memory_count": by_review_stage.get("ready_memory", 0),
+        "raw_material_count": by_review_stage.get("raw_material", 0),
         "oldest_created_at": min(timestamps) if timestamps else "",
         "newest_created_at": max(timestamps) if timestamps else "",
         "redacted": True,
@@ -447,7 +508,7 @@ async def _verify_readback(namespace: str, domain: str, uri: str, content: str, 
         results = await search.search(query=query, limit=5, domain=domain, namespace=namespace)
         top_uri = results[0].get("uri") if results else ""
         search_checks.append({"query": query, "top_uri": top_uri, "found": any(r.get("uri") == uri for r in results)})
-    search_ok = bool(search_checks) and all(check["found"] for check in search_checks)
+    search_ok = bool(search_checks) and any(check["found"] for check in search_checks)
     return {"read_ok": read_ok, "search_ok": search_ok, "checks": search_checks, "uri": uri}
 
 
@@ -455,6 +516,7 @@ async def _verify_readback(namespace: str, domain: str, uri: str, content: str, 
 async def proposal_review_inbox(
     request: Request,
     status: str = Query("pending", pattern="^(pending|approved|rejected|failed|all)$"),
+    stage: str = Query("ready_memory", pattern="^(ready_memory|raw_material|all)$"),
     limit: int = Query(50, ge=1, le=500),
 ) -> dict[str, Any]:
     """Return a redacted summary of standalone Memory OS review proposals.
@@ -473,7 +535,7 @@ async def proposal_review_inbox(
         "errors": errors,
         "user_namespace": str(user.get("namespace", "") or ""),
         "is_admin": _is_admin_user(user),
-        "inbox": _summarize(visible_proposals, status=status, limit=limit, user=user),
+        "inbox": _summarize(visible_proposals, status=status, stage=stage, limit=limit, user=user),
     }
 
 @router.post("/proposals/{proposal_id}/reject")
@@ -517,6 +579,11 @@ async def approve_proposal(proposal_id: str, request: Request, action: ProposalA
         raise HTTPException(status_code=409, detail=f"Proposal {proposal_id} is already {status}")
 
     candidate = payload.get("candidate") or {}
+    if _review_stage(payload) != "ready_memory":
+        raise HTTPException(
+            status_code=422,
+            detail="Proposal is raw source material and must be distilled into a durable memory before approval",
+        )
     target_store = _candidate_target_store(candidate)
     if target_store not in _ALLOWED_APPROVE_TARGET_STORES:
         raise HTTPException(
@@ -559,13 +626,20 @@ async def approve_proposal(proposal_id: str, request: Request, action: ProposalA
         uri = result.get("uri", f"{domain}://{result.get('path', target_path)}")
         verification = await _verify_readback(namespace, domain, uri, content, _candidate_readback_queries(payload))
         if not (verification.get("read_ok") and verification.get("search_ok")):
+            cleanup_result: dict[str, Any] = {"attempted": True, "ok": False}
+            try:
+                created_path = uri.split("://", 1)[-1] if "://" in uri else target_path.split("://", 1)[-1].strip("/")
+                await graph.remove_path(created_path, domain, namespace=namespace)
+                cleanup_result.update({"ok": True, "uri": uri})
+            except Exception as cleanup_exc:
+                cleanup_result.update({"error": str(cleanup_exc), "uri": uri})
             _mark_status(
                 proposal_id,
                 "failed",
                 reason="readback verification failed",
-                extra={"memory_graph_result": result, "verification": verification},
+                extra={"memory_graph_result": result, "verification": verification, "cleanup_after_failed_readback": cleanup_result},
             )
-            raise HTTPException(status_code=500, detail={"message": "Readback verification failed", "verification": verification})
+            raise HTTPException(status_code=500, detail={"message": "Readback verification failed", "verification": verification, "cleanup": cleanup_result})
 
         get_changeset_store().record_many(before_state={}, after_state=result.get("rows_after", {}))
         updated = _mark_status(

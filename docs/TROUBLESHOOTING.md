@@ -12,26 +12,32 @@ Common issues and solutions for Hermes Agent community patches.
 
 **Symptoms:**
 - Memory graph searches take more than 1 second
-- Database locked errors
+- PostgreSQL connection/index errors
 - High CPU usage during searches
 
 **Solutions:**
 
-1. **Run the migration to add GIN index**:
+1. **Verify the Memory Graph service and database are healthy**:
+   ```bash
+   curl -fsS http://127.0.0.1:8900/health
+   pg_isready -h 127.0.0.1 -p 5432
+   ```
+
+2. **Check whether the PostgreSQL search index exists**:
+   ```bash
+   sudo -u postgres psql -d hindsight -c "\d+ mg_search_documents"
+   ```
+   You should see the `search_vector` column and a GIN index such as `ix_mg_search_vector_gin`.
+
+3. **Run the PostgreSQL migration if the index is missing**:
    ```bash
    cd ~/.hermes/hermes-agent
-   psql -d ~/.hermes/memory_graph.db -f agent/memory_graph/migrations/001_add_search_index.sql
+   sudo -u postgres psql -d hindsight -f agent/memory_graph/migrations/001_add_search_index.sql
    ```
 
-2. **Check if index exists**:
+4. **Vacuum/analyze PostgreSQL tables after large migrations**:
    ```bash
-   sqlite3 ~/.hermes/memory_graph.db ".schema mg_search_documents"
-   ```
-   You should see `ix_mg_search_vector_gin` in the output.
-
-3. **Vacuum the database** (if it's grown large):
-   ```bash
-   sqlite3 ~/.hermes/memory_graph.db "VACUUM;"
+   sudo -u postgres psql -d hindsight -c "VACUUM ANALYZE mg_search_documents;"
    ```
 
 ---
@@ -44,11 +50,10 @@ Common issues and solutions for Hermes Agent community patches.
 
 **Solutions:**
 
-1. **Check trigger syntax**:
+1. **Check disclosure metadata in PostgreSQL**:
    ```bash
-   # List all nodes with triggers
-   sqlite3 ~/.hermes/memory_graph.db \
-     "SELECT path, disclosure FROM mg_search_documents WHERE disclosure IS NOT NULL;"
+   sudo -u postgres psql -d hindsight -c \
+     "SELECT path, disclosure FROM mg_search_documents WHERE disclosure IS NOT NULL LIMIT 20;"
    ```
 
 2. **Test pattern matching**:
@@ -78,32 +83,35 @@ Common issues and solutions for Hermes Agent community patches.
 
 **Solutions:**
 
-1. **Verify memory_graph is enabled**:
+1. **Verify Memory Graph tools and service are available**:
    ```bash
-   grep -A 5 "memory:" ~/.hermes/config.yaml
-   ```
-   Should show:
-   ```yaml
-   memory:
-     provider: memory_graph
-   ```
-
-2. **Check database has data**:
-   ```bash
-   sqlite3 ~/.hermes/memory_graph.db "SELECT COUNT(*) FROM mg_nodes;"
-   ```
-   If count is 0, memories haven't been stored.
-
-3. **Verify auto-recall is working**:
-   Check if `agent/disclosure_router.py` is installed:
-   ```bash
-   ls -la ~/.hermes/hermes-agent/agent/disclosure_router.py
+   curl -fsS http://127.0.0.1:8900/health
+   cd ~/.hermes/hermes-agent
+   venv/bin/python - <<'PY'
+from toolsets import TOOLSETS, _HERMES_CORE_TOOLS
+print('memory_graph tools:', len(TOOLSETS.get('memory_graph', {}).get('tools', [])))
+print('search in core:', 'memory_graph_search' in _HERMES_CORE_TOOLS)
+PY
    ```
 
-4. **Manually search to verify data**:
+2. **Check PostgreSQL has Memory Graph data**:
    ```bash
-   sqlite3 ~/.hermes/memory_graph.db \
-     "SELECT path, content FROM mg_nodes LIMIT 5;"
+   sudo -u postgres psql -d hindsight -c "SELECT COUNT(*) FROM mg_paths;"
+   ```
+   If count is 0, Memory Graph has not stored any nodes.
+
+3. **Verify manifest/system-prompt inventory is present**:
+   ```bash
+   test -s ~/.hermes/memories/MEMORY_MANIFEST.md && head -40 ~/.hermes/memories/MEMORY_MANIFEST.md
+   ```
+
+4. **Manually search through the deployed tool path**:
+   ```bash
+   cd ~/.hermes/hermes-agent
+   venv/bin/python - <<'PY'
+from tools import memory_graph_tool as m
+print(m._search({'query': 'Hermes Agent', 'limit': 5, 'domain': 'core'}))
+PY
    ```
 
 ---
@@ -359,35 +367,35 @@ Common issues and solutions for Hermes Agent community patches.
 
 **Solutions:**
 
-1. **Check hindsight window size**:
+1. **Check provider-specific window size in the active provider config**:
    ```yaml
-   # In ~/.hermes/config.yaml
-   memory_providers:
+   # Canonical single-provider form in ~/.hermes/config.yaml
+   memory:
+     provider: hindsight
      hindsight:
        window_size: 10  # Reduce from 20 or 50
    ```
+   Older docs may show `memory_providers:`. Treat that as legacy provider-specific configuration unless the provider README explicitly says otherwise.
 
-2. **Disable unused memory providers**:
+2. **Disable unused memory providers by selecting only the provider you want**:
    ```yaml
-   memory_providers:
-     hindsight:
-       enabled: true
-     memory_graph:
-       enabled: false  # Disable if not used
-     memory_tencentdb:
-       enabled: false  # Disable if not used
+   memory:
+     provider: hindsight
    ```
+   Do not enable multiple long-term memory providers unless you have verified their namespaces, banks, and prompt injection behavior.
 
 3. **Check database sizes**:
    ```bash
-   du -h ~/.hermes/*.db
+   du -h ~/.hermes/state.db ~/.hindsight 2>/dev/null || true
+   sudo -u postgres psql -d hindsight -c "SELECT pg_size_pretty(pg_database_size('hindsight'));"
    ```
-   If `hindsight.db` > 100MB, consider archiving old data.
 
-4. **Vacuum databases**:
+4. **Vacuum/analyze databases**:
    ```bash
-   sqlite3 ~/.hermes/hindsight.db "VACUUM;"
-   sqlite3 ~/.hermes/memory_graph.db "VACUUM;"
+   # Hermes session SQLite store
+   sqlite3 ~/.hermes/state.db "VACUUM;"
+   # Memory Graph / Hindsight PostgreSQL database
+   sudo -u postgres psql -d hindsight -c "VACUUM ANALYZE;"
    ```
 
 ---

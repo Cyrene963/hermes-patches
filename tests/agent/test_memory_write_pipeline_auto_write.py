@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from agent.memory_clarification_queue import build_clarification_context_block
 from agent.memory_write_pipeline import CandidateFact, MemoryWritePipeline
 
 
@@ -196,8 +197,9 @@ def test_extracts_creative_target_function_from_writing_taste():
     assert any(c.subject == "creative_target_function" and c.memory_type == "target_function" for c in candidates)
 
 
-def test_extracts_tool_credential_route_without_auto_writing_secret_route():
+def test_extracts_tool_credential_route_without_auto_writing_secret_route(tmp_path):
     graph = FakeGraphClient()
+    queue_path = tmp_path / "clarification.jsonl"
     pipeline = MemoryWritePipeline(
         graph_client=graph,
         config={
@@ -205,6 +207,7 @@ def test_extracts_tool_credential_route_without_auto_writing_secret_route():
             "auto_write_threshold": 0.85,
             "allowed_auto_types": ["procedural_memory"],
             "never_auto_write_to_core": True,
+            "clarification_queue_path": str(queue_path),
         },
     )
     reflection = pipeline.reflect_and_extract(
@@ -217,8 +220,9 @@ def test_extracts_tool_credential_route_without_auto_writing_secret_route():
     result = pipeline.write_and_verify(c, classification)
 
     assert c.requires_review is True
-    assert classification["target_store"] == "review"
+    assert classification["target_store"] == "clarification"
     assert result["auto_write_allowed"] is False
+    assert result["queued_for_clarification"] is True
     assert graph.calls == []
 
 
@@ -267,3 +271,116 @@ def test_model_semantic_classifier_disabled_does_not_call_model():
     pipeline = MemoryWritePipeline(config={"mode":"shadow", "semantic_classifier":{"model_enabled": False, "model_callable": model}})
     pipeline.reflect_and_extract('哈哈可以', '')
     assert called['n'] == 0
+
+
+def test_high_confidence_target_function_auto_writes_without_batch_review():
+    graph = FakeGraphClient()
+    pipeline = MemoryWritePipeline(
+        graph_client=graph,
+        config={
+            "mode": "limited_auto",
+            "auto_write_threshold": 0.85,
+            "allowed_auto_types": ["target_function"],
+            "never_auto_write_to_core": True,
+        },
+    )
+    candidate = make_candidate(
+        subject="creative_target_function",
+        predicate="semantic_signal",
+        object_value="User explicitly wants fiction to avoid AI-ish generic prose and preserve manga-like realism.",
+        memory_type="target_function",
+        target_path="用户档案/目标函数",
+        source_type="user_direct",
+        confidence=0.96,
+        importance=0.96,
+    )
+
+    classification = pipeline.classify_write(candidate, namespace="telegram:u1")
+    result = pipeline.write_and_verify(candidate, classification)
+
+    assert classification["target_store"] == "memory_graph"
+    assert result["auto_write_allowed"] is True
+    assert result["written"] is True
+    assert graph.calls
+
+
+def test_clarification_queue_surfaces_only_when_relevant(tmp_path):
+    queue_path = tmp_path / "clarification.jsonl"
+    pipeline = MemoryWritePipeline(
+        config={
+            "mode": "limited_auto",
+            "clarification_queue_path": str(queue_path),
+        },
+    )
+    candidate = make_candidate(
+        subject="tool_credential_route",
+        predicate="semantic_signal",
+        object_value="Claude Code credential route may already exist in config and should be checked before claiming unavailable.",
+        memory_type="procedural_memory",
+        target_path="用户档案/工具凭据查找规则",
+        source_type="user_direct",
+        requires_review=True,
+        confidence=0.90,
+        importance=0.90,
+    )
+    classification = pipeline.classify_write(candidate, namespace="telegram:u1")
+    result = pipeline.write_and_verify(candidate, classification)
+
+    assert result["queued_for_clarification"] is True
+    unrelated = build_clarification_context_block("帮我写一段中史答题框架", queue_path=str(queue_path))
+    relevant = build_clarification_context_block("Claude Code not logged in 怎么查凭据", queue_path=str(queue_path))
+
+    assert unrelated == ""
+    assert "Memory Clarification Candidates" in relevant
+    assert "tool_credential_route" in relevant
+    assert "ask the user" in relevant
+
+
+def test_meta_memory_assessment_question_is_rejected_by_quality_gate():
+    pipeline = MemoryWritePipeline(
+        graph_client=FakeGraphClient(),
+        config={
+            "mode": "limited_auto",
+            "allowed_auto_types": ["procedural_memory"],
+            "auto_write_threshold": 0.85,
+        },
+    )
+    candidate = make_candidate(
+        subject="agent_memory_workflow",
+        predicate="derived_from_user_signal",
+        object_value="也就是说，单论补丁项目的记忆系统来讲，已经是99%的数字替身和外置大脑了？",
+        source_type="user_correction",
+        memory_type="procedural_memory",
+        importance=0.95,
+        confidence=0.9,
+    )
+
+    classification = pipeline.classify_write(candidate, namespace="telegram:test-user")
+
+    assert classification["action"] == "ignore"
+    assert classification["reason"] == "meta_memory_assessment_question_not_a_durable_fact"
+
+
+def test_real_agent_memory_correction_still_passes_quality_gate():
+    pipeline = MemoryWritePipeline(
+        graph_client=FakeGraphClient(),
+        config={
+            "mode": "limited_auto",
+            "allowed_auto_types": ["procedural_memory"],
+            "auto_write_threshold": 0.85,
+            "never_auto_write_to_core": True,
+        },
+    )
+    candidate = make_candidate(
+        subject="agent_memory_workflow",
+        predicate="derived_from_user_signal",
+        object_value="用户纠错后必须抽象成通用防复发方案，并在未来相关任务前主动召回。",
+        source_type="user_correction",
+        memory_type="procedural_memory",
+        importance=0.95,
+        confidence=0.9,
+    )
+
+    classification = pipeline.classify_write(candidate, namespace="telegram:test-user")
+
+    assert classification["action"] == "write"

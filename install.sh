@@ -122,7 +122,7 @@ done
 # 2. Copy verified Memory OS modules / surgically rebased core hooks.
 # Avoid broad stale full-file overlays (agent_init, auxiliary_client, dashboard,
 # gateway, etc.) unless they have been surgically rebased onto this upstream.
-for module in memory_metacognition.py memory_semantic_classifier.py memory_review_proposals.py memory_write_pipeline.py shadow_write_logger.py hindsight_access_tracker.py hindsight_reranker.py request_context.py skill_router.py agent_runtime_helpers.py conversation_loop.py tool_executor.py system_prompt.py agent_init.py auxiliary_client.py auto_store_heuristic.py memory_auto_hooks.py; do
+for module in memory_metacognition.py memory_semantic_classifier.py memory_review_proposals.py memory_write_filters.py memory_write_pipeline.py memory_clarification_queue.py memory_manager.py shadow_write_logger.py hindsight_access_tracker.py hindsight_reranker.py request_context.py skill_router.py prompt_builder.py agent_runtime_helpers.py conversation_loop.py tool_executor.py system_prompt.py agent_init.py auxiliary_client.py auto_store_heuristic.py memory_auto_hooks.py; do
     if [ -f "$PATCHES_DIR/agent/$module" ]; then
         cp "$PATCHES_DIR/agent/$module" "$HERMES_DIR/agent/"
         echo "   ✅ agent/$module 已复制"
@@ -266,6 +266,13 @@ if [ -f "$PATCHES_DIR/site-packages/hindsight_api/engine/embeddings.py" ]; then
         echo "   ✅ Hindsight embeddings known-dimension hotfix 已复制"
     fi
 fi
+if [ -f "$PATCHES_DIR/site-packages/hindsight_api/engine/providers/openai_compatible_llm.py" ]; then
+    PROVIDER_SITE_DIR="$HERMES_DIR/venv/lib/python3.11/site-packages/hindsight_api/engine/providers"
+    if [ -d "$PROVIDER_SITE_DIR" ]; then
+        cp "$PATCHES_DIR/site-packages/hindsight_api/engine/providers/openai_compatible_llm.py" "$PROVIDER_SITE_DIR/openai_compatible_llm.py"
+        echo "   ✅ Hindsight OpenAI-compatible provider structured-output hotfix 已复制"
+    fi
+fi
 
 # 3c. Ensure least-privileged Memory Graph DB role exists (superuser bypasses RLS)
 if [ "${HERMES_INSTALL_DB:-1}" != "0" ] && command -v psql >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
@@ -343,6 +350,7 @@ fi
 find "$HERMES_DIR/agent" -name "memory_metacognition*.pyc" -delete 2>/dev/null
 find "$HERMES_DIR/agent" -name "memory_semantic_classifier*.pyc" -delete 2>/dev/null
 find "$HERMES_DIR/agent" -name "memory_review_proposals*.pyc" -delete 2>/dev/null
+find "$HERMES_DIR/agent" -name "memory_write_filters*.pyc" -delete 2>/dev/null
 find "$HERMES_DIR/agent" -name "memory_write_pipeline*.pyc" -delete 2>/dev/null
 find "$HERMES_DIR/agent" -name "shadow_write_logger*.pyc" -delete 2>/dev/null
 find "$HERMES_DIR/agent" -name "hindsight_access_tracker*.pyc" -delete 2>/dev/null
@@ -359,6 +367,7 @@ if [ -d "$HERMES_DIR/plugins/memory/memory_tencentdb" ]; then
 fi
 if [ -d "$HERMES_DIR/venv/lib/python3.11/site-packages/hindsight_api" ]; then
     find "$HERMES_DIR/venv/lib/python3.11/site-packages/hindsight_api" -name "embeddings*.pyc" -delete 2>/dev/null
+    find "$HERMES_DIR/venv/lib/python3.11/site-packages/hindsight_api" -name "openai_compatible_llm*.pyc" -delete 2>/dev/null
 fi
 find "$HERMES_DIR/agent" -name "conversation_loop*.pyc" -delete 2>/dev/null
 find "$HERMES_DIR/agent" -name "chat_completion_helpers*.pyc" -delete 2>/dev/null
@@ -427,6 +436,14 @@ if [ -f "$PATCHES_DIR/scripts/memory_os_shadow_namespace_watchdog.py" ]; then
     chmod +x "$PROFILE_DIR/scripts/memory_os_shadow_namespace_watchdog.py"
     echo "   ✅ memory_os_shadow_namespace_watchdog.py 已安装"
 fi
+for script_name in build_memory_backfill_review_queue.py backfill_review_proposal_readback_queries.py digital_brain_99_baseline.py proposal_approve_e2e_canary.py hindsight_backlog_watchdog.py migrate_review_backlog_to_clarification.py triage_memory_repair_queue.py memory_graph_lifecycle_canary.py; do
+    if [ -f "$PATCHES_DIR/scripts/$script_name" ]; then
+        mkdir -p "$PROFILE_DIR/scripts"
+        cp "$PATCHES_DIR/scripts/$script_name" "$PROFILE_DIR/scripts/$script_name"
+        chmod +x "$PROFILE_DIR/scripts/$script_name"
+        echo "   ✅ $script_name 已安装"
+    fi
+done
 if [ -f "$PATCHES_DIR/scripts/hermes-ast-grep-audit.sh" ]; then
     mkdir -p "$PROFILE_DIR/scripts"
     cp "$PATCHES_DIR/scripts/hermes-ast-grep-audit.sh" "$PROFILE_DIR/scripts/hermes-ast-grep-audit.sh"
