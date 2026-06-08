@@ -88,9 +88,12 @@ def _increment(bucket: dict[str, int], key: Any) -> None:
     bucket[safe] = bucket.get(safe, 0) + 1
 
 
-def _redacted_preview(value: Any, max_chars: int = 120) -> dict[str, Any]:
+def _content_preview(value: Any, *, reveal: bool, max_chars: int = 220) -> dict[str, Any]:
     text = "" if value is None else str(value)
-    return {"redacted": True, "text": "[redacted]", "truncated": bool(text), "length": len(text), "max_chars": max_chars}
+    if not reveal:
+        return {"redacted": True, "text": "[redacted]", "truncated": bool(text), "length": len(text), "max_chars": max_chars}
+    truncated = len(text) > max_chars
+    return {"redacted": False, "text": text[:max_chars] + ("…" if truncated else ""), "truncated": truncated, "length": len(text), "max_chars": max_chars}
 
 
 def _proposal_action_hint(payload: dict[str, Any]) -> dict[str, str]:
@@ -158,7 +161,7 @@ def _proposal_action_hint(payload: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _proposal_summary(payload: dict[str, Any]) -> dict[str, Any]:
+def _proposal_summary(payload: dict[str, Any], *, user: dict[str, Any] | None = None) -> dict[str, Any]:
     candidate = payload.get("candidate") or {}
     decision = payload.get("decision") or {}
     metadata = candidate.get("metadata") or {}
@@ -171,6 +174,10 @@ def _proposal_summary(payload: dict[str, Any]) -> dict[str, Any]:
         or candidate.get("namespace_security_scope", "")
         or (payload.get("changeset") or {}).get("namespace", "")
     )
+    reveal_preview = False
+    if user:
+        user_namespace = str(user.get("namespace", "") or "")
+        reveal_preview = bool(_is_admin_user(user) or (user_namespace and user_namespace == namespace))
     action_hint = _proposal_action_hint(payload)
     return {
         "proposal_id": str(payload.get("id", "") or payload.get("proposal_id", "")),
@@ -195,8 +202,8 @@ def _proposal_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "created_at": str(payload.get("created_at", "")),
         "updated_at": str(payload.get("updated_at", "")),
         "change_set_count": len(payload.get("change_sets") or ([payload.get("changeset")] if payload.get("changeset") else [])),
-        "content_preview": _redacted_preview(candidate.get("value", candidate.get("content"))),
-        "evidence_preview": _redacted_preview(payload.get("evidence_quote") or candidate.get("evidence_quote")),
+        "content_preview": _content_preview(candidate.get("value", candidate.get("content")), reveal=reveal_preview),
+        "evidence_preview": _content_preview(payload.get("evidence_quote") or candidate.get("evidence_quote"), reveal=reveal_preview),
         "action_hint": action_hint,
         "action_hint_action": action_hint["action"],
         "action_hint_label": action_hint["label"],
@@ -227,7 +234,7 @@ def _load_proposals(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, An
     return proposals, errors
 
 
-def _summarize(proposals: Iterable[dict[str, Any]], *, status: str, limit: int | None) -> dict[str, Any]:
+def _summarize(proposals: Iterable[dict[str, Any]], *, status: str, limit: int | None, user: dict[str, Any] | None = None) -> dict[str, Any]:
     all_items = list(proposals)
     if status == "all":
         visible = all_items
@@ -287,7 +294,7 @@ def _summarize(proposals: Iterable[dict[str, Any]], *, status: str, limit: int |
         "newest_created_at": max(timestamps) if timestamps else "",
         "redacted": True,
         "limit": limit,
-        "proposals": [_proposal_summary(p) for p in limited],
+        "proposals": [_proposal_summary(p, user=user) for p in limited],
     }
 
 
@@ -466,7 +473,7 @@ async def proposal_review_inbox(
         "errors": errors,
         "user_namespace": str(user.get("namespace", "") or ""),
         "is_admin": _is_admin_user(user),
-        "inbox": _summarize(visible_proposals, status=status, limit=limit),
+        "inbox": _summarize(visible_proposals, status=status, limit=limit, user=user),
     }
 
 @router.post("/proposals/{proposal_id}/reject")

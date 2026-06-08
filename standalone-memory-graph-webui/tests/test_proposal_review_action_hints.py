@@ -63,3 +63,15 @@ def test_memory_graph_candidate_is_direct_approval_review_only():
 
     assert summary["action_hint_action"] == "eligible_memory_graph_approval_review"
     assert summary["action_hint_label"] == "Ready for Memory Graph approval review"
+
+
+def test_owner_or_admin_can_see_preview_for_review_decision():
+    summary = _proposal_summary(
+        _payload(target_store="memory_graph", kind="user_fact", target_path="用户档案/纠错/示例"),
+        user={"username": "reviewer", "namespace": "telegram:test-user", "role": "user"},
+    )
+
+    assert summary["content_preview"]["redacted"] is False
+    assert summary["evidence_preview"]["redacted"] is False
+    assert "sensitive raw value" in summary["content_preview"]["text"]
+    assert "sensitive raw evidence" in summary["evidence_preview"]["text"]

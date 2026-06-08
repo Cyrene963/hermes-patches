@@ -256,6 +256,14 @@ function ReviewPage() {
   const proposalReadbackState = selectedProposal?.target_store === 'memory_graph'
     ? t('review.readback_will_run')
     : t('review.direct_approval_unavailable');
+  const proposalContentText = selectedProposal?.content_preview?.text || t('review.redacted');
+  const proposalEvidenceText = selectedProposal?.evidence_preview?.text || t('review.redacted');
+  const proposalStillRedacted = Boolean(selectedProposal?.content_preview?.redacted || selectedProposal?.evidence_preview?.redacted);
+  const proposalListTitle = (proposal) => {
+    const text = proposal?.content_preview?.text;
+    if (text && text !== '[redacted]' && text !== '[已脱敏]') return text;
+    return proposal?.subject || proposal?.candidate_kind || t('review.memory_candidate');
+  };
 
   const changeTypeStyle = (action) => {
     switch (action) {
@@ -293,7 +301,7 @@ function ReviewPage() {
                   : "border-slate-800 bg-slate-900/30 text-slate-500 hover:text-slate-300"
               )}
             >
-              {t('review.graph_changes')} ({changes.length})
+              {t('review.graph_changes_plain')} ({changes.length})
             </button>
             <button
               onClick={() => setActiveQueue('proposals')}
@@ -304,7 +312,7 @@ function ReviewPage() {
                   : "border-slate-800 bg-slate-900/30 text-slate-500 hover:text-slate-300"
               )}
             >
-              {t('review.candidates')} ({proposalInbox?.inbox?.pending_count ?? 0})
+              {t('review.pending_memories')} ({proposalInbox?.inbox?.pending_count ?? 0})
             </button>
           </div>
         </div>
@@ -342,24 +350,13 @@ function ReviewPage() {
                   )}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="truncate text-xs font-semibold">{proposal.subject || t('review.unknown_subject')}</span>
-                    <span className="shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-[9px] uppercase text-slate-500">{proposal.risk}</span>
+                    <span className="truncate text-xs font-semibold">{proposalListTitle(proposal)}</span>
+                    <span className="shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[9px] uppercase text-emerald-300 border border-emerald-500/20">{t('review.ready_to_confirm')}</span>
                   </div>
-                  <div className="mt-1 truncate text-[11px] text-slate-500">{proposal.predicate || 'candidate'} · {proposal.candidate_kind || 'unknown'}</div>
-                  {proposal.action_hint_label && (
-                    <div className="mt-2 rounded-md border border-purple-500/15 bg-purple-500/5 px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-purple-300/90 truncate">
-                      {proposal.action_hint_label}
-                    </div>
-                  )}
-                  <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-slate-600">
-                    <span className="truncate font-mono">{proposal.namespace || 'public'}</span>
-                    <span className={clsx(
-                      "shrink-0 rounded-full border px-2 py-0.5 font-mono uppercase",
-                      proposal.target_store === 'memory_graph'
-                        ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"
-                        : "border-amber-500/20 bg-amber-500/10 text-amber-300"
-                    )}>
-                      {proposal.target_store === 'memory_graph' ? t('review.approvable') : t('review.convert')}
+                  <div className="mt-1 truncate text-[11px] text-slate-500">{proposal.namespace || t('review.private_source')}</div>
+                  <div className="mt-2 flex items-center justify-end gap-2 text-[10px] text-slate-600">
+                    <span className="shrink-0 rounded-full border border-slate-700 bg-slate-900/60 px-2 py-0.5 text-slate-400">
+                      {proposal.target_store === 'memory_graph' ? t('review.can_write') : t('review.needs_conversion')}
                     </span>
                   </div>
                 </button>
@@ -578,9 +575,9 @@ function ReviewPage() {
                 </div>
                 <div className="min-w-0 flex flex-col">
                   <h2 className="text-lg font-medium text-slate-100 truncate tracking-tight flex items-center gap-3">
-                    <span>{selectedProposal.subject || 'Memory candidate'}</span>
+                    <span>{t('review.review_this_memory')}</span>
                     <span className="text-[10px] px-2 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20 tracking-widest font-mono uppercase">
-                      {selectedProposal.status || 'pending'} · supervised
+                      {t('review.waiting_for_you')}
                     </span>
                   </h2>
                   <div className="flex items-center gap-2 text-xs text-slate-500">
@@ -606,7 +603,7 @@ function ReviewPage() {
                   disabled={proposalActionLoading}
                   className="flex items-center gap-2 px-4 py-2 bg-slate-900 hover:bg-rose-950/30 border border-slate-700 hover:border-rose-800 text-slate-400 hover:text-rose-400 rounded-md transition-all duration-200 text-xs font-medium uppercase tracking-wider disabled:opacity-50"
                 >
-                  <RotateCcw size={14} /> {t('review.reject')}
+                  <RotateCcw size={14} /> {t('review.reject_suggestion')}
                 </button>
                 <button
                   onClick={handleApproveProposal}
@@ -614,35 +611,48 @@ function ReviewPage() {
                   title={selectedProposal.target_store !== 'memory_graph' ? `Direct approval unavailable: target_store=${selectedProposal.target_store || 'unknown'}` : 'Approve into Memory Graph with readback verification'}
                   className="flex items-center gap-2 px-5 py-2 bg-purple-600/10 hover:bg-purple-500/20 border border-purple-500/30 hover:border-purple-500/50 text-purple-300 hover:text-purple-200 rounded-md transition-all duration-200 text-xs font-bold uppercase tracking-wider disabled:opacity-40 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900/40 disabled:text-slate-500"
                 >
-                  <Check size={14} /> {t('review.approve')}
+                  <Check size={14} /> {t('review.approve_and_write')}
                 </button>
               </div>
             </div>
 
             <div className="flex-1 overflow-y-auto px-8 py-8 custom-scrollbar">
               <div className="max-w-4xl mx-auto space-y-6">
-                <div className="rounded-xl border border-purple-500/20 bg-purple-500/5 p-5">
-                  <div className="text-xs font-bold uppercase tracking-widest text-purple-300 mb-2">{t('review.candidate_queue_title')}</div>
-                  <p className="text-sm text-slate-400 leading-6">
-                    {t('review.candidate_queue_desc')}
+                <div className="rounded-2xl border border-purple-500/20 bg-gradient-to-br from-purple-500/10 via-slate-900/60 to-indigo-500/5 p-6 shadow-[0_0_40px_rgba(124,58,237,0.10)]">
+                  <div className="text-xs font-bold uppercase tracking-widest text-purple-300 mb-2">{t('review.what_to_do_title')}</div>
+                  <p className="text-base text-slate-200 leading-7">
+                    {proposalStillRedacted ? t('review.redacted_warning') : t('review.what_to_do_desc')}
                   </p>
                   <div className="mt-5 grid gap-3 md:grid-cols-3">
                     {[
-                      ['Approval eligibility', proposalEligibleForDirectApproval ? 'Direct approval enabled' : 'Conversion required', proposalEligibleForDirectApproval ? 'text-emerald-300 border-emerald-500/25 bg-emerald-500/10' : 'text-amber-300 border-amber-500/25 bg-amber-500/10'],
-                      ['Readback', proposalReadbackState, 'text-sky-300 border-sky-500/20 bg-sky-500/10'],
-                      ['Rollback', proposalEligibleForDirectApproval ? 'Appears under Graph Changes after approval' : 'Available only after a verified Graph write', 'text-indigo-300 border-indigo-500/20 bg-indigo-500/10'],
+                      [t('review.step_check'), t('review.step_check_desc'), 'text-sky-300 border-sky-500/20 bg-sky-500/10'],
+                      [t('review.step_approve'), proposalEligibleForDirectApproval ? t('review.step_approve_desc') : t('review.step_convert_desc'), proposalEligibleForDirectApproval ? 'text-emerald-300 border-emerald-500/25 bg-emerald-500/10' : 'text-amber-300 border-amber-500/25 bg-amber-500/10'],
+                      [t('review.step_undo'), t('review.step_undo_desc'), 'text-indigo-300 border-indigo-500/20 bg-indigo-500/10'],
                     ].map(([label, value, tone]) => (
                       <div key={label} className={clsx("rounded-xl border p-3", tone)}>
-                        <div className="text-[9px] font-bold uppercase tracking-[0.2em] opacity-70">{label}</div>
+                        <div className="text-[10px] font-bold uppercase tracking-[0.18em] opacity-70">{label}</div>
                         <div className="mt-2 text-xs leading-5">{value}</div>
                       </div>
                     ))}
                   </div>
                 </div>
 
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-6">
+                    <h3 className="text-xs font-bold text-emerald-300 uppercase mb-4 tracking-widest">{t('review.proposed_memory')}</h3>
+                    <div className="text-base text-slate-100 leading-7 whitespace-pre-wrap">{proposalContentText}</div>
+                    <div className="mt-3 text-[10px] uppercase tracking-widest text-slate-600">{t('review.length')}: {selectedProposal.content_preview?.length ?? 0}</div>
+                  </div>
+                  <div className="rounded-xl border border-sky-500/20 bg-sky-500/5 p-6">
+                    <h3 className="text-xs font-bold text-sky-300 uppercase mb-4 tracking-widest">{t('review.evidence_for_memory')}</h3>
+                    <div className="text-base text-slate-100 leading-7 whitespace-pre-wrap">{proposalEvidenceText}</div>
+                    <div className="mt-3 text-[10px] uppercase tracking-widest text-slate-600">{t('review.length')}: {selectedProposal.evidence_preview?.length ?? 0}</div>
+                  </div>
+                </div>
+
                 {selectedProposal.action_hint_label && (
                   <div className="rounded-xl border border-purple-500/20 bg-gradient-to-br from-purple-500/10 to-indigo-500/5 p-5 shadow-[0_0_30px_rgba(124,58,237,0.08)]">
-                    <div className="text-[10px] font-bold uppercase tracking-[0.24em] text-purple-300/80 mb-2">Suggested supervised route</div>
+                    <div className="text-[10px] font-bold uppercase tracking-[0.24em] text-purple-300/80 mb-2">{t('review.system_judgement')}</div>
                     <div className="text-base font-semibold text-slate-100">{selectedProposal.action_hint_label}</div>
                     <p className="mt-2 text-sm leading-6 text-slate-400">{selectedProposal.action_hint_reason}</p>
                     <div className="mt-3 inline-flex rounded-full border border-purple-500/20 bg-purple-500/10 px-3 py-1 text-[10px] font-mono uppercase tracking-wider text-purple-300">
@@ -676,21 +686,8 @@ function ReviewPage() {
                 </div>
 
                 <div className="rounded-xl border border-slate-800/60 bg-[#0A0A12]/50 p-6">
-                  <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 tracking-widest">Policy reason</h3>
-                  <p className="text-sm text-slate-300 whitespace-pre-wrap leading-6">{selectedProposal.reason || selectedProposal.policy_reason || selectedProposal.failure_reason || 'No reason recorded.'}</p>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="rounded-xl border border-slate-800/60 bg-[#0A0A12]/50 p-6">
-                    <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 tracking-widest">Candidate content preview</h3>
-                    <div className="text-sm text-slate-400 font-mono">{selectedProposal.content_preview?.text || '[redacted]'}</div>
-                    <div className="mt-3 text-[10px] uppercase tracking-widest text-slate-600">length: {selectedProposal.content_preview?.length ?? 0}</div>
-                  </div>
-                  <div className="rounded-xl border border-slate-800/60 bg-[#0A0A12]/50 p-6">
-                    <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 tracking-widest">Evidence preview</h3>
-                    <div className="text-sm text-slate-400 font-mono">{selectedProposal.evidence_preview?.text || '[redacted]'}</div>
-                    <div className="mt-3 text-[10px] uppercase tracking-widest text-slate-600">length: {selectedProposal.evidence_preview?.length ?? 0}</div>
-                  </div>
+                  <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 tracking-widest">{t('review.technical_details')}</h3>
+                  <p className="text-sm text-slate-300 whitespace-pre-wrap leading-6">{selectedProposal.reason || selectedProposal.policy_reason || selectedProposal.failure_reason || t('review.no_reason')}</p>
                 </div>
               </div>
             </div>
