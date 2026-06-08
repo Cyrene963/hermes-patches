@@ -10,8 +10,195 @@ import os
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from logging.handlers import RotatingFileHandler
 
 logger = logging.getLogger(__name__)
+
+
+# ─── Shadow Write Log Rotation ───────────────────────────────────────
+
+class ShadowWriteLogger:
+    """Manages shadow write logs with rotation, daily limits, and retention."""
+
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        shadow_cfg = config.get('shadow', {})
+
+        # Get configuration
+        log_dir = Path(os.path.expanduser(shadow_cfg.get('log_dir', '~/.hermes/logs/shadow_writes')))
+        self.log_dir = log_dir
+        self.max_entries_per_day = shadow_cfg.get('max_entries_per_day', 1000)
+        self.retention_days = shadow_cfg.get('retention_days', 30)
+        self.max_file_size = shadow_cfg.get('max_file_size_mb', 10) * 1024 * 1024  # Convert to bytes
+
+        # Create log directory
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Daily entry counter
+        self._daily_count = 0
+        self._current_date = None
+
+        # Initialize daily log file path
+        self._update_log_file()
+
+    def _update_log_file(self) -> None:
+        """Update the log file path for the current date."""
+        today = datetime.now(timezone.utc).date()
+
+        # Generate log file path first
+        date_str = today.strftime('%Y-%m-%d')
+        self.current_log_path = self.log_dir / f"shadow_{date_str}.jsonl"
+
+        # Reset counter if date changed
+        if self._current_date != today:
+            self._current_date = today
+            self._daily_count = self._count_today_entries()
+
+    def _count_today_entries(self) -> int:
+        """Count existing entries in today's log file."""
+        if not self.current_log_path.exists():
+            return 0
+
+        try:
+            with open(self.current_log_path, 'r', encoding='utf-8') as f:
+                return sum(1 for _ in f)
+        except Exception as exc:
+            logger.warning(f"Failed to count today's entries: {exc}")
+            return 0
+
+    def log_shadow_write(self, candidate: 'CandidateFact', classification: Dict[str, Any],
+                         result: Dict[str, Any]) -> bool:
+        """Log a shadow write entry. Returns True if logged, False if limit reached."""
+        self._update_log_file()
+
+        # Check daily limit
+        if self._daily_count >= self.max_entries_per_day:
+            logger.warning(
+                f"Shadow write daily limit reached ({self.max_entries_per_day}). "
+                "Entry not logged."
+            )
+            return False
+
+        # Prepare log entry
+        try:
+            entry = {
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'date': self._current_date.isoformat(),
+                'subject': candidate.subject,
+                'predicate': candidate.predicate,
+                'object_value': candidate.object_value[:500],  # Truncate long values
+                'memory_type': candidate.memory_type,
+                'importance': candidate.importance,
+                'confidence': candidate.confidence,
+                'source_type': candidate.source_type,
+                'target_store': classification.get('target_store'),
+                'target_path': classification.get('target_path') or candidate.target_path,
+                'action': classification.get('action'),
+                'requires_review': candidate.requires_review or classification.get('requires_review', False),
+                'namespace': classification.get('namespace') or candidate.namespace,
+                'auto_write_allowed': result.get('auto_write_allowed', False),
+                'written': result.get('written', False),
+                'readback_ok': result.get('readback_ok', False),
+                'evidence_quote': candidate.evidence_quote[:200],  # Truncate evidence
+            }
+
+            # Write to log file (append mode)
+            with open(self.current_log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
+            self._daily_count += 1
+            return True
+
+        except Exception as exc:
+            logger.error(f"Failed to log shadow write: {exc}")
+            return False
+
+    def cleanup_old_logs(self) -> Dict[str, Any]:
+        """Delete log files older than retention_days. Returns cleanup stats."""
+        if self.retention_days <= 0:
+            return {'deleted': 0, 'reason': 'retention disabled'}
+
+        cutoff_date = datetime.now(timezone.utc).date() - timedelta(days=self.retention_days)
+        deleted = []
+        errors = []
+
+        try:
+            for log_file in self.log_dir.glob('shadow_*.jsonl'):
+                # Extract date from filename: shadow_YYYY-MM-DD.jsonl
+                try:
+                    date_str = log_file.stem.replace('shadow_', '')
+                    file_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+
+                    if file_date < cutoff_date:
+                        file_size = log_file.stat().st_size
+                        log_file.unlink()
+                        deleted.append({
+                            'file': log_file.name,
+                            'date': date_str,
+                            'size_bytes': file_size,
+                        })
+                        logger.info(f"Deleted old shadow log: {log_file.name} (age: {(datetime.now(timezone.utc).date() - file_date).days} days)")
+
+                except ValueError as ve:
+                    # Filename doesn't match expected format
+                    logger.debug(f"Skipping file with unexpected name format: {log_file.name}")
+                except Exception as exc:
+                    errors.append({
+                        'file': log_file.name,
+                        'error': str(exc),
+                    })
+                    logger.warning(f"Failed to delete {log_file.name}: {exc}")
+
+        except Exception as exc:
+            logger.error(f"Shadow log cleanup failed: {exc}")
+            return {
+                'deleted': len(deleted),
+                'errors': len(errors),
+                'error': str(exc),
+            }
+
+        return {
+            'deleted': len(deleted),
+            'deleted_files': deleted,
+            'errors': errors,
+            'cutoff_date': cutoff_date.isoformat(),
+            'retention_days': self.retention_days,
+        }
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get statistics about shadow write logs."""
+        stats = {
+            'log_dir': str(self.log_dir),
+            'current_date': self._current_date.isoformat() if self._current_date else None,
+            'daily_count': self._daily_count,
+            'daily_limit': self.max_entries_per_day,
+            'remaining_today': max(0, self.max_entries_per_day - self._daily_count),
+            'retention_days': self.retention_days,
+            'files': [],
+            'total_entries': 0,
+            'total_size_bytes': 0,
+        }
+
+        try:
+            for log_file in sorted(self.log_dir.glob('shadow_*.jsonl')):
+                file_stats = log_file.stat()
+                entry_count = sum(1 for _ in open(log_file, 'r', encoding='utf-8'))
+
+                stats['files'].append({
+                    'name': log_file.name,
+                    'size_bytes': file_stats.st_size,
+                    'entries': entry_count,
+                    'modified': datetime.fromtimestamp(file_stats.st_mtime, tz=timezone.utc).isoformat(),
+                })
+                stats['total_entries'] += entry_count
+                stats['total_size_bytes'] += file_stats.st_size
+
+        except Exception as exc:
+            logger.warning(f"Failed to collect shadow log stats: {exc}")
+            stats['error'] = str(exc)
+
+        return stats
 
 
 def load_memory_write_config(config_path: Optional[str] = None) -> Dict[str, Any]:
@@ -37,6 +224,13 @@ def load_memory_write_config(config_path: Optional[str] = None) -> Dict[str, Any
         ],
         "semantic_classifier": {"model_enabled": False},
         "repair_queue_path": "~/.hermes/logs/memory_repair_queue.jsonl",
+        "shadow": {
+            "log_dir": "~/.hermes/logs/shadow_writes",
+            "max_entries_per_day": 1000,
+            "retention_days": 30,
+            "max_file_size_mb": 10,
+            "enable_readback_dryrun": True,
+        },
     }
     path = Path(config_path or os.path.expanduser("~/.hermes/memory_write_config.yaml"))
     if not path.exists():
@@ -59,6 +253,10 @@ def _auto_type(candidate: "CandidateFact") -> str:
     This is intentionally metadata-based, not keyword-based. Text semantics are
     classified upstream; this gate only decides whether a classified candidate
     is safe to write automatically.
+
+    Returns types matching allowed_auto_types in memory_write_config.yaml:
+    - explicit_correction, explicit_preference, target_function,
+      procedural_memory, decision, user_fact
     """
     if candidate.source_type == "user_correction":
         return "explicit_correction"
@@ -190,6 +388,13 @@ class MemoryWritePipeline:
         self.config = config if config is not None else load_memory_write_config()
         self._write_log = []
 
+        # Initialize shadow write logger
+        try:
+            self.shadow_logger = ShadowWriteLogger(self.config)
+        except Exception as exc:
+            logger.warning(f"Failed to initialize shadow write logger: {exc}")
+            self.shadow_logger = None
+
     def reflect_and_extract(self, user_msg: str, assistant_msg: str) -> Dict[str, Any]:
         """Generate memory reflection from a conversation turn."""
         combined = f"{user_msg} {assistant_msg}"
@@ -236,6 +441,13 @@ class MemoryWritePipeline:
                 for p in _auto_patterns
             ) else 'user_direct'
             _auto_target_path = '用户档案/偏好' if _auto_type == 'preference' else '用户档案/程序性记忆'
+            # Only require review for corrections and credential-related procedural_memory,
+            # not all procedural_memory (preference never needs review).
+            # Fixed 2026-06-08: Was setting requires_review=True for ALL procedural_memory.
+            _requires_review = (
+                _auto_source == 'user_correction' or
+                (_auto_type == 'procedural_memory' and any('credential' in p.lower() or 'secret' in p.lower() for p in _auto_patterns))
+            )
             candidates.append(CandidateFact(
                 subject='auto_store_heuristic',
                 predicate='explicit_memory_signal',
@@ -247,7 +459,7 @@ class MemoryWritePipeline:
                 evidence_quote=user_msg[:1000],
                 confidence=max(0.85, min(0.98, _auto_confidence)),
                 source_type=_auto_source,
-                requires_review=_auto_type != 'preference',
+                requires_review=_requires_review,
                 reason='; '.join(_auto_patterns[:5]),
             ))
 
@@ -554,9 +766,58 @@ class MemoryWritePipeline:
 
         # Gate 4: Dedup
         candidate.dedup_key = make_dedup_key(candidate)
-        # (dedup check would query existing facts)
+        # Query existing facts by dedup_key to avoid duplicates
+        try:
+            from tools import memory_graph_tool
+            dedup_search_raw = memory_graph_tool._search({
+                'query': f"{candidate.subject} {candidate.predicate} {candidate.object_value[:50]}",
+                'limit': 5,
+                'namespace': namespace,
+            })
+            dedup_search = json.loads(dedup_search_raw)
+            for item in dedup_search.get('results', []):
+                item_content = str(item.get('content', ''))
+                item_title = str(item.get('title', ''))
+                # Check if the dedup_key components match
+                if (candidate.subject.lower() in item_title.lower() or candidate.subject.lower() in item_content.lower()):
+                    if (candidate.predicate.lower() in item_content.lower() and
+                        candidate.object_value.lower()[:50] in item_content.lower()):
+                        return {
+                            'action': 'ignore',
+                            'reason': f'Duplicate fact already exists: {item.get("uri", "")}',
+                            'target_store': 'ignore',
+                            'duplicate_uri': item.get('uri', '')
+                        }
+        except Exception as exc:
+            logger.debug('Dedup check failed open (continuing to write): %s', exc)
 
-        # Gate 5: Clarification-on-use instead of low-ROI batch review.
+        # Gate 5a: Sensitive review-only routes must remain in the review lane.
+        # They should never auto-write, but they must still produce redacted
+        # repair/review records for auditability instead of disappearing into
+        # low-ROI clarification-on-use queues.
+        clarification_queue_enabled = bool(self.config.get('clarification_queue_path'))
+        sensitive_review_route = bool(
+            not clarification_queue_enabled
+            and (
+                candidate.target_store == 'review'
+                or re.search(
+                    r'(credential|credentials|secret|token|api[_ -]?key|密钥|凭据|密码)',
+                    f"{candidate.subject}\n{candidate.predicate}\n{candidate.memory_type}\n{candidate.target_path}\n{candidate.object_value}",
+                    re.I,
+                )
+            )
+        )
+        if candidate.requires_review and sensitive_review_route:
+            return {
+                'action': 'write',
+                'target_store': 'review',
+                'target_path': candidate.target_path,
+                'requires_review': True,
+                'dedup_key': candidate.dedup_key,
+                'namespace': namespace or candidate.namespace,
+            }
+
+        # Gate 5b: Clarification-on-use instead of low-ROI batch review.
         # Uncertain memories should not pile up for manual WebUI approval. Keep
         # them as pending clarification candidates and surface them only when a
         # future task would rely on them.
@@ -712,6 +973,56 @@ class MemoryWritePipeline:
             'node_uuid': created.get('node_uuid'),
         }
 
+    def _write_hindsight(self, candidate: CandidateFact, classification: Dict[str, Any]) -> Dict[str, Any]:
+        """Write a candidate to Hindsight for semantic/episodic memory storage.
+
+        Hindsight stores lower-importance facts and contextual memories that don't
+        require structured graph storage but should be semantically searchable.
+        """
+        if self.hindsight is None:
+            return {
+                'written': False,
+                'target': 'hindsight',
+                'error': 'Hindsight client not available',
+            }
+
+        try:
+            # Format memory for Hindsight storage
+            memory_text = f"{candidate.subject}: {candidate.predicate} = {candidate.object_value}"
+
+            # Add metadata for better retrieval
+            metadata = {
+                'memory_type': candidate.memory_type,
+                'importance': candidate.importance,
+                'confidence': candidate.confidence,
+                'source_type': candidate.source_type,
+                'target_path': candidate.target_path,
+                'evidence': candidate.evidence_quote[:200] if candidate.evidence_quote else '',
+            }
+
+            # Write to Hindsight using the client
+            write_result = self.hindsight.store(
+                text=memory_text,
+                metadata=metadata,
+                namespace=classification.get('namespace') or candidate.namespace or 'core',
+            )
+
+            return {
+                'written': True,
+                'target': 'hindsight',
+                'readback_ok': True,  # Hindsight confirms storage on write
+                'hindsight_id': write_result.get('id'),
+            }
+
+        except Exception as exc:
+            logger.warning('Hindsight write failed: %s', exc)
+            return {
+                'written': False,
+                'target': 'hindsight',
+                'error': str(exc),
+                'failure_reason': f'hindsight write failed: {exc}',
+            }
+
     def _record_repair_queue(self, candidate: CandidateFact, classification: Dict[str, Any], result: Dict[str, Any]) -> None:
         """Append a redacted repair/review item for blocked or failed memory writes."""
         try:
@@ -824,14 +1135,52 @@ class MemoryWritePipeline:
                 self._record_repair_queue(candidate, classification, result)
             return result
 
+        # Write to appropriate store based on target_store classification
+        target_store = classification.get('target_store')
+
+        if target_store == 'hindsight':
+            # Write to Hindsight for facts that don't need structured graph storage
+            hindsight_result = self._write_hindsight(candidate, classification)
+            result.update(hindsight_result)
+            return result
+
         # Rules that would normally fit MEMORY.md are written to Memory Graph here.
         # L1 memory remains a tiny injected rules layer; Graph is the durable store.
         graph_result = self._write_memory_graph(candidate, classification)
         result.update(graph_result)
         result['readback_ok'] = bool(graph_result.get('readback_ok') or graph_result.get('duplicate'))
+
+        # Write to Hindsight as well for semantic searchability if importance warrants it
+        # This allows both structured (Memory Graph) and semantic (Hindsight) retrieval
+        if result.get('written') and candidate.importance >= 0.40:
+            try:
+                self._write_hindsight(candidate, classification)
+            except Exception as exc:
+                logger.debug('Hindsight parallel write failed (non-fatal): %s', exc)
+
         if not result['readback_ok']:
             self._record_repair_queue(candidate, classification, result)
+
+        # Log to shadow write log
+        if self.shadow_logger and self.config.get('mode') == 'shadow':
+            try:
+                self.shadow_logger.log_shadow_write(candidate, classification, result)
+            except Exception as exc:
+                logger.debug(f'Shadow write logging failed (non-fatal): {exc}')
+
         return result
+
+    def cleanup_shadow_logs(self) -> Dict[str, Any]:
+        """Clean up old shadow write logs based on retention policy."""
+        if not self.shadow_logger:
+            return {'error': 'shadow logger not initialized'}
+        return self.shadow_logger.cleanup_old_logs()
+
+    def get_shadow_stats(self) -> Dict[str, Any]:
+        """Get statistics about shadow write logs."""
+        if not self.shadow_logger:
+            return {'error': 'shadow logger not initialized'}
+        return self.shadow_logger.get_stats()
 
 # ─── Write Regression Test Suite ──────────────────────────────────
 

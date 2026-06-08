@@ -140,6 +140,20 @@ def detect_auto_store(user_message: str, *, threshold: float = 0.5) -> Tuple[boo
     if not user_message or not user_message.strip():
         return (False, 0.0, [])
 
+    # Pre-filter: Skip system wrapper markers (noise reduction)
+    # These are system-generated messages that should never be stored
+    system_wrapper_markers = [
+        '[IMPORTANT:',
+        '[System note:',
+        'metadata:\n  hermes:',
+        'Review the conversation above',
+    ]
+
+    message_start = user_message.lstrip()[:50]  # Check first 50 chars
+    for marker in system_wrapper_markers:
+        if message_start.startswith(marker):
+            return (False, 0.0, [])
+
     # Quick exit for short acknowledgments
     if is_short_acknowledgment(user_message):
         return (False, 0.0, [])
@@ -227,6 +241,12 @@ def _run_tests():
         ("别忘了我住在北京", True, "Location + explicit"),
         ("For example, I like Python", False, "Example with negative pattern"),
         ("我的邮箱是 user@example.com", True, "Contact info"),
+        # System wrapper noise tests
+        ("[IMPORTANT: Remember to check the logs", False, "System wrapper [IMPORTANT:"),
+        ("[System note: User prefers PostgreSQL", False, "System wrapper [System note:"),
+        ("metadata:\n  hermes:\n    remember: true", False, "System wrapper metadata block"),
+        ("Review the conversation above and remember my preference", False, "System wrapper Review instruction"),
+        ("  [IMPORTANT: With leading whitespace", False, "System wrapper with whitespace"),
     ]
 
     passed = 0

@@ -19,7 +19,11 @@ _db_initialized = False
 
 
 def _get_namespace() -> str:
-    """Get current user's namespace. Uses RequestContext first, env/config fallback last."""
+    """Get current user's namespace. Uses RequestContext first, env/config fallback last.
+
+    Fail-closed: raises exception when all namespace resolution methods fail,
+    preventing writes to wrong namespace or anonymous core namespace by default.
+    """
     import os
     # Explicit environment override for tests, cron, and CLI wrappers.
     # During pytest, avoid deployment-specific default-terminal fallback leaking
@@ -75,7 +79,14 @@ def _get_namespace() -> str:
             return f"telegram:{default_user}"
     except Exception as exc:
         logger.debug("Failed to read default terminal namespace from config: %s", exc, exc_info=True)
-    return ""
+
+    # Fail-closed: raise exception when all namespace resolution methods fail
+    raise RuntimeError(
+        "Cannot determine memory namespace: RequestContext unavailable, "
+        "no MEMORY_GRAPH_NAMESPACE env var, no plugin namespace provider, "
+        "and no default_terminal_user in config.yaml. Memory operations require "
+        "explicit namespace to prevent writes to wrong user or anonymous core namespace."
+    )
 
 
 def _ensure_db():

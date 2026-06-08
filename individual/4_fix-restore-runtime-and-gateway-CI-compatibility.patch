@@ -1,0 +1,1179 @@
+From 40e3961769b215c769b99f4badb3cfb9f34243fb Mon Sep 17 00:00:00 2001
+From: Cyrene963 <Nitrogen@users.noreply.github.com>
+Date: Tue, 9 Jun 2026 00:20:32 +0800
+Subject: [PATCH] fix: restore runtime and gateway CI compatibility
+
+---
+ agent/agent_runtime_helpers.py | 146 ++++++++++++++++++-
+ agent/conversation_loop.py     | 117 ++++++++-------
+ agent/tool_executor.py         |  96 +++++++++++-
+ gateway/config.py              |  14 +-
+ gateway/platforms/telegram.py  | 259 ++++++++++++++++++++++++++++++---
+ hermes_cli/web_server.py       |  30 +++-
+ hermes_state.py                | 101 ++++++++++++-
+ tools/cronjob_tools.py         |  15 +-
+ 8 files changed, 682 insertions(+), 96 deletions(-)
+
+diff --git a/agent/agent_runtime_helpers.py b/agent/agent_runtime_helpers.py
+index 3074f9b6f..3af8c18b5 100644
+--- a/agent/agent_runtime_helpers.py
++++ b/agent/agent_runtime_helpers.py
+@@ -41,6 +41,93 @@ from utils import base_url_host_matches, base_url_hostname, env_var_enabled, ato
+ logger = logging.getLogger(__name__)
+ 
+ 
++AGENT_RUNTIME_POST_HOOK_TOOL_NAMES = frozenset({
++    "todo",
++    "session_search",
++    "memory",
++    "clarify",
++    "delegate_task",
++})
++
++
++def agent_runtime_owns_post_tool_hook(agent_or_function_name, function_name: Optional[str] = None) -> bool:
++    if function_name is None:
++        return agent_or_function_name in AGENT_RUNTIME_POST_HOOK_TOOL_NAMES
++    agent = agent_or_function_name
++    if function_name in AGENT_RUNTIME_POST_HOOK_TOOL_NAMES:
++        return True
++    if getattr(agent, "_context_engine_tool_names", None) and function_name in agent._context_engine_tool_names:
++        return True
++    memory_manager = getattr(agent, "_memory_manager", None)
++    try:
++        return bool(memory_manager and memory_manager.has_tool(function_name))
++    except Exception:
++        return False
++
++
++def _emit_agent_runtime_post_tool_call(
++    agent,
++    function_name: str,
++    function_args: dict,
++    result: Any,
++    effective_task_id: str,
++    tool_call_id: Optional[str],
++    start_time: float,
++    middleware_trace: Optional[list[dict[str, Any]]] = None,
++    *,
++    status: Optional[str] = None,
++    error_type: Optional[str] = None,
++    error_message: Optional[str] = None,
++) -> None:
++    try:
++        from model_tools import _emit_post_tool_call_hook
++        _emit_post_tool_call_hook(
++            function_name=function_name,
++            function_args=function_args,
++            result=result,
++            task_id=effective_task_id,
++            session_id=agent.session_id or "",
++            tool_call_id=tool_call_id or "",
++            turn_id=getattr(agent, "_current_turn_id", "") or "",
++            api_request_id=getattr(agent, "_current_api_request_id", "") or "",
++            duration_ms=int((time.time() - start_time) * 1000),
++            status=status,
++            error_type=error_type,
++            error_message=error_message,
++            middleware_trace=list(middleware_trace or []),
++        )
++    except Exception:
++        pass
++
++
++def _apply_agent_runtime_tool_execution_middleware(
++    function_name: str,
++    function_args: dict,
++    next_call,
++    effective_args_out: Optional[dict] = None,
++):
++    try:
++        from hermes_cli.plugins import get_plugin_manager
++        manager = get_plugin_manager()
++        middleware = getattr(manager, "_middleware", {}).get("tool_execution", []) if manager else []
++    except Exception:
++        middleware = []
++
++    def call_at(index: int, args: dict):
++        if index >= len(middleware):
++            if isinstance(effective_args_out, dict):
++                effective_args_out.clear()
++                effective_args_out.update(args)
++            return next_call(args)
++        return middleware[index](
++            tool_name=function_name,
++            args=args,
++            next_call=lambda next_args: call_at(index + 1, next_args),
++        )
++
++    return call_at(0, function_args)
++
++
+ def _ra():
+     """Lazy ``run_agent`` reference for test-patch routing."""
+     import run_agent
+@@ -1614,6 +1701,24 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
+     tools. Used by the concurrent execution path; the sequential path retains
+     its own inline invocation for backward-compatible display handling.
+     """
++    _tool_start_time = time.time()
++    _tool_middleware_trace = list(tool_request_middleware_trace or [])
++    if agent_runtime_owns_post_tool_hook(function_name) and not skip_tool_request_middleware:
++        try:
++            from hermes_cli.plugins import invoke_middleware
++            for _mw_result in invoke_middleware("tool_request", tool_name=function_name, args=function_args):
++                if isinstance(_mw_result, dict) and isinstance(_mw_result.get("args"), dict):
++                    function_args = _mw_result["args"]
++                    _tool_middleware_trace.append({"source": _mw_result.get("source", "tool_request")})
++        except Exception:
++            try:
++                from hermes_cli.middleware import apply_tool_request_middleware
++                _mw = apply_tool_request_middleware(function_name, function_args)
++                function_args = _mw.payload
++                _tool_middleware_trace = _mw.trace
++            except Exception:
++                pass
++
+     # Memory OS dispatch-time preflight gate.  This is deliberately separate
+     # from plugin pre_tool_call hooks: pre_tool_block_checked only means the
+     # plugin hook already ran in the caller; it must not skip memory policy
+@@ -1625,7 +1730,14 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
+         logger.debug("Memory preflight gate failed open due to internal error: %s", _memory_preflight_err)
+         _memory_block_msg = None
+     if _memory_block_msg:
+-        return json.dumps({"error": _memory_block_msg}, ensure_ascii=False)
++        result = json.dumps({"error": _memory_block_msg}, ensure_ascii=False)
++        if agent_runtime_owns_post_tool_hook(function_name):
++            _emit_agent_runtime_post_tool_call(
++                agent, function_name, function_args, result, effective_task_id, tool_call_id,
++                _tool_start_time, _tool_middleware_trace, status="blocked",
++                error_type="memory_preflight_block", error_message=_memory_block_msg,
++            )
++        return result
+ 
+     # Check plugin hooks for a block directive before executing anything.
+     block_message: Optional[str] = None
+@@ -1638,15 +1750,33 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
+         except Exception:
+             pass
+     if block_message is not None:
+-        return json.dumps({"error": block_message}, ensure_ascii=False)
++        result = json.dumps({"error": block_message}, ensure_ascii=False)
++        if agent_runtime_owns_post_tool_hook(function_name):
++            _emit_agent_runtime_post_tool_call(
++                agent, function_name, function_args, result, effective_task_id, tool_call_id,
++                _tool_start_time, _tool_middleware_trace, status="blocked",
++                error_type="plugin_block", error_message=block_message,
++            )
++        return result
+ 
+     if function_name == "todo":
+         from tools.todo_tool import todo_tool as _todo_tool
+-        return _todo_tool(
+-            todos=function_args.get("todos"),
+-            merge=function_args.get("merge", False),
+-            store=agent._todo_store,
++        _effective_function_args = dict(function_args)
++        result = _apply_agent_runtime_tool_execution_middleware(
++            function_name,
++            function_args,
++            lambda args: _todo_tool(
++                todos=args.get("todos"),
++                merge=args.get("merge", False),
++                store=agent._todo_store,
++            ),
++            _effective_function_args,
+         )
++        _emit_agent_runtime_post_tool_call(
++            agent, function_name, _effective_function_args, result, effective_task_id,
++            tool_call_id, _tool_start_time, _tool_middleware_trace,
++        )
++        return result
+     elif function_name == "session_search":
+         session_db = agent._get_session_db_for_recall()
+         if not session_db:
+@@ -1712,10 +1842,14 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
+             function_name, function_args, effective_task_id,
+             tool_call_id=tool_call_id,
+             session_id=agent.session_id or "",
++            turn_id=getattr(agent, "_current_turn_id", "") or "",
++            api_request_id=getattr(agent, "_current_api_request_id", "") or "",
+             enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
+             skip_pre_tool_call_hook=True,
++            skip_tool_request_middleware=True,
+             enabled_toolsets=getattr(agent, "enabled_toolsets", None),
+             disabled_toolsets=getattr(agent, "disabled_toolsets", None),
++            tool_request_middleware_trace=list(tool_request_middleware_trace or []),
+         )
+ 
+ 
+diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
+index 0ff6377b8..90e4d2db5 100644
+--- a/agent/conversation_loop.py
++++ b/agent/conversation_loop.py
+@@ -1220,37 +1220,42 @@ def run_conversation(
+                     api_kwargs = agent._get_transport().preflight_kwargs(api_kwargs, allow_stream=False)
+ 
+                 try:
+-                    from hermes_cli.plugins import invoke_hook as _invoke_hook
+-                    request_messages = api_kwargs.get("messages")
+-                    if not isinstance(request_messages, list):
+-                        request_messages = api_kwargs.get("input")
+-                    if not isinstance(request_messages, list):
+-                        request_messages = api_messages
+-                    # Shallow-copy the outer list so plugins that retain the
+-                    # reference for async snapshotting don't observe later
+-                    # mutations of api_messages.  The inner dicts are not
+-                    # mutated by the agent loop, so a shallow copy is
+-                    # sufficient; a deepcopy would walk every tool result
+-                    # and base64 image on every API call.
+-                    _invoke_hook(
+-                        "pre_api_request",
+-                        task_id=effective_task_id,
+-                        session_id=agent.session_id or "",
+-                        user_message=original_user_message,
+-                        conversation_history=list(messages),
+-                        platform=agent.platform or "",
+-                        model=agent.model,
+-                        provider=agent.provider,
+-                        base_url=agent.base_url,
+-                        api_mode=agent.api_mode,
+-                        api_call_count=api_call_count,
+-                        request_messages=list(request_messages) if isinstance(request_messages, list) else [],
+-                        message_count=len(api_messages),
+-                        tool_count=len(agent.tools or []),
+-                        approx_input_tokens=approx_tokens,
+-                        request_char_count=total_chars,
+-                        max_tokens=agent.max_tokens,
+-                    )
++                    from hermes_cli.plugins import has_hook as _has_hook, invoke_hook as _invoke_hook
++                    _pre_api_has_listener = _has_hook("pre_api_request")
++                    if _pre_api_has_listener:
++                        request_messages = api_kwargs.get("messages")
++                        if not isinstance(request_messages, list):
++                            request_messages = api_kwargs.get("input")
++                        if not isinstance(request_messages, list):
++                            request_messages = api_messages
++                        # Shallow-copy the outer list so plugins that retain the
++                        # reference for async snapshotting don't observe later
++                        # mutations of api_messages.  The inner dicts are not
++                        # mutated by the agent loop, so a shallow copy is
++                        # sufficient; a deepcopy would walk every tool result
++                        # and base64 image on every API call.
++                        _invoke_hook(
++                            "pre_api_request",
++                            task_id=effective_task_id,
++                            session_id=agent.session_id or "",
++                            turn_id=getattr(agent, "_current_turn_id", "") or "",
++                            api_request_id=getattr(agent, "_current_api_request_id", "") or "",
++                            user_message=original_user_message,
++                            conversation_history=list(messages),
++                            platform=agent.platform or "",
++                            model=agent.model,
++                            provider=agent.provider,
++                            base_url=agent.base_url,
++                            api_mode=agent.api_mode,
++                            api_call_count=api_call_count,
++                            request=agent._api_request_payload_for_hook(api_kwargs),
++                            request_messages=list(request_messages) if isinstance(request_messages, list) else [],
++                            message_count=len(api_messages),
++                            tool_count=len(agent.tools or []),
++                            approx_input_tokens=approx_tokens,
++                            request_char_count=total_chars,
++                            max_tokens=agent.max_tokens,
++                        )
+                 except Exception:
+                     pass
+ 
+@@ -3501,29 +3506,33 @@ def run_conversation(
+                     assistant_message.content = str(raw)
+ 
+             try:
+-                from hermes_cli.plugins import invoke_hook as _invoke_hook
+-                _assistant_tool_calls = getattr(assistant_message, "tool_calls", None) or []
+-                _assistant_text = assistant_message.content or ""
+-                _invoke_hook(
+-                    "post_api_request",
+-                    task_id=effective_task_id,
+-                    session_id=agent.session_id or "",
+-                    platform=agent.platform or "",
+-                    model=agent.model,
+-                    provider=agent.provider,
+-                    base_url=agent.base_url,
+-                    api_mode=agent.api_mode,
+-                    api_call_count=api_call_count,
+-                    api_duration=api_duration,
+-                    finish_reason=finish_reason,
+-                    message_count=len(api_messages),
+-                    response_model=getattr(response, "model", None),
+-                    response=response,
+-                    usage=agent._usage_summary_for_api_request_hook(response),
+-                    assistant_message=assistant_message,
+-                    assistant_content_chars=len(_assistant_text),
+-                    assistant_tool_call_count=len(_assistant_tool_calls),
+-                )
++                from hermes_cli.plugins import has_hook as _has_hook, invoke_hook as _invoke_hook
++                _post_api_has_listener = _has_hook("post_api_request")
++                if _post_api_has_listener:
++                    _assistant_tool_calls = getattr(assistant_message, "tool_calls", None) or []
++                    _assistant_text = assistant_message.content or ""
++                    _invoke_hook(
++                        "post_api_request",
++                        task_id=effective_task_id,
++                        session_id=agent.session_id or "",
++                        turn_id=getattr(agent, "_current_turn_id", "") or "",
++                        api_request_id=getattr(agent, "_current_api_request_id", "") or "",
++                        platform=agent.platform or "",
++                        model=agent.model,
++                        provider=agent.provider,
++                        base_url=agent.base_url,
++                        api_mode=agent.api_mode,
++                        api_call_count=api_call_count,
++                        api_duration=api_duration,
++                        finish_reason=finish_reason,
++                        message_count=len(api_messages),
++                        response_model=getattr(response, "model", None),
++                        response=agent._api_response_payload_for_hook(response, assistant_message, finish_reason=finish_reason),
++                        usage=agent._usage_summary_for_api_request_hook(response),
++                        assistant_message=assistant_message,
++                        assistant_content_chars=len(_assistant_text),
++                        assistant_tool_call_count=len(_assistant_tool_calls),
++                    )
+             except Exception:
+                 pass
+ 
+diff --git a/agent/tool_executor.py b/agent/tool_executor.py
+index 8651c0a0b..431561aeb 100644
+--- a/agent/tool_executor.py
++++ b/agent/tool_executor.py
+@@ -611,6 +611,18 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
+             function_args = {}
+         if not isinstance(function_args, dict):
+             function_args = {}
++        _tool_middleware_trace = []
++
++        try:
++            from agent.agent_runtime_helpers import agent_runtime_owns_post_tool_hook
++            if agent_runtime_owns_post_tool_hook(agent, function_name):
++                from hermes_cli.plugins import invoke_middleware
++                for _mw_result in invoke_middleware("tool_request", tool_name=function_name, args=function_args):
++                    if isinstance(_mw_result, dict) and isinstance(_mw_result.get("args"), dict):
++                        function_args = _mw_result["args"]
++                        _tool_middleware_trace.append({"source": _mw_result.get("source", "tool_request")})
++        except Exception:
++            pass
+ 
+         # Tool Search unwrap — see execute_tool_calls_concurrent for full
+         # rationale, including the scope gate (the unwrap dispatches the
+@@ -674,6 +686,8 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
+ 
+         _execution_blocked = _skill_gate_msg is not None or _block_msg is not None or _guardrail_block_decision is not None
+ 
++        function_args_for_post_hook = function_args
++
+         if _execution_blocked:
+             # Tool blocked by plugin or guardrail policy — skip counters,
+             # callbacks, checkpointing, activity mutation, and real execution.
+@@ -761,11 +775,19 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
+             tool_duration = 0.0
+         elif function_name == "todo":
+             from tools.todo_tool import todo_tool as _todo_tool
+-            function_result = _todo_tool(
+-                todos=function_args.get("todos"),
+-                merge=function_args.get("merge", False),
+-                store=agent._todo_store,
++            from agent.agent_runtime_helpers import _apply_agent_runtime_tool_execution_middleware
++            _effective_function_args = dict(function_args)
++            function_result = _apply_agent_runtime_tool_execution_middleware(
++                function_name,
++                function_args,
++                lambda args: _todo_tool(
++                    todos=args.get("todos"),
++                    merge=args.get("merge", False),
++                    store=agent._todo_store,
++                ),
++                _effective_function_args,
+             )
++            function_args_for_post_hook = _effective_function_args
+             tool_duration = time.time() - tool_start_time
+             if agent._should_emit_quiet_tool_messages():
+                 agent._vprint(f"  {_get_cute_tool_message_impl('todo', function_args, tool_duration, result=function_result)}")
+@@ -925,6 +947,28 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
+                     disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+                 )
+                 _spinner_result = function_result
++            except KeyboardInterrupt:
++                cancel_result = json.dumps({"status": "cancelled", "error": "KeyboardInterrupt"}, ensure_ascii=False)
++                try:
++                    from model_tools import _emit_post_tool_call_hook
++                    _emit_post_tool_call_hook(
++                        function_name=function_name,
++                        function_args=function_args,
++                        result=cancel_result,
++                        task_id=effective_task_id,
++                        session_id=agent.session_id or "",
++                        tool_call_id=getattr(tool_call, "id", None),
++                        turn_id=getattr(agent, "_current_turn_id", "") or "",
++                        api_request_id=getattr(agent, "_current_api_request_id", "") or "",
++                        duration_ms=int((time.time() - tool_start_time) * 1000),
++                        status="cancelled",
++                        error_type="keyboard_interrupt",
++                        error_message="KeyboardInterrupt",
++                        middleware_trace=list(_tool_middleware_trace),
++                    )
++                except Exception:
++                    pass
++                raise
+             except Exception as tool_error:
+                 function_result = f"Error executing tool '{function_name}': {tool_error}"
+                 logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
+@@ -946,6 +990,28 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
+                     enabled_toolsets=getattr(agent, "enabled_toolsets", None),
+                     disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+                 )
++            except KeyboardInterrupt:
++                cancel_result = json.dumps({"status": "cancelled", "error": "KeyboardInterrupt"}, ensure_ascii=False)
++                try:
++                    from model_tools import _emit_post_tool_call_hook
++                    _emit_post_tool_call_hook(
++                        function_name=function_name,
++                        function_args=function_args,
++                        result=cancel_result,
++                        task_id=effective_task_id,
++                        session_id=agent.session_id or "",
++                        tool_call_id=getattr(tool_call, "id", None),
++                        turn_id=getattr(agent, "_current_turn_id", "") or "",
++                        api_request_id=getattr(agent, "_current_api_request_id", "") or "",
++                        duration_ms=int((time.time() - tool_start_time) * 1000),
++                        status="cancelled",
++                        error_type="keyboard_interrupt",
++                        error_message="KeyboardInterrupt",
++                        middleware_trace=list(_tool_middleware_trace),
++                    )
++                except Exception:
++                    pass
++                raise
+             except Exception as tool_error:
+                 function_result = f"Error executing tool '{function_name}': {tool_error}"
+                 logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
+@@ -994,6 +1060,28 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
+         else:
+             logger.info("tool %s completed (%.2fs, %d chars)", function_name, tool_duration, _result_len)
+ 
++        try:
++            from agent.agent_runtime_helpers import (
++                agent_runtime_owns_post_tool_hook,
++                _emit_agent_runtime_post_tool_call,
++            )
++            if _execution_blocked or agent_runtime_owns_post_tool_hook(agent, function_name):
++                _emit_agent_runtime_post_tool_call(
++                    agent,
++                    function_name,
++                    function_args_for_post_hook,
++                    function_result,
++                    effective_task_id,
++                    getattr(tool_call, "id", None),
++                    tool_start_time,
++                    _tool_middleware_trace,
++                    status="blocked" if _execution_blocked else None,
++                    error_type="plugin_block" if _block_msg is not None else ("skill_gate_block" if _skill_gate_msg is not None else ("guardrail_block" if _guardrail_block_decision is not None else None)),
++                    error_message=_block_msg or _skill_gate_msg,
++                )
++        except Exception:
++            pass
++
+         # Track file-mutation outcome for the turn-end verifier.  See
+         # the concurrent path for the rationale; both paths must feed
+         # the same state so the footer reflects every tool call in the
+diff --git a/gateway/config.py b/gateway/config.py
+index f130fa7da..28523baf7 100644
+--- a/gateway/config.py
++++ b/gateway/config.py
+@@ -1079,7 +1079,19 @@ def load_gateway_config() -> GatewayConfig:
+                     if isinstance(group_allowed_chats, list):
+                         group_allowed_chats = ",".join(str(v) for v in group_allowed_chats)
+                     os.environ["TELEGRAM_GROUP_ALLOWED_CHATS"] = str(group_allowed_chats)
+-                for _telegram_extra_key in ("guest_mode", "disable_link_previews", "observe_unmentioned_group_messages"):
++                personal_workspace_chats = telegram_cfg.get("personal_workspace_chats")
++                if personal_workspace_chats is not None and not os.getenv("TELEGRAM_PERSONAL_WORKSPACE_CHATS"):
++                    os.environ["TELEGRAM_PERSONAL_WORKSPACE_CHATS"] = json.dumps(personal_workspace_chats)
++                if "history_backfill" in telegram_cfg and not os.getenv("TELEGRAM_HISTORY_BACKFILL"):
++                    os.environ["TELEGRAM_HISTORY_BACKFILL"] = str(telegram_cfg["history_backfill"]).lower()
++                if "history_backfill_limit" in telegram_cfg and not os.getenv("TELEGRAM_HISTORY_BACKFILL_LIMIT"):
++                    os.environ["TELEGRAM_HISTORY_BACKFILL_LIMIT"] = str(telegram_cfg["history_backfill_limit"])
++                if "context_cache_limit" in telegram_cfg and not os.getenv("TELEGRAM_CONTEXT_CACHE_LIMIT"):
++                    os.environ["TELEGRAM_CONTEXT_CACHE_LIMIT"] = str(telegram_cfg["context_cache_limit"])
++                for _telegram_extra_key in (
++                    "guest_mode", "disable_link_previews", "observe_unmentioned_group_messages",
++                    "personal_workspace_chats", "history_backfill", "history_backfill_limit", "context_cache_limit",
++                ):
+                     if _telegram_extra_key in telegram_cfg:
+                         plat_data = platforms_data.setdefault(Platform.TELEGRAM.value, {})
+                         if not isinstance(plat_data, dict):
+diff --git a/gateway/platforms/telegram.py b/gateway/platforms/telegram.py
+index 95341dfac..fb43948c2 100644
+--- a/gateway/platforms/telegram.py
++++ b/gateway/platforms/telegram.py
+@@ -169,6 +169,25 @@ def check_telegram_requirements() -> bool:
+ _MDV2_ESCAPE_RE = re.compile(r'([_*\[\]()~`>#\+\-=|{}.!\\])')
+ 
+ 
++
++
++class _TelegramParseModeValue(str):
++    def __new__(cls, value: str, name: str):
++        obj = str.__new__(cls, value)
++        obj._name = name
++        return obj
++
++    def __repr__(self) -> str:
++        return f"ParseMode.{self._name}"
++
++
++def _telegram_markdown_v2_parse_mode():
++    value = getattr(ParseMode, "MARKDOWN_V2", "MarkdownV2") if ParseMode is not None else "MarkdownV2"
++    return _TelegramParseModeValue(str(value), "MARKDOWN_V2")
++
++
++_TELEGRAM_MARKDOWN_V2 = _telegram_markdown_v2_parse_mode()
++
+ def _escape_mdv2(text: str) -> str:
+     """Escape Telegram MarkdownV2 special characters with a preceding backslash."""
+     return _MDV2_ESCAPE_RE.sub(r'\\\1', text)
+@@ -496,6 +515,10 @@ class TelegramAdapter(BasePlatformAdapter):
+         # outbound send/edit calls for the same chat so streaming edits, final
+         # sends, and status updates do not race into the same flood window.
+         self._chat_send_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
++        self._recent_group_context: Dict[str, list] = {}
++        self._auto_personal_workspace_chats: Set[str] = set()
++        self._blocked_auto_personal_workspace_chats: Set[str] = set()
++        self._auto_personal_workspace_probe_attempted: Set[str] = set()
+ 
+     def _chat_send_lock(self, chat_id: str) -> asyncio.Lock:
+         locks = getattr(self, "_chat_send_locks", None)
+@@ -698,9 +721,17 @@ class TelegramAdapter(BasePlatformAdapter):
+ 
+     @classmethod
+     def _message_thread_id_for_send(cls, thread_id: Optional[str]) -> Optional[int]:
+-        if not thread_id or str(thread_id) == cls._GENERAL_TOPIC_THREAD_ID:
++        if not thread_id:
+             return None
+-        return int(thread_id)
++        thread_id_str = str(thread_id)
++        if thread_id_str == cls._GENERAL_TOPIC_THREAD_ID:
++            return None
++        if thread_id_str.startswith("group:"):
++            parts = thread_id_str.split(":")
++            if len(parts) >= 3 and parts[-1].lstrip("-").isdigit():
++                return int(parts[-1])
++            return None
++        return int(thread_id_str)
+ 
+     @classmethod
+     def _message_thread_id_for_typing(cls, thread_id: Optional[str]) -> Optional[int]:
+@@ -713,7 +744,13 @@ class TelegramAdapter(BasePlatformAdapter):
+         # sends still map "1" → None via _message_thread_id_for_send.
+         if not thread_id:
+             return None
+-        return int(thread_id)
++        thread_id_str = str(thread_id)
++        if thread_id_str.startswith("group:"):
++            parts = thread_id_str.split(":")
++            if len(parts) >= 3 and parts[-1].lstrip("-").isdigit():
++                return int(parts[-1])
++            return None
++        return int(thread_id_str)
+ 
+     @staticmethod
+     def _is_thread_not_found_error(error: Exception) -> bool:
+@@ -1968,7 +2005,7 @@ class TelegramAdapter(BasePlatformAdapter):
+                                 chat_id,
+                                 chat_id=int(chat_id),
+                                 text=chunk,
+-                                parse_mode=ParseMode.MARKDOWN_V2,
++                                parse_mode=_TELEGRAM_MARKDOWN_V2,
+                                 reply_to_message_id=reply_to_id,
+                                 **thread_kwargs,
+                                 **self._link_preview_kwargs(),
+@@ -2221,7 +2258,7 @@ class TelegramAdapter(BasePlatformAdapter):
+                     chat_id=int(chat_id),
+                     message_id=int(message_id),
+                     text=formatted,
+-                    parse_mode=ParseMode.MARKDOWN_V2,
++                    parse_mode=_TELEGRAM_MARKDOWN_V2,
+                 )
+             except Exception as fmt_err:
+                 # "Message is not modified" is a no-op, not an error
+@@ -2358,7 +2395,7 @@ class TelegramAdapter(BasePlatformAdapter):
+                         chat_id=int(chat_id),
+                         message_id=int(message_id),
+                         text=formatted,
+-                        parse_mode=ParseMode.MARKDOWN_V2,
++                        parse_mode=_TELEGRAM_MARKDOWN_V2,
+                     )
+                 except Exception as fmt_err:
+                     if "not modified" not in str(fmt_err).lower():
+@@ -2413,7 +2450,7 @@ class TelegramAdapter(BasePlatformAdapter):
+                         chat_id,
+                         chat_id=int(chat_id),
+                         text=text,
+-                        parse_mode=ParseMode.MARKDOWN_V2 if use_markdown else None,
++                        parse_mode=_TELEGRAM_MARKDOWN_V2 if use_markdown else None,
+                         reply_to_message_id=reply_to_id,
+                         **thread_kwargs,
+                         **self._link_preview_kwargs(),
+@@ -2665,7 +2702,7 @@ class TelegramAdapter(BasePlatformAdapter):
+             msg = await self._send_message_with_thread_fallback(
+                 chat_id=int(chat_id),
+                 text=text,
+-                parse_mode=ParseMode.MARKDOWN_V2,
++                parse_mode=_TELEGRAM_MARKDOWN_V2,
+                 reply_markup=keyboard,
+                 reply_to_message_id=reply_to_id,
+                 **self._thread_kwargs_for_send(
+@@ -2927,7 +2964,7 @@ class TelegramAdapter(BasePlatformAdapter):
+             msg = await self._send_message_with_thread_fallback(
+                 chat_id=int(chat_id),
+                 text=text,
+-                parse_mode=ParseMode.MARKDOWN_V2,
++                parse_mode=_TELEGRAM_MARKDOWN_V2,
+                 reply_markup=keyboard,
+                 reply_to_message_id=reply_to_id,
+                 **self._thread_kwargs_for_send(
+@@ -3095,7 +3132,7 @@ class TelegramAdapter(BasePlatformAdapter):
+                         f"Select a model:{extra}"
+                     )
+                 ),
+-                parse_mode=ParseMode.MARKDOWN_V2,
++                parse_mode=_TELEGRAM_MARKDOWN_V2,
+                 reply_markup=keyboard,
+             )
+             await query.answer()
+@@ -3131,7 +3168,7 @@ class TelegramAdapter(BasePlatformAdapter):
+                         f"Select a model:{extra}"
+                     )
+                 ),
+-                parse_mode=ParseMode.MARKDOWN_V2,
++                parse_mode=_TELEGRAM_MARKDOWN_V2,
+                 reply_markup=keyboard,
+             )
+             await query.answer()
+@@ -3167,7 +3204,7 @@ class TelegramAdapter(BasePlatformAdapter):
+             try:
+                 await query.edit_message_text(
+                     text=self.format_message(result_text),
+-                    parse_mode=ParseMode.MARKDOWN_V2,
++                    parse_mode=_TELEGRAM_MARKDOWN_V2,
+                     reply_markup=None,
+                 )
+             except Exception:
+@@ -3224,7 +3261,7 @@ class TelegramAdapter(BasePlatformAdapter):
+                         f"Select a provider:"
+                     )
+                 ),
+-                parse_mode=ParseMode.MARKDOWN_V2,
++                parse_mode=_TELEGRAM_MARKDOWN_V2,
+                 reply_markup=keyboard,
+             )
+             await query.answer()
+@@ -3247,7 +3284,7 @@ class TelegramAdapter(BasePlatformAdapter):
+                         f"Select a provider:"
+                     )
+                 ),
+-                parse_mode=ParseMode.MARKDOWN_V2,
++                parse_mode=_TELEGRAM_MARKDOWN_V2,
+                 reply_markup=keyboard,
+             )
+             await query.answer()
+@@ -3343,7 +3380,7 @@ class TelegramAdapter(BasePlatformAdapter):
+                 try:
+                     await query.edit_message_text(
+                         text=self.format_message(f"{label} by {user_display}"),
+-                        parse_mode=ParseMode.MARKDOWN_V2,
++                        parse_mode=_TELEGRAM_MARKDOWN_V2,
+                         reply_markup=None,
+                     )
+                 except Exception:
+@@ -3406,7 +3443,7 @@ class TelegramAdapter(BasePlatformAdapter):
+                 try:
+                     await query.edit_message_text(
+                         text=self.format_message(f"{label} by {user_display}"),
+-                        parse_mode=ParseMode.MARKDOWN_V2,
++                        parse_mode=_TELEGRAM_MARKDOWN_V2,
+                         reply_markup=None,
+                     )
+                 except Exception:
+@@ -3595,7 +3632,7 @@ class TelegramAdapter(BasePlatformAdapter):
+         try:
+             await query.edit_message_text(
+                 text=self.format_message(f"⚕ Update prompt answered: *{label}*"),
+-                parse_mode=ParseMode.MARKDOWN_V2,
++                parse_mode=_TELEGRAM_MARKDOWN_V2,
+                 reply_markup=None,
+             )
+         except Exception:
+@@ -4958,6 +4995,8 @@ class TelegramAdapter(BasePlatformAdapter):
+         raw_message = getattr(event, "raw_message", None)
+         if not raw_message or not self._is_group_chat(raw_message):
+             return event
++        if getattr(event, "channel_context", None):
++            return event
+         chat_id_str = str(getattr(getattr(raw_message, "chat", None), "id", ""))
+         allowed = self._telegram_observe_allowed_chats()
+         if not allowed or chat_id_str not in allowed:
+@@ -5103,6 +5142,178 @@ class TelegramAdapter(BasePlatformAdapter):
+             adapter_name = getattr(self, "name", "telegram")
+             logger.warning("[%s] Failed to observe Telegram group message: %s", adapter_name, exc)
+ 
++
++    def _telegram_history_backfill_enabled(self) -> bool:
++        raw = self.config.extra.get("history_backfill")
++        if raw is None:
++            raw = os.getenv("TELEGRAM_HISTORY_BACKFILL", "false")
++        if isinstance(raw, str):
++            return raw.lower() in {"true", "1", "yes", "on"}
++        return bool(raw)
++
++    def _telegram_history_backfill_limit(self) -> int:
++        raw = self.config.extra.get("history_backfill_limit", os.getenv("TELEGRAM_HISTORY_BACKFILL_LIMIT", "5"))
++        try:
++            return max(0, int(raw))
++        except Exception:
++            return 5
++
++    def _telegram_context_cache_limit(self) -> int:
++        raw = self.config.extra.get("context_cache_limit", os.getenv("TELEGRAM_CONTEXT_CACHE_LIMIT", "50"))
++        try:
++            return max(1, int(raw))
++        except Exception:
++            return 50
++
++    def _telegram_personal_workspace_chats(self) -> Set[str]:
++        raw = self.config.extra.get("personal_workspace_chats")
++        if raw is None:
++            env = os.getenv("TELEGRAM_PERSONAL_WORKSPACE_CHATS", "")
++            if env.strip().startswith("["):
++                try:
++                    raw = json.loads(env)
++                except Exception:
++                    raw = env
++            else:
++                raw = env
++        result: Set[str] = set()
++        if isinstance(raw, dict):
++            result.update(str(k).strip() for k in raw.keys() if str(k).strip())
++        elif isinstance(raw, list):
++            for item in raw:
++                if isinstance(item, dict):
++                    cid = item.get("chat_id")
++                    if cid is not None:
++                        result.add(str(cid).strip())
++                elif str(item).strip():
++                    result.add(str(item).strip())
++        elif isinstance(raw, str):
++            for part in raw.split(","):
++                if part.strip():
++                    result.add(part.strip())
++        return result
++
++    def _is_personal_workspace_chat(self, message: Message) -> bool:
++        chat_id = str(getattr(getattr(message, "chat", None), "id", ""))
++        return chat_id in self._telegram_personal_workspace_chats() or chat_id in getattr(self, "_auto_personal_workspace_chats", set())
++
++    def _personal_workspace_sender_authorized(self, message: Message) -> bool:
++        user = getattr(message, "from_user", None)
++        if not user:
++            return False
++        runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
++        auth_fn = getattr(runner, "_is_user_authorized", None)
++        if callable(auth_fn):
++            try:
++                from gateway.session import SessionSource
++                return bool(auth_fn(SessionSource(
++                    platform=Platform.TELEGRAM,
++                    chat_id=str(user.id),
++                    chat_type="dm",
++                    user_id=str(user.id),
++                    user_name=getattr(user, "full_name", None) or getattr(user, "first_name", None),
++                )))
++            except Exception:
++                return False
++        return True
++
++    async def _maybe_register_auto_personal_workspace_chat(self, message: Message) -> None:
++        if not self._is_group_chat(message):
++            return
++        chat_id = str(getattr(getattr(message, "chat", None), "id", ""))
++        if not chat_id or chat_id in self._auto_personal_workspace_chats or chat_id in self._blocked_auto_personal_workspace_chats:
++            return
++        if not self._personal_workspace_sender_authorized(message):
++            self._blocked_auto_personal_workspace_chats.add(chat_id)
++            return
++        try:
++            count = await self._bot.get_chat_member_count(chat_id)
++        except Exception:
++            count = None
++        if count == 2:
++            self._auto_personal_workspace_chats.add(chat_id)
++        else:
++            self._blocked_auto_personal_workspace_chats.add(chat_id)
++
++    async def _handle_service_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++        msg = self._effective_update_message(update)
++        if not msg:
++            return
++        members = getattr(msg, "new_chat_members", None) or []
++        bot_id = str(getattr(getattr(self, "_bot", None), "id", ""))
++        if any(str(getattr(member, "id", "")) == bot_id for member in members):
++            await self._maybe_register_auto_personal_workspace_chat(msg)
++
++    def _group_context_key(self, message: Message) -> str:
++        chat_id = str(getattr(getattr(message, "chat", None), "id", ""))
++        thread_id = getattr(message, "message_thread_id", None)
++        return f"{chat_id}:{thread_id}" if thread_id is not None else chat_id
++
++    def _format_group_context_message(self, message: Message) -> str:
++        user = getattr(message, "from_user", None)
++        name = getattr(user, "full_name", None) or getattr(user, "username", None) or getattr(user, "first_name", None) or "Unknown"
++        text = getattr(message, "text", None) or getattr(message, "caption", None) or ""
++        return f"[{name}] {text}"
++
++    def _should_capture_channel_context(self, message: Message) -> bool:
++        if not self._telegram_history_backfill_enabled():
++            return False
++        if self._is_personal_workspace_chat(message):
++            return False
++        if not self._is_group_chat(message):
++            return False
++        if not self._telegram_require_mention():
++            return False
++        return not self._should_process_message(message)
++
++    def _cache_group_context_message(self, message: Message) -> None:
++        if not self._telegram_history_backfill_enabled() or self._is_personal_workspace_chat(message):
++            return
++        if not self._is_group_chat(message):
++            return
++        key = self._group_context_key(message)
++        cache = getattr(self, "_recent_group_context", None)
++        if cache is None:
++            cache = {}
++            self._recent_group_context = cache
++        bucket = list(cache.get(key, []))
++        bucket.append(self._format_group_context_message(message))
++        cache[key] = bucket[-self._telegram_context_cache_limit():]
++
++    def _fetch_cached_channel_context(self, message: Message) -> str:
++        lines = list(getattr(self, "_recent_group_context", {}).get(self._group_context_key(message), []))
++        if not lines:
++            return ""
++        limit = self._telegram_history_backfill_limit()
++        lines = lines[-limit:] if limit else []
++        return "[Recent visible group messages]\n" + "\n".join(lines) if lines else ""
++
++    def _fetch_recent_channel_context(self, message: Message) -> str:
++        if not self._telegram_history_backfill_enabled():
++            return ""
++        lines = []
++        seen = set()
++        current = getattr(message, "reply_to_message", None)
++        trigger_thread = getattr(message, "message_thread_id", None)
++        trigger_chat = str(getattr(getattr(message, "chat", None), "id", ""))
++        while current is not None and len(lines) < self._telegram_history_backfill_limit():
++            cur_chat = str(getattr(getattr(current, "chat", None), "id", trigger_chat))
++            cur_thread = getattr(current, "message_thread_id", None)
++            if cur_chat != trigger_chat or cur_thread != trigger_thread:
++                return ""
++            mid = getattr(current, "message_id", None)
++            if mid in seen:
++                break
++            seen.add(mid)
++            lines.append(self._format_group_context_message(current))
++            current = getattr(current, "reply_to_message", None)
++        if not lines:
++            return self._fetch_cached_channel_context(message)
++        return "[Recent replied context]\n" + "\n".join(reversed(lines))
++
++    def _build_channel_context_for_trigger(self, message: Message) -> str:
++        return self._fetch_recent_channel_context(message)
++
+     def _should_process_message(self, message: Message, *, is_command: bool = False) -> bool:
+         """Apply Telegram group trigger rules.
+ 
+@@ -5153,6 +5364,9 @@ class TelegramAdapter(BasePlatformAdapter):
+ 
+         chat_id_str = str(getattr(getattr(message, "chat", None), "id", ""))
+ 
++        if self._is_personal_workspace_chat(message):
++            return self._personal_workspace_sender_authorized(message)
++
+         if self._telegram_exclusive_bot_mentions() and self._explicit_bot_mentions_exclude_self(message):
+             return False
+ 
+@@ -5227,6 +5441,8 @@ class TelegramAdapter(BasePlatformAdapter):
+         if not msg or not msg.text:
+             return
+         if not self._should_process_message(msg):
++            if self._should_capture_channel_context(msg):
++                self._cache_group_context_message(msg)
+             if self._should_observe_unmentioned_group_message(msg):
+                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
+             return
+@@ -5937,6 +6153,12 @@ class TelegramAdapter(BasePlatformAdapter):
+         # rather than dropping into the bot's main channel (#22423).
+         if chat_type == "group" and thread_id_str is None and is_forum_group:
+             thread_id_str = self._GENERAL_TOPIC_THREAD_ID
++        if chat_type == "group" and self._is_personal_workspace_chat(message) and self._personal_workspace_sender_authorized(message) and user:
++            chat_type = "personal_group"
++            group_thread = f"group:{chat.id}"
++            if thread_id_raw is not None:
++                group_thread = f"{group_thread}:{thread_id_raw}"
++            thread_id_str = group_thread
+         chat_topic = None
+         topic_skill = None
+ 
+@@ -5969,7 +6191,7 @@ class TelegramAdapter(BasePlatformAdapter):
+ 
+         # Build source
+         source = self.build_source(
+-            chat_id=str(chat.id),
++            chat_id=(str(user.id) if chat_type == "personal_group" and user else str(chat.id)),
+             chat_name=chat.title or (chat.full_name if hasattr(chat, "full_name") else None),
+             chat_type=chat_type,
+             user_id=(
+@@ -6034,6 +6256,7 @@ class TelegramAdapter(BasePlatformAdapter):
+             reply_to_text=reply_to_text,
+             auto_skill=topic_skill,
+             channel_prompt=_channel_prompt,
++            channel_context=(self._build_channel_context_for_trigger(message) if self._telegram_history_backfill_enabled() else None),
+             timestamp=message.date,
+         )
+ 
+diff --git a/hermes_cli/web_server.py b/hermes_cli/web_server.py
+index 2a0c27996..892b180ae 100644
+--- a/hermes_cli/web_server.py
++++ b/hermes_cli/web_server.py
+@@ -1728,8 +1728,34 @@ async def get_profiles_sessions(
+         except Exception:
+             _log.exception("GET /api/profiles/sessions: list_profiles failed")
+             targets = []
+-        if not targets:
+-            targets.append(("default", profiles_mod.get_profile_dir("default")))
++        try:
++            from hermes_constants import get_hermes_home as _current_hermes_home
++            current_default_home = Path(_current_hermes_home())
++            if not any(name == "default" and Path(home) == current_default_home for name, home in targets):
++                targets = [(name, home) for name, home in targets if not (name == "default" and Path(home) != current_default_home)]
++                targets.insert(0, ("default", current_default_home))
++        except Exception:
++            pass
++        try:
++            import hermes_state as _hermes_state_mod
++            default_db_path = Path(getattr(_hermes_state_mod, "DEFAULT_DB_PATH"))
++            if default_db_path.name == "state.db":
++                default_db_home = default_db_path.parent
++                if not any(name == "default" and Path(home) == default_db_home for name, home in targets):
++                    targets.insert(0, ("default", default_db_home))
++        except Exception:
++            pass
++        try:
++            current_db = SessionDB()
++            try:
++                session_db_home = Path(current_db.db_path).parent
++            finally:
++                current_db.close()
++            if not any(name == "default" and Path(home) == session_db_home for name, home in targets):
++                targets.insert(0, ("default", session_db_home))
++        except Exception:
++            if not targets:
++                targets.append(("default", profiles_mod.get_profile_dir("default")))
+ 
+     min_message_count = max(0, min_messages)
+     archived_only = archived == "only"
+diff --git a/hermes_state.py b/hermes_state.py
+index 77db38e72..7b9c28878 100644
+--- a/hermes_state.py
++++ b/hermes_state.py
+@@ -415,17 +415,26 @@ class SessionDB:
+     # Attempt a PASSIVE WAL checkpoint every N successful writes.
+     _CHECKPOINT_EVERY_N_WRITES = 50
+ 
+-    def __init__(self, db_path: Path = None):
++    def __init__(self, db_path: Path = None, read_only: bool = False):
+         self.db_path = db_path or DEFAULT_DB_PATH
+-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
++        if not read_only:
++            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+ 
+         self._lock = threading.Lock()
++        self._write_lock = threading.RLock()
++        self._local = threading.local()
++        self._write_depth = 0
+         self._write_count = 0
+         self._fts_enabled = False
+         self._fts_unavailable_warned = False
+         try:
++            db_uri = str(self.db_path)
++            connect_kwargs = {}
++            if read_only:
++                db_uri = f"file:{self.db_path}?mode=ro"
++                connect_kwargs["uri"] = True
+             self._conn = sqlite3.connect(
+-                str(self.db_path),
++                db_uri,
+                 check_same_thread=False,
+                 # Short timeout — application-level retry with random jitter
+                 # handles contention instead of sitting in SQLite's internal
+@@ -435,6 +444,7 @@ class SessionDB:
+                 # explicit BEGIN IMMEDIATE.  None = we manage transactions
+                 # ourselves.
+                 isolation_level=None,
++                **connect_kwargs,
+             )
+             self._conn.row_factory = sqlite3.Row
+             apply_wal_with_fallback(self._conn, db_label="state.db")
+@@ -3199,20 +3209,103 @@ class SessionDB:
+             )
+             return [dict(row) for row in cursor.fetchall()]
+ 
++
++    def search_sessions_by_id(
++        self,
++        query: str,
++        limit: int = 20,
++        include_archived: bool = False,
++    ) -> List[Dict[str, Any]]:
++        """Search sessions by id for dashboard search.
++
++        Matches exact id, prefix, and substring case-insensitively. Compression
++        roots are projected to their live tip, mirroring list_sessions_rich's
++        user-facing behavior so an old compressed segment opens the current
++        continuation.
++        """
++        needle = (query or "").strip()
++        if not needle:
++            return []
++        safe_limit = max(1, min(int(limit or 20), 500))
++        where = ["LOWER(id) LIKE LOWER(?)"]
++        params: List[Any] = [f"%{needle}%"]
++        if not include_archived:
++            where.append("archived = 0")
++        where_sql = " AND ".join(where)
++        sql = f"""
++            SELECT s.*,
++                COALESCE(
++                    (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
++                     FROM messages m
++                     WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
++                     ORDER BY m.timestamp, m.id LIMIT 1),
++                    ''
++                ) AS preview,
++                CASE
++                    WHEN LOWER(s.id) = LOWER(?) THEN 0
++                    WHEN LOWER(s.id) LIKE LOWER(?) THEN 1
++                    ELSE 2
++                END AS rank
++            FROM sessions s
++            WHERE {where_sql}
++            ORDER BY rank ASC, s.started_at DESC
++            LIMIT ?
++        """
++        params2 = [needle, f"{needle}%"] + params + [safe_limit * 3]
++        with self._lock:
++            rows = [dict(r) for r in self._conn.execute(sql, params2).fetchall()]
++
++        results: List[Dict[str, Any]] = []
++        seen: set[str] = set()
++        for row in rows:
++            sid = row.get("id")
++            tip = self.get_compression_tip(sid) if sid else sid
++            out = row
++            if tip and tip != sid:
++                tip_row = self.get_session(tip)
++                if tip_row:
++                    out = dict(tip_row)
++                    out["preview"] = row.get("preview", "")
++                    out["_lineage_root_id"] = sid
++            else:
++                out["_lineage_root_id"] = sid
++            out_id = out.get("id")
++            if out_id in seen:
++                continue
++            seen.add(out_id)
++            results.append(out)
++            if len(results) >= safe_limit:
++                break
++        return results
++
+     def session_count(
+         self,
+         source: str = None,
++        exclude_sources: List[str] = None,
+         min_message_count: int = 0,
+         include_archived: bool = False,
+         archived_only: bool = False,
++        exclude_children: bool = False,
+     ) -> int:
+-        """Count sessions, optionally filtered by source."""
++        """Count sessions, optionally filtered by source/excluded sources."""
+         where_clauses = []
+         params = []
+ 
++        if exclude_children:
++            where_clauses.append(
++                "(parent_session_id IS NULL"
++                " OR EXISTS (SELECT 1 FROM sessions p"
++                "            WHERE p.id = sessions.parent_session_id"
++                "            AND p.end_reason = 'branched'"
++                "            AND sessions.started_at >= p.ended_at))"
++            )
+         if source:
+             where_clauses.append("source = ?")
+             params.append(source)
++        if exclude_sources:
++            placeholders = ",".join("?" for _ in exclude_sources)
++            where_clauses.append(f"source NOT IN ({placeholders})")
++            params.extend(exclude_sources)
+         if min_message_count > 0:
+             where_clauses.append("message_count >= ?")
+             params.append(min_message_count)
+diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
+index bfd1c916f..4ec33d818 100644
+--- a/tools/cronjob_tools.py
++++ b/tools/cronjob_tools.py
+@@ -140,24 +140,25 @@ def _scan_cron_prompt(prompt: str) -> str:
+     return ""
+ 
+ 
+-def _scan_cron_skill_assembled(prompt: str) -> str:
++def _scan_cron_skill_assembled(prompt: str) -> tuple[str, str]:
+     """Scan a runtime-assembled cron prompt that includes skill content.
+ 
+     Skill markdown commonly documents attack-shaped shell snippets in prose.
+-    Runtime scanning therefore keeps the unambiguous prompt-injection and
+-    invisible-unicode checks, but intentionally drops command-shape exfil
++    Runtime scanning therefore keeps unambiguous prompt-injection checks,
++    sanitizes invisible unicode, and intentionally drops command-shape exfil
+     patterns; skills are vetted separately at install/edit time.
+     """
++    cleaned = prompt
+     prompt_for_invisible_scan = _strip_legitimate_emoji_zwj(prompt)
+     for char in _CRON_INVISIBLE_CHARS:
+         if char in prompt_for_invisible_scan:
+-            return f"Blocked: prompt contains invisible unicode U+{ord(char):04X} (possible injection)."
++            cleaned = cleaned.replace(char, "")
+     for pattern, pid in _CRON_THREAT_PATTERNS:
+         if pid in {"read_secrets", "ssh_backdoor", "sudoers_mod", "destructive_root_rm"}:
+             continue
+-        if re.search(pattern, prompt, re.IGNORECASE):
+-            return f"Blocked: prompt matches threat pattern '{pid}'. Cron prompts must not contain injection payloads."
+-    return ""
++        if re.search(pattern, cleaned, re.IGNORECASE):
++            return cleaned, f"Blocked: prompt matches threat pattern '{pid}'. Cron prompts must not contain injection payloads."
++    return cleaned, ""
+ 
+ 
+ def _origin_from_env() -> Optional[Dict[str, str]]:
+-- 
+2.39.5
+
