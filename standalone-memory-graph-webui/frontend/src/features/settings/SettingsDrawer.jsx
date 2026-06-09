@@ -66,6 +66,15 @@ export default function SettingsDrawer() {
     }
   };
 
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') setIsOpen(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   const tabs = [
@@ -76,20 +85,26 @@ export default function SettingsDrawer() {
 
   return (
     <>
-      <div
-        className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 animate-in fade-in duration-200"
+      <div className="fixed inset-0 z-40 bg-black/55 backdrop-blur-sm motion-safe:animate-in motion-safe:fade-in motion-safe:duration-200"
         onClick={() => setIsOpen(false)}
       />
-      <div className="fixed inset-y-0 right-0 w-[600px] bg-slate-950 border-l border-slate-800 shadow-2xl z-50 flex flex-col animate-in slide-in-from-right duration-300">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-title"
+        className="fixed inset-y-0 right-0 z-50 flex w-full max-w-[640px] flex-col border-l border-slate-800 bg-slate-950 shadow-2xl motion-safe:animate-in motion-safe:slide-in-from-right motion-safe:duration-300 sm:w-[min(92vw,640px)]"
+      >
         <div className="border-b border-slate-800/80 bg-slate-900/40 px-6 pt-6 backdrop-blur-md flex-shrink-0">
           <div className="flex items-start justify-between mb-6">
             <div>
-              <h1 className="text-2xl font-bold text-slate-100">{t('settings.title')}</h1>
+              <h1 id="settings-title" className="text-2xl font-bold text-slate-100">{t('settings.title')}</h1>
               <p className="text-sm text-slate-400 mt-1">
                 {t('settings.description')}
               </p>
             </div>
             <button
+              type="button"
+              aria-label="关闭设置"
               onClick={() => setIsOpen(false)}
               className="p-2 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded-lg transition-colors"
             >
@@ -97,13 +112,18 @@ export default function SettingsDrawer() {
             </button>
           </div>
 
-          <div className="flex gap-6">
+          <div className="flex gap-6 overflow-x-auto" role="tablist" aria-label="设置分类">
             {tabs.map(tab => {
               const Icon = tab.icon;
               const isActive = activeTab === tab.id;
               return (
                 <button
                   key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={isActive}
+                  aria-controls={`settings-panel-${tab.id}`}
+                  id={`settings-tab-${tab.id}`}
                   onClick={() => setActiveTab(tab.id)}
                   className={`flex items-center gap-2 pb-3 text-sm font-medium border-b-2 transition-all ${
                     isActive
@@ -127,7 +147,12 @@ export default function SettingsDrawer() {
           ) : (
             <>
               {activeTab === 'general' && (
-                <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-200">
+                <div
+                  id="settings-panel-general"
+                  role="tabpanel"
+                  aria-labelledby="settings-tab-general"
+                  className="space-y-6 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 motion-safe:duration-200"
+                >
                   <Section icon={Server} title={t('settings.server_config')}>
                     <ServerSection
                       settings={settings}
@@ -144,7 +169,12 @@ export default function SettingsDrawer() {
               )}
 
               {activeTab === 'database' && (
-                <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-200">
+                <div
+                  id="settings-panel-database"
+                  role="tabpanel"
+                  aria-labelledby="settings-tab-database"
+                  className="space-y-6 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 motion-safe:duration-200"
+                >
                   <Section icon={Database} title={t('settings.database_connection')}>
                     <DatabaseSection
                       settings={settings}
@@ -157,7 +187,12 @@ export default function SettingsDrawer() {
               )}
 
               {activeTab === 'memory' && (
-                <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-200">
+                <div
+                  id="settings-panel-memory"
+                  role="tabpanel"
+                  aria-labelledby="settings-tab-memory"
+                  className="space-y-6 motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-2 motion-safe:duration-200"
+                >
                   <Section icon={List} title={t('settings.boot_uris')}>
                     <BootUrisSection />
                   </Section>

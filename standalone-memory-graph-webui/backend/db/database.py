@@ -11,9 +11,10 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy import text, select
 from sqlalchemy.pool import NullPool
 
-from .models import Base
+from .models import Base, Node, ROOT_NODE_UUID
 
 
 DEFAULT_DB_URL = "postgresql+asyncpg://postgres:postgres@127.0.0.1/hindsight"
@@ -101,7 +102,7 @@ class DatabaseManager:
                 yield new_session
 
     async def init_db(self):
-        """Create tables if they don't exist."""
+        """Create tables if they don't exist and bootstrap the global root node."""
         from sqlalchemy import inspect as sa_inspect
 
         def check_initialized(connection):
@@ -111,6 +112,16 @@ class DatabaseManager:
             is_initialized = await conn.run_sync(check_initialized)
             if not is_initialized:
                 await conn.run_sync(Base.metadata.create_all)
+
+        async with self.async_session() as session:
+            await session.execute(
+                text("SELECT set_app_context(:namespace, :is_admin)"),
+                {"namespace": "", "is_admin": True},
+            )
+            result = await session.execute(select(Node).where(Node.uuid == ROOT_NODE_UUID))
+            if result.scalar_one_or_none() is None:
+                session.add(Node(uuid=ROOT_NODE_UUID))
+                await session.commit()
 
     async def close(self):
         """Close the database connection."""

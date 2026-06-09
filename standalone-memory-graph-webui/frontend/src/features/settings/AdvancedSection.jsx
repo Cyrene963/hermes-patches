@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Save, AlertTriangle, RefreshCw, Copy, Eye, EyeOff } from 'lucide-react';
+import { useToast } from '../../components/ui';
 
 export default function AdvancedSection({ settings, lockedFields = [], onSave }) {
+  const toast = useToast();
   const isLocked = (field) => lockedFields.includes(field);
   const [host, setHost] = useState('127.0.0.1');
   const [token, setToken] = useState('');
@@ -24,8 +26,9 @@ export default function AdvancedSection({ settings, lockedFields = [], onSave })
       if (token.trim()) updates.api_token = token.trim();
       await onSave(updates);
       setDirty(false);
+      toast.success('重启服务进程后生效。', { title: '高级设置已保存' });
     } catch (e) {
-      alert('Failed: ' + (e.response?.data?.detail || e.message));
+      toast.error(e.response?.data?.detail || e.message, { title: '保存高级设置失败' });
     } finally {
       setSaving(false);
     }
@@ -88,6 +91,7 @@ export default function AdvancedSection({ settings, lockedFields = [], onSave })
                   const generated = Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
                   setToken(generated);
                   setDirty(true);
+                  toast.success('已生成 256-bit API token，请保存设置后重启服务。', { title: 'Token 已生成' });
                 }}
                 className="px-2.5 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-xs flex items-center gap-1.5 transition-colors flex-shrink-0"
                 title="Generate random token"
@@ -97,7 +101,14 @@ export default function AdvancedSection({ settings, lockedFields = [], onSave })
               {token && (
                 <button
                   type="button"
-                  onClick={() => { navigator.clipboard.writeText(token); }}
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(token);
+                      toast.success('Token 已复制到剪贴板。', { title: '复制成功' });
+                    } catch (err) {
+                      toast.error(err.message, { title: '复制失败' });
+                    }
+                  }}
                   className="px-2.5 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-xs flex items-center gap-1.5 transition-colors flex-shrink-0"
                   title="Copy token"
                 >
@@ -106,7 +117,7 @@ export default function AdvancedSection({ settings, lockedFields = [], onSave })
               )}
             </div>
             <p className="text-[11px] text-slate-500">
-              Clients must send <code className="text-slate-400">Authorization: Bearer &lt;token&gt;</code> to access the API.
+              Remote clients must send a bearer authorization header with the configured API token.
             </p>
             {!settings?.api_token && !token.trim() && (
               <p className="text-[11px] text-amber-400 flex items-center gap-1">

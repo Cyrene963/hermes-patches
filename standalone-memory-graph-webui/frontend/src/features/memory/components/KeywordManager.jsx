@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Tag, X, Save, Plus } from 'lucide-react';
 import { api } from '../../../lib/api';
+import { useToast } from '../../../components/ui';
 
 const KeywordManager = ({ keywords, nodeUuid, onUpdate }) => {
+  const toast = useToast();
   const [adding, setAdding] = useState(false);
   const [newKeyword, setNewKeyword] = useState('');
   const inputRef = useRef(null);
@@ -18,9 +20,10 @@ const KeywordManager = ({ keywords, nodeUuid, onUpdate }) => {
       await api.post('/browse/glossary', { keyword: kw, node_uuid: nodeUuid });
       setNewKeyword('');
       setAdding(false);
+      toast.success(kw, { title: '关键词已绑定' });
       onUpdate();
     } catch (err) {
-      alert('Failed to add keyword: ' + (err.response?.data?.detail || err.message));
+      toast.error(err.response?.data?.detail || err.message, { title: '添加关键词失败' });
     }
   };
 
@@ -28,9 +31,10 @@ const KeywordManager = ({ keywords, nodeUuid, onUpdate }) => {
     if (!nodeUuid) return;
     try {
       await api.delete('/browse/glossary', { data: { keyword: kw, node_uuid: nodeUuid } });
+      toast.success(kw, { title: '关键词已移除' });
       onUpdate();
     } catch (err) {
-      alert('Failed to remove keyword: ' + (err.response?.data?.detail || err.message));
+      toast.error(err.response?.data?.detail || err.message, { title: '移除关键词失败' });
     }
   };
 

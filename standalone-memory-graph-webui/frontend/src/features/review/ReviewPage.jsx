@@ -4,6 +4,7 @@ import { getGroups, getGroupDiff, rollbackGroup, approveGroup, clearAll, getProp
 import SnapshotList from '../../components/SnapshotList';
 import DiffViewer from '../../components/DiffViewer';
 import { AnimatedButton, AnimatedBadge, EmptyState } from '../../components/AnimatedUI';
+import { useConfirm, useToast } from '../../components/ui';
 import { useI18n } from '../../lib/i18n';
 import {
   Activity,
@@ -22,6 +23,8 @@ import clsx from 'clsx';
 
 function ReviewPage() {
   const { t } = useI18n();
+  const confirm = useConfirm();
+  const toast = useToast();
   const [changes, setChanges] = useState([]);
   const [selectedChange, setSelectedChange] = useState(null);
   const [diffData, setDiffData] = useState(null);
@@ -112,7 +115,14 @@ function ReviewPage() {
 
   const handleRollback = async () => {
     if (!selectedChange) return;
-    if (!confirm(t('review.confirm_reject', { uri: selectedChange.display_uri }))) return;
+    const accepted = await confirm({
+      title: '拒绝这组记忆变更？',
+      description: '系统会回滚当前快照组，并保留后端能够提供的审计记录。',
+      details: [selectedChange.display_uri, `变更类型：${selectedChange.action || 'unknown'}`],
+      confirmLabel: '拒绝并回滚',
+      variant: 'danger',
+    });
+    if (!accepted) return;
     try {
       const res = await rollbackGroup(selectedChange.node_uuid);
       if (res && res.success === false) {
@@ -122,9 +132,10 @@ function ReviewPage() {
       if (list.find(c => c.node_uuid === selectedChange.node_uuid)) {
         await loadDiff(selectedChange.node_uuid);
       }
+      toast.success('已回滚这组记忆变更。', { title: '回滚完成' });
     } catch (err) {
       const errorMsg = err.response?.data?.detail || err.message;
-      alert(t('review.rejection_failed') + errorMsg);
+      toast.error(errorMsg, { title: t('review.rejection_failed') });
     }
   };
 
@@ -133,26 +144,46 @@ function ReviewPage() {
     try {
       await approveGroup(selectedChange.node_uuid);
       await loadChanges();
+      toast.success(selectedChange.display_uri, { title: '已接受记忆变更' });
     } catch (err) {
-      alert(t('review.integration_failed') + err.message);
+      toast.error(err.response?.data?.detail || err.message, { title: t('review.integration_failed') });
     }
   };
 
   const handleClearAll = async () => {
-    if (!confirm(t('review.confirm_integrate_all'))) return;
+    const accepted = await confirm({
+      title: '接受当前所有待审图谱变更？',
+      description: '这会把当前列表里的图谱快照全部标记为已处理。请只在你已经确认队列质量时使用。',
+      details: [`待处理数量：${changes.length}`],
+      confirmLabel: '全部接受',
+      variant: 'default',
+      requireText: changes.length >= 10 ? 'APPROVE' : '',
+    });
+    if (!accepted) return;
     try {
       await clearAll();
       setChanges([]);
       setSelectedChange(null);
       setDiffData(null);
+      toast.success('图谱变更队列已清空。', { title: '全部接受完成' });
     } catch (err) {
-      alert(t('review.mass_integration_failed') + err.message);
+      toast.error(err.response?.data?.detail || err.message, { title: t('review.mass_integration_failed') });
     }
   };
 
   const handleRejectProposal = async () => {
     if (!selectedProposal || proposalActionLoading) return;
-    if (!confirm(t('review.confirm_reject_proposal', { id: selectedProposal.proposal_id }))) return;
+    const accepted = await confirm({
+      title: '拒绝这条候选记忆？',
+      description: '候选会留在审计链路中标记为 rejected，不会写入 Memory Graph。',
+      details: [
+        `Proposal #${selectedProposal.proposal_id}`,
+        selectedProposal.human_title || selectedProposal.reason || 'No readable summary provided.',
+      ],
+      confirmLabel: '拒绝候选',
+      variant: 'danger',
+    });
+    if (!accepted) return;
     setProposalActionLoading(true);
     setProposalActionError(null);
     try {
@@ -160,9 +191,12 @@ function ReviewPage() {
       const data = await loadProposals();
       const proposals = data?.inbox?.proposals || [];
       setSelectedProposal(proposals.length > 0 ? proposals[0] : null);
+      toast.success(`#${selectedProposal.proposal_id}`, { title: '已拒绝候选记忆' });
     } catch (err) {
       const detail = err.response?.data?.detail;
-      setProposalActionError(typeof detail === 'string' ? detail : JSON.stringify(detail || err.message));
+      const message = typeof detail === 'string' ? detail : JSON.stringify(detail || err.message);
+      setProposalActionError(message);
+      toast.error(message, { title: '拒绝候选失败' });
     } finally {
       setProposalActionLoading(false);
     }
@@ -172,9 +206,20 @@ function ReviewPage() {
     if (!selectedProposal || proposalActionLoading) return;
     if (selectedProposal.target_store !== 'memory_graph' || selectedProposal.review_stage !== 'ready_memory') {
       setProposalActionError(t('review.only_ready_memory_approvable'));
+      toast.warning(t('review.only_ready_memory_approvable'), { title: '无法批准' });
       return;
     }
-    if (!confirm(t('review.confirm_approve_proposal', { id: selectedProposal.proposal_id }))) return;
+    const accepted = await confirm({
+      title: '批准候选记忆写入 Memory Graph？',
+      description: '批准后系统会执行候选变更，并刷新图谱审核队列。',
+      details: [
+        `Proposal #${selectedProposal.proposal_id}`,
+        selectedProposal.human_title || selectedProposal.reason || 'No readable summary provided.',
+      ],
+      confirmLabel: '批准写入',
+      variant: 'default',
+    });
+    if (!accepted) return;
     setProposalActionLoading(true);
     setProposalActionError(null);
     try {
@@ -184,9 +229,12 @@ function ReviewPage() {
       setSelectedProposal(proposals.length > 0 ? proposals[0] : null);
       await loadChanges();
       setActiveQueue('graph');
+      toast.success(`#${selectedProposal.proposal_id}`, { title: '候选记忆已批准' });
     } catch (err) {
       const detail = err.response?.data?.detail;
-      setProposalActionError(typeof detail === 'string' ? detail : JSON.stringify(detail || err.message));
+      const message = typeof detail === 'string' ? detail : JSON.stringify(detail || err.message);
+      setProposalActionError(message);
+      toast.error(message, { title: '批准候选失败' });
     } finally {
       setProposalActionLoading(false);
     }

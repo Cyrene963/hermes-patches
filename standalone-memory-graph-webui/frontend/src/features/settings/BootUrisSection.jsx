@@ -6,8 +6,11 @@ import clsx from 'clsx';
 import {
   getAllBootUris, setBootUrisForNs, deleteBootUrisForNs, getNamespaces
 } from '../../lib/api';
+import { useConfirm, useToast } from '../../components/ui';
 
 function NamespaceBootPanel({ namespace, uris: initialUris, isDefault, onDelete, onSaved }) {
+  const confirm = useConfirm();
+  const toast = useToast();
   const [uris, setUris] = useState(initialUris);
   const [newUri, setNewUri] = useState('');
   const [saving, setSaving] = useState(false);
@@ -55,22 +58,31 @@ function NamespaceBootPanel({ namespace, uris: initialUris, isDefault, onDelete,
     try {
       await setBootUrisForNs(namespace, uris);
       setDirty(false);
+      toast.success(`${uris.length} 条启动 URI 已保存。`, { title: isDefault ? '默认启动上下文已更新' : `${namespace} 已更新` });
       onSaved?.();
     } catch (e) {
-      alert('Failed to save: ' + (e.response?.data?.detail || e.message));
+      toast.error(e.response?.data?.detail || e.message, { title: '保存启动上下文失败' });
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async () => {
-    if (!confirm(`Remove override for "${namespace}"? This namespace will fall back to the default boot URIs.`)) return;
+    const accepted = await confirm({
+      title: `移除 ${namespace} 的启动上下文覆盖？`,
+      description: '移除后这个 namespace 会回落到默认 boot URI 列表。',
+      details: [`当前覆盖 URI 数量：${uris.length}`],
+      confirmLabel: '移除覆盖',
+      variant: 'danger',
+    });
+    if (!accepted) return;
     setDeleting(true);
     try {
       await deleteBootUrisForNs(namespace);
+      toast.success(`${namespace} 会使用默认启动上下文。`, { title: '覆盖已移除' });
       onDelete?.(namespace);
     } catch (e) {
-      alert('Failed to delete: ' + (e.response?.data?.detail || e.message));
+      toast.error(e.response?.data?.detail || e.message, { title: '删除启动上下文失败' });
     } finally {
       setDeleting(false);
     }

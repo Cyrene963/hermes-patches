@@ -8,6 +8,7 @@ const MemoryBrowser = React.lazy(() => import('./features/memory/MemoryBrowser')
 const MaintenancePage = React.lazy(() => import('./features/maintenance/MaintenancePage'));
 const SettingsDrawer = React.lazy(() => import('./features/settings/SettingsDrawer'));
 import LoginForm from './components/LoginForm';
+import { AppProviders } from './components/ui';
 import { AUTH_ERROR_EVENT, getNamespaces, getMe, logout } from './lib/api';
 import { I18nProvider, LanguageToggle, useI18n } from './lib/i18n';
 
@@ -207,7 +208,9 @@ function App() {
 
   return (
     <I18nProvider>
-      <AppInner />
+      <AppProviders>
+        <AppInner />
+      </AppProviders>
     </I18nProvider>
   );
 }

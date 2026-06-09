@@ -26,9 +26,12 @@ import VisibilityBadge from './components/VisibilityBadge';
 import DomainNode from './components/MemorySidebar';
 import Breadcrumb from './components/Breadcrumb';
 import NodeGridCard from './components/NodeGridCard';
+import { useConfirm, useToast } from '../../components/ui';
 
 export default function MemoryBrowser() {
   const { t } = useI18n();
+  const confirm = useConfirm();
+  const toast = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const domain = searchParams.get('domain') || 'core';
   const path = searchParams.get('path') || '';
@@ -135,8 +138,9 @@ export default function MemoryBrowser() {
       await api.put('/browse/node', payload, { params: { domain, path } });
       await refreshData();
       setEditing(false);
+      toast.success(currentUri, { title: '记忆已保存' });
     } catch (err) {
-      alert('Save failed: ' + err.message);
+      toast.error(err.response?.data?.detail || err.message, { title: '保存记忆失败' });
     } finally {
       setSaving(false);
     }
@@ -147,21 +151,33 @@ export default function MemoryBrowser() {
     try {
       const result = await toggleSettingsBootUri(uri, !isCurrentlyInBoot);
       setBootUris(result.uris);
+      toast.success(isCurrentlyInBoot ? '已从启动上下文移除。' : '已加入启动上下文。', { title: uri });
     } catch (err) {
-      console.error('Failed to toggle boot URI:', err);
+      toast.error(err.response?.data?.detail || err.message, { title: '启动上下文更新失败' });
     }
   };
 
   const handleDelete = async () => {
     if (!deleteTarget) return;
+    const uri = `${deleteTarget.domain}://${deleteTarget.path || 'root'}`;
+    const accepted = await confirm({
+      title: '删除这条记忆节点？',
+      description: '这会删除该节点以及后端定义的相关路径关系。删除后请通过审计/备份链路恢复。',
+      details: [uri],
+      confirmLabel: '删除节点',
+      variant: 'danger',
+      requireText: 'DELETE',
+    });
+    if (!accepted) return;
     setDeleting(true);
     try {
       await deleteNode(deleteTarget.domain, deleteTarget.path);
       setDeleteTarget(null);
       const parentPath = deleteTarget.path.includes('/') ? deleteTarget.path.substring(0, deleteTarget.path.lastIndexOf('/')) : '';
       navigateTo(parentPath, deleteTarget.domain);
+      toast.success(uri, { title: '记忆节点已删除' });
     } catch (err) {
-      alert('Delete failed: ' + (err.response?.data?.detail || err.message));
+      toast.error(err.response?.data?.detail || err.message, { title: '删除记忆失败' });
     } finally {
       setDeleting(false);
     }

@@ -5,11 +5,14 @@ import {
 } from 'lucide-react';
 import { format } from 'date-fns';
 import DiffViewer from '../../components/DiffViewer';
+import { Button, Panel, TextInput, useConfirm, useToast } from '../../components/ui';
 import { api } from '../../lib/api';
 import { useI18n } from '../../lib/i18n';
 
 export default function MaintenancePage() {
   const { t } = useI18n();
+  const confirm = useConfirm();
+  const toast = useToast();
   const [orphans, setOrphans] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -25,6 +28,7 @@ export default function MaintenancePage() {
 
   const [logStats, setLogStats] = useState({ count: 0, oldest: null });
   const [clearingLogs, setClearingLogs] = useState(false);
+  const [keepLogDays, setKeepLogDays] = useState('30');
 
   useEffect(() => {
     loadOrphans();
@@ -41,18 +45,32 @@ export default function MaintenancePage() {
   };
 
   const handleClearLogs = async () => {
-    const daysStr = window.prompt("Keep logs for how many days? (Enter 0 to clear all logs)", "30");
-    if (daysStr === null) return;
-    const days = parseInt(daysStr, 10);
-    if (isNaN(days) || days < 0) return;
+    const days = parseInt(keepLogDays, 10);
+    if (Number.isNaN(days) || days < 0 || days > 3650) {
+      toast.warning('请输入 0 到 3650 之间的保留天数。', { title: '日志清理参数无效' });
+      return;
+    }
+
+    const accepted = await confirm({
+      title: days === 0 ? '清空全部访问日志？' : `清理 ${days} 天前的访问日志？`,
+      description: '访问日志用于追踪 Memory Graph 的读取路径。清理后无法通过 WebUI 恢复。',
+      details: [
+        `当前日志数量：${logStats.count}`,
+        days === 0 ? '将删除全部日志。' : `将保留最近 ${days} 天的日志。`,
+      ],
+      confirmLabel: days === 0 ? '清空全部日志' : '清理旧日志',
+      variant: days === 0 ? 'danger' : 'default',
+      requireText: days === 0 ? 'DELETE' : '',
+    });
+    if (!accepted) return;
 
     setClearingLogs(true);
     try {
       const res = await api.delete('/maintenance/access-logs', { data: { keep_days: days } });
-      alert(`Cleared ${res.data.deleted} log entries.`);
+      toast.success(`已清理 ${res.data.deleted} 条访问日志。`, { title: '清理完成' });
       loadStats();
     } catch (err) {
-      alert("Failed to clear logs: " + (err.response?.data?.detail || err.message));
+      toast.error(err.response?.data?.detail || err.message, { title: '清理访问日志失败' });
     } finally {
       setClearingLogs(false);
     }
@@ -102,11 +120,22 @@ export default function MaintenancePage() {
   const handleBatchDelete = async () => {
     const count = selectedIds.size;
     if (count === 0) return;
-    if (!confirm(`Permanently delete ${count} memories? This cannot be undone.`)) return;
+    const accepted = await confirm({
+      title: `永久删除 ${count} 条孤儿/废弃记忆？`,
+      description: '这些记录通常已经失去可达路径或被新版替代。删除后无法通过 WebUI 撤回。',
+      details: [
+        '只会删除当前选中的维护项。',
+        '删除失败的 ID 会保留选中，方便你重试或排查。',
+      ],
+      confirmLabel: `删除 ${count} 条`,
+      variant: 'danger',
+      requireText: count >= 10 ? 'DELETE' : '',
+    });
+    if (!accepted) return;
 
     setBatchDeleting(true);
     const toDelete = [...selectedIds];
-    let failed = [];
+    const failed = [];
 
     for (const id of toDelete) {
       try {
@@ -116,7 +145,6 @@ export default function MaintenancePage() {
       }
     }
 
-    // Remove successfully deleted from list
     const failedSet = new Set(failed);
     setOrphans(prev => prev.filter(item => !toDelete.includes(item.id) || failedSet.has(item.id)));
     setSelectedIds(new Set(failed));
@@ -126,7 +154,9 @@ export default function MaintenancePage() {
     }
 
     if (failed.length > 0) {
-      alert(`${failed.length} of ${count} deletions failed. Failed IDs: ${failed.join(', ')}`);
+      toast.warning(`${failed.length}/${count} 条删除失败：${failed.join(', ')}`, { title: '部分删除失败', duration: 7000 });
+    } else {
+      toast.success(`已删除 ${count} 条维护项。`, { title: '删除完成' });
     }
 
     setBatchDeleting(false);
@@ -344,22 +374,38 @@ export default function MaintenancePage() {
             <div className="text-3xl font-mono text-rose-400">{orphaned.length}</div>
             <div className="text-slate-500 text-[11px] mt-1">{t('maintenance.orphaned_desc')}</div>
           </div>
-          <div className="bg-slate-800/40 rounded-lg p-4 border border-slate-700/40 mt-6 relative">
-            <div className="text-slate-400 text-xs uppercase font-bold tracking-wider mb-1 flex justify-between items-center">
-              {t('maintenance.access_logs')}
-              <button 
+          <Panel className="mt-6 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
+                  <Activity size={13} />
+                  {t('maintenance.access_logs')}
+                </div>
+                <div className="mt-1 text-3xl font-mono text-indigo-300">{logStats.count}</div>
+              </div>
+              <Button
                 onClick={handleClearLogs}
                 disabled={clearingLogs}
-                className="text-xs text-rose-400 hover:text-rose-300 disabled:opacity-50"
+                loading={clearingLogs}
+                variant={keepLogDays === '0' ? 'danger' : 'default'}
+                className="shrink-0"
               >
-                {clearingLogs ? "Clearing..." : "Clear"}
-              </button>
+                清理
+              </Button>
             </div>
-            <div className="text-3xl font-mono text-indigo-400">{logStats.count}</div>
-            <div className="text-slate-500 text-[11px] mt-1">
-              {logStats.oldest ? `Oldest: ${format(new Date(logStats.oldest), 'MM-dd HH:mm')}` : "No records"}
+            <div className="mt-3 grid grid-cols-[1fr_auto] items-center gap-2">
+              <TextInput
+                value={keepLogDays}
+                onChange={event => setKeepLogDays(event.target.value.replace(/[^0-9]/g, ''))}
+                inputMode="numeric"
+                aria-label="访问日志保留天数"
+              />
+              <span className="text-xs text-slate-500">天内保留</span>
             </div>
-          </div>
+            <div className="mt-2 text-[11px] leading-5 text-slate-500">
+              {logStats.oldest ? `最早日志：${format(new Date(logStats.oldest), 'MM-dd HH:mm')}` : '暂无访问日志'}；输入 0 会要求二次确认。
+            </div>
+          </Panel>
         </div>
       </div>
 

@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Save, AlertTriangle } from 'lucide-react';
+import { useToast } from '../../components/ui';
 
 export default function ServerSection({ settings, configPath, lockedFields = [], onSave }) {
+  const toast = useToast();
   const isLocked = (field) => lockedFields.includes(field);
   const [port, setPort] = useState('');
   const [autoOpen, setAutoOpen] = useState(true);
@@ -20,8 +22,9 @@ export default function ServerSection({ settings, configPath, lockedFields = [],
       if (!isLocked('web_port')) payload.web_port = parseInt(port, 10);
       await onSave(payload);
       setDirty(false);
+      toast.success('重启服务进程后生效。', { title: '服务设置已保存' });
     } catch (e) {
-      alert('Failed: ' + (e.response?.data?.detail || e.message));
+      toast.error(e.response?.data?.detail || e.message, { title: '保存服务设置失败' });
     } finally {
       setSaving(false);
     }

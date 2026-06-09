@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Tag, Plus, Trash2, Save, AlertTriangle } from 'lucide-react';
+import { useToast } from '../../components/ui';
 
 export default function DomainsSection({ settings, onSave }) {
+  const toast = useToast();
   const [domains, setDomains] = useState([]);
   const [newDomain, setNewDomain] = useState('');
   const [dirty, setDirty] = useState(false);
@@ -17,7 +19,7 @@ export default function DomainsSection({ settings, onSave }) {
     const trimmed = newDomain.trim().toLowerCase();
     if (!trimmed || domains.includes(trimmed)) return;
     if (!/^[a-z][a-z0-9_]*$/.test(trimmed)) {
-      alert('Domain names must start with a letter and contain only lowercase letters, numbers, and underscores.');
+      toast.warning('Domain 必须以字母开头，只能包含小写字母、数字和下划线。', { title: 'Domain 名称无效' });
       return;
     }
     setDomains([...domains, trimmed]);
@@ -27,7 +29,7 @@ export default function DomainsSection({ settings, onSave }) {
 
   const handleRemove = (d) => {
     if (d === 'core') {
-      alert('"core" domain cannot be removed.');
+      toast.warning('core 是系统默认 domain，不能移除。', { title: '不能移除 core' });
       return;
     }
     setDomains(domains.filter(x => x !== d));
@@ -39,8 +41,9 @@ export default function DomainsSection({ settings, onSave }) {
     try {
       await onSave({ valid_domains: domains });
       setDirty(false);
+      toast.success(`${domains.length} 个 domain 已保存。`, { title: 'Domain 设置已更新' });
     } catch (e) {
-      alert('Failed: ' + (e.response?.data?.detail || e.message));
+      toast.error(e.response?.data?.detail || e.message, { title: '保存 Domain 设置失败' });
     } finally {
       setSaving(false);
     }
