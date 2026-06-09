@@ -47,6 +47,33 @@ from hermes_cli.config import cfg_get
 
 logger = logging.getLogger(__name__)
 
+
+def _track_recalled_results(results: Any) -> None:
+    """Record recalled Hindsight memory IDs when the client exposes them."""
+    if not results:
+        return
+    ids: list[str] = []
+    for result in results:
+        memory_id = None
+        if isinstance(result, dict):
+            memory_id = result.get("id") or result.get("memory_id") or result.get("uuid")
+        else:
+            memory_id = (
+                getattr(result, "id", None)
+                or getattr(result, "memory_id", None)
+                or getattr(result, "uuid", None)
+            )
+        if memory_id:
+            ids.append(str(memory_id))
+    if not ids:
+        return
+    try:
+        from agent.hindsight_access_tracker import record_recall
+
+        record_recall(ids)
+    except Exception:
+        logger.debug("Hindsight access tracking failed", exc_info=True)
+
 _DEFAULT_API_URL = "https://api.hindsight.vectorize.io"
 _DEFAULT_LOCAL_URL = "http://localhost:8888"
 _MIN_CLIENT_VERSION = "0.4.22"
@@ -1314,6 +1341,7 @@ class HindsightMemoryProvider(MemoryProvider):
                      self._bank_id, len(query), self._budget)
         resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
         num_results = len(resp.results) if resp.results else 0
+        _track_recalled_results(resp.results)
         logger.debug("Prefetch: recall returned %d results", num_results)
         return "\n".join(f"- {r.text}" for r in resp.results if r.text) if resp.results else ""
 
@@ -1681,6 +1709,7 @@ class HindsightMemoryProvider(MemoryProvider):
                              self._bank_id, len(query), self._budget)
                 resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
                 num_results = len(resp.results) if resp.results else 0
+                _track_recalled_results(resp.results)
                 logger.debug("Tool hindsight_recall: %d results", num_results)
                 if not resp.results:
                     return json.dumps({"result": "No relevant memories found."})
