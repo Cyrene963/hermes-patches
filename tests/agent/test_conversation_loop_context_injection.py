@@ -1,5 +1,6 @@
 """Tests for conversation-loop API message request construction."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from agent.conversation_loop import _build_api_message_with_ephemeral_context
@@ -91,26 +92,45 @@ def test_plugin_context_appends_after_memory_context():
     assert "plugin fact" in content
 
 
-def test_run_conversation_sends_memory_context_to_model_request_only():
-    """Full loop boundary: final API request sees anchors; persisted history stays clean."""
+def test_run_conversation_final_response_is_anchor_driven():
+    """Full loop boundary: fake model can answer only when anchors reach the request."""
     from run_agent import AIAgent
 
     captured = {}
 
     def fake_api_call(self, api_kwargs):
         captured["messages"] = api_kwargs["messages"]
-        mock_choice = MagicMock()
-        mock_choice.message.content = "Physics, Economics, ICT."
-        mock_choice.message.tool_calls = None
-        mock_choice.message.refusal = None
-        mock_choice.message.reasoning_content = None
-        mock_choice.finish_reason = "stop"
+        request_text = "\n\n".join(
+            str(message.get("content", "")) for message in captured["messages"]
+        )
+        anchor_visible = (
+            "## Memory Graph Anchors" in request_text
+            and "Student studies Physics, Economics, ICT" in request_text
+        )
 
-        mock_response = MagicMock()
-        mock_response.choices = [mock_choice]
-        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
-        mock_response.model = "test-model"
-        mock_response.id = "test-id"
+        mock_message = SimpleNamespace(
+            content=(
+                "Anchor-driven answer: Physics, Economics, ICT."
+                if anchor_visible
+                else "ANCHOR_MISSING_SENTINEL"
+            ),
+            tool_calls=None,
+            refusal=None,
+            reasoning_content=None,
+            reasoning=None,
+            reasoning_details=None,
+        )
+        mock_choice = SimpleNamespace(
+            message=mock_message,
+            finish_reason="stop",
+        )
+
+        mock_response = SimpleNamespace(
+            choices=[mock_choice],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            model="test-model",
+            id="test-id",
+        )
         return mock_response
 
     with patch("run_agent.AIAgent._build_system_prompt", return_value="system prompt"), \
@@ -133,6 +153,8 @@ def test_run_conversation_sends_memory_context_to_model_request_only():
         )
 
     assert result["completed"] is True
+    assert result["final_response"] == "Anchor-driven answer: Physics, Economics, ICT."
+    assert "ANCHOR_MISSING_SENTINEL" not in result["final_response"]
     request_user_messages = [m for m in captured["messages"] if m.get("role") == "user"]
     assert len(request_user_messages) == 1
     request_content = request_user_messages[0]["content"]
