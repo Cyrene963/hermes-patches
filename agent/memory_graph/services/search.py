@@ -385,6 +385,7 @@ class SearchIndexer:
                     matches.append({
                         "domain": mapping["domain"],
                         "path": mapping["path"],
+                        "node_uuid": node_uuid,
                         "uri": mapping["uri"],
                         "name": mapping["path"].rsplit("/", 1)[-1],
                         "snippet": self._format_search_snippet(mapping["content"], query),
@@ -397,6 +398,7 @@ class SearchIndexer:
                     matches.append({
                         "domain": row.domain,
                         "path": row.path,
+                        "node_uuid": node_uuid,
                         "uri": row.uri,
                         "name": row.path.rsplit("/", 1)[-1],
                         "snippet": self._format_search_snippet(row.content, query),

@@ -534,14 +534,14 @@ class GraphService:
                 "alias": f"{alias_domain}://{alias_path}",
             }
 
-    async def log_access(self, node_uuid: str, namespace: str = ""):
+    async def log_access(self, node_uuid: str, namespace: str = "", context: str | None = None):
         """Log memory access for frequency tracking."""
         async with self._session_factory() as session:
             await session.execute(
                 update(Node).where(Node.uuid == node_uuid)
                 .values(last_accessed_at=datetime.now(timezone.utc))
             )
-            session.add(MemoryAccessLog(node_uuid=node_uuid, namespace=namespace))
+            session.add(MemoryAccessLog(node_uuid=node_uuid, namespace=namespace, context=context))
             await session.commit()
 
     async def weighted_random_recall(self, namespace: str = "",

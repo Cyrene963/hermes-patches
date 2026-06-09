@@ -50,3 +50,37 @@ def test_create_refreshes_search_index(monkeypatch):
 
     assert out["node_uuid"] == "node-created"
     assert calls[-1] == ("refresh", "node-created", "telegram:u1")
+
+
+def test_search_logs_access_for_returned_nodes(monkeypatch):
+    import tools.memory_graph_tool as mg
+
+    calls = []
+
+    class FakeIndexer:
+        def search(self, *args, **kwargs):
+            calls.append(("search", args, kwargs))
+            return [
+                {"node_uuid": "node-1", "uri": "core://x", "path": "x", "priority": 0},
+                {"uri": "core://missing-node", "path": "missing", "priority": 0},
+            ]
+
+    class FakeGraph:
+        def log_access(self, node_uuid, namespace="", context=None):
+            calls.append(("log_access", node_uuid, namespace, context))
+            return "logged"
+
+    monkeypatch.setattr(mg, "_ensure_db", lambda: None)
+    monkeypatch.setattr(mg, "_get_namespace", lambda: "telegram:u1")
+    monkeypatch.setattr(mg, "_run", lambda value: value)
+
+    import agent.memory_graph.services.search as search_mod
+    import agent.memory_graph.services.graph as graph_mod
+    monkeypatch.setattr(search_mod, "SearchIndexer", FakeIndexer)
+    monkeypatch.setattr(graph_mod, "GraphService", FakeGraph)
+
+    out = json.loads(mg._search({"query": "user-a", "domain": "core", "limit": 2}))
+
+    assert out["count"] == 2
+    assert ("log_access", "node-1", "telegram:u1", "tool_search") in calls
+    assert not any(call[0] == "log_access" and call[1] == "" for call in calls)

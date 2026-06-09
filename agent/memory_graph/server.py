@@ -213,7 +213,12 @@ def create_app(graph_service=None, search_indexer=None, glossary_service=None):
         user = require_auth(request)
         ns = user.get("namespace", "")
         search_term = q or query
-        return await search_indexer.search(search_term, domain=domain, namespace=ns or "", limit=limit)
+        results = await search_indexer.search(search_term, domain=domain, namespace=ns or "", limit=limit)
+        for item in results:
+            node_uuid = item.get("node_uuid")
+            if node_uuid:
+                await graph_service.log_access(node_uuid, namespace=ns or "", context="api_search")
+        return results
 
     # ─── Write API ─────────────────────────────────────────────────
     @app.post("/api/memory-graph/create")

@@ -257,6 +257,15 @@ def _search(args, **kw):
         args["query"], domain=args.get("domain") or None,
         namespace=ns or "", limit=args.get("limit", 20),
     ))
+    try:
+        from agent.memory_graph.services.graph import GraphService
+        graph = GraphService()
+        for item in results:
+            node_uuid = item.get("node_uuid")
+            if node_uuid:
+                _run(graph.log_access(node_uuid, namespace=ns or "", context="tool_search"))
+    except Exception as exc:
+        logger.debug("Failed to log Memory Graph search access: %s", exc, exc_info=True)
     return json.dumps({"query": args["query"], "namespace": ns, "results": results, "count": len(results)},
                        ensure_ascii=False, default=str)
 
