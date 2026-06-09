@@ -444,7 +444,23 @@ if [ -n "$PYTHON_BIN" ]; then
     fi
 fi
 
-# 6b. Install patch-chain guard and structural audit helpers so future updates verify
+# 6b. Reload the dashboard service after Python/WebUI overlays land.
+# `hermes update` can correctly reapply source/bundle patches while an already
+# running dashboard process keeps old imported modules in memory. Restart only
+# the dashboard (never the gateway) so WebUI API fixes take effect without
+# interrupting messaging sessions. Operators can opt out with
+# HERMES_RESTART_DASHBOARD_AFTER_PATCH=0.
+if [ "${HERMES_RESTART_DASHBOARD_AFTER_PATCH:-1}" != "0" ] && command -v systemctl >/dev/null 2>&1; then
+    if systemctl --user list-unit-files hermes-dashboard.service --no-legend 2>/dev/null | grep -q '^hermes-dashboard\.service'; then
+        if systemctl --user restart hermes-dashboard.service 2>/dev/null; then
+            echo "   ✅ hermes-dashboard.service 已重启以加载补丁"
+        else
+            echo "   ⚠️ hermes-dashboard.service 重启失败；请手动运行: systemctl --user restart hermes-dashboard.service"
+        fi
+    fi
+fi
+
+# 6c. Install patch-chain guard and structural audit helpers so future updates verify
 # GitHub/local patch tree, installed Hermes code, Memory Graph health, dashboard
 # protected APIs, and AST-level high-risk code patterns together.
 if [ -f "$PATCHES_DIR/scripts/hermes-patch-env-preflight.py" ]; then

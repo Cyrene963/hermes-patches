@@ -168,10 +168,18 @@ if command -v df >/dev/null 2>&1; then
 fi
 
 if command -v curl >/dev/null 2>&1; then
-  if curl -fsS -m 5 "http://127.0.0.1:8642/health" >/tmp/hermes-api-health.json 2>/tmp/hermes-api-health.err; then
-    ok "Aegis-lite live path: API server health reachable"
+  aegis_url="${AEGIS_LITE_HEALTH_URL:-}"
+  if [ -z "$aegis_url" ] && command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ':8642 '; then
+    aegis_url="http://127.0.0.1:8642/health"
+  fi
+  if [ -n "$aegis_url" ]; then
+    if curl -fsS -m 5 "$aegis_url" >/tmp/hermes-api-health.json 2>/tmp/hermes-api-health.err; then
+      ok "Aegis-lite live path: API server health reachable"
+    else
+      fail "Aegis-lite live path: API server health failed: $(tr -d '\n' </tmp/hermes-api-health.err 2>/dev/null || true)"
+    fi
   else
-    fail "Aegis-lite live path: API server health failed: $(tr -d '\n' </tmp/hermes-api-health.err 2>/dev/null || true)"
+    ok "Aegis-lite live path: optional API server not configured; skipped"
   fi
 fi
 

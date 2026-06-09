@@ -3202,17 +3202,31 @@ class SessionDB:
     def session_count(
         self,
         source: str = None,
+        exclude_sources: List[str] = None,
         min_message_count: int = 0,
         include_archived: bool = False,
         archived_only: bool = False,
+        exclude_children: bool = False,
     ) -> int:
-        """Count sessions, optionally filtered by source."""
+        """Count sessions, optionally filtered like ``list_sessions_rich``."""
         where_clauses = []
         params = []
 
+        if exclude_children:
+            where_clauses.append(
+                "(parent_session_id IS NULL"
+                " OR EXISTS (SELECT 1 FROM sessions p"
+                "            WHERE p.id = sessions.parent_session_id"
+                "            AND p.end_reason = 'branched'"
+                "            AND sessions.started_at >= p.ended_at))"
+            )
         if source:
             where_clauses.append("source = ?")
             params.append(source)
+        if exclude_sources:
+            placeholders = ",".join("?" for _ in exclude_sources)
+            where_clauses.append(f"source NOT IN ({placeholders})")
+            params.extend(exclude_sources)
         if min_message_count > 0:
             where_clauses.append("message_count >= ?")
             params.append(min_message_count)
