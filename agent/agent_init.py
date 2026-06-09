@@ -189,6 +189,7 @@ def init_agent(
     chat_type: str = None,
     thread_id: str = None,
     gateway_session_key: str = None,
+    memory_namespace: str = None,
     skip_context_files: bool = False,
     load_soul_identity: bool = False,
     skip_memory: bool = False,
@@ -279,7 +280,9 @@ def init_agent(
     _chat_type_lc = str(chat_type or "").lower()
     agent._personal_workspace_memory_scope = _chat_type_lc == "personal_group"
     agent._shared_chat_memory_scope = _chat_type_lc in {"group", "supergroup", "channel"}
-    if agent._personal_workspace_memory_scope:
+    if memory_namespace:
+        agent._memory_namespace = memory_namespace
+    elif agent._personal_workspace_memory_scope:
         agent._memory_namespace = f"{platform}:{user_id}" if platform and user_id else None
     elif agent._shared_chat_memory_scope:
         agent._memory_namespace = f"{platform}:group:{chat_id}" if platform and chat_id else None
@@ -1163,6 +1166,8 @@ def init_agent(
                     # Thread gateway session key for stable per-chat Honcho session isolation
                     if agent._gateway_session_key:
                         _init_kwargs["gateway_session_key"] = agent._gateway_session_key
+                    if agent._memory_namespace:
+                        _init_kwargs["memory_namespace"] = agent._memory_namespace
                     # Profile identity for per-profile provider scoping
                     try:
                         from hermes_cli.profiles import get_active_profile_name

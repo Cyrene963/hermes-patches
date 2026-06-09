@@ -1,0 +1,76 @@
+diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
+index 42ff0b581..f806756ca 100644
+--- a/gateway/platforms/api_server.py
++++ b/gateway/platforms/api_server.py
+@@ -108,6 +108,31 @@ def _coerce_request_bool(value: Any, default: bool = False) -> bool:
+     return default
+ 
+ 
++def _identity_from_gateway_session_key(session_key: Optional[str]) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
++    """Infer user/chat identity and memory namespace from stable API session keys."""
++    if not session_key:
++        return None, None, None, None
++    raw = str(session_key).strip()
++    if not raw:
++        return None, None, None, None
++
++    parts = [part for part in raw.split(":") if part]
++    if len(parts) >= 2 and parts[0] == "telegram":
++        if parts[1] == "group" and len(parts) >= 3:
++            return None, parts[2], "group", f"telegram:group:{parts[2]}"
++        if parts[1] in {"dm", "private"} and len(parts) >= 3:
++            return parts[2], parts[2], "dm", f"telegram:{parts[2]}"
++        return parts[1], parts[1], "dm", f"telegram:{parts[1]}"
++
++    if len(parts) >= 5 and parts[0] == "agent" and parts[2] == "telegram":
++        if parts[3] == "group":
++            return None, parts[4], "group", f"telegram:group:{parts[4]}"
++        if parts[3] in {"dm", "private"}:
++            return parts[4], parts[4], "dm", f"telegram:{parts[4]}"
++
++    return None, None, None, None
++
++
+ def _normalize_chat_content(
+     content: Any, *, _max_depth: int = 10, _depth: int = 0,
+ ) -> str:
+@@ -1007,6 +1032,8 @@ class APIServerAdapter(BasePlatformAdapter):
+         # same fallback behaviour as Telegram/Discord/Slack (fixes #4954).
+         fallback_model = GatewayRunner._load_fallback_model()
+ 
++        user_id, chat_id, chat_type, memory_namespace = _identity_from_gateway_session_key(gateway_session_key)
++
+         agent = AIAgent(
+             model=model,
+             **runtime_kwargs,
+@@ -1017,6 +1044,10 @@ class APIServerAdapter(BasePlatformAdapter):
+             enabled_toolsets=enabled_toolsets,
+             session_id=session_id,
+             platform="api_server",
++            user_id=user_id,
++            chat_id=chat_id,
++            chat_type=chat_type,
++            memory_namespace=memory_namespace,
+             stream_delta_callback=stream_delta_callback,
+             tool_progress_callback=tool_progress_callback,
+             tool_start_callback=tool_start_callback,
+diff --git a/run_agent.py b/run_agent.py
+index 846b78913..68dce70f9 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -396,6 +396,7 @@ class AIAgent:
+         chat_type: str = None,
+         thread_id: str = None,
+         gateway_session_key: str = None,
++        memory_namespace: str = None,
+         skip_context_files: bool = False,
+         load_soul_identity: bool = False,
+         skip_memory: bool = False,
+@@ -468,6 +469,7 @@ class AIAgent:
+             chat_type=chat_type,
+             thread_id=thread_id,
+             gateway_session_key=gateway_session_key,
++            memory_namespace=memory_namespace,
+             skip_context_files=skip_context_files,
+             load_soul_identity=load_soul_identity,
+             skip_memory=skip_memory,

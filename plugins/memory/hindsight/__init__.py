@@ -566,6 +566,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._chat_name = ""
         self._chat_type = ""
         self._thread_id = ""
+        self._memory_namespace = ""
         self._agent_identity = ""
         self._agent_workspace = ""
         self._turn_index = 0
@@ -1136,6 +1137,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._chat_name = str(kwargs.get("chat_name") or "").strip()
         self._chat_type = str(kwargs.get("chat_type") or "").strip()
         self._thread_id = str(kwargs.get("thread_id") or "").strip()
+        self._memory_namespace = str(kwargs.get("memory_namespace") or "").strip()
         self._agent_identity = str(kwargs.get("agent_identity") or "").strip()
         self._agent_workspace = str(kwargs.get("agent_workspace") or "").strip()
         self._turn_index = 0
@@ -1331,10 +1333,10 @@ class HindsightMemoryProvider(MemoryProvider):
         try:
             import tools.memory_graph_tool as memory_graph_tool
 
-            namespace = ""
-            if self._user_id:
+            namespace = self._memory_namespace
+            if not namespace and self._user_id:
                 namespace = f"{self._platform}:{self._user_id}" if self._platform else self._user_id
-            elif self._chat_id:
+            elif not namespace and self._chat_id:
                 namespace = f"{self._platform}:{self._chat_id}" if self._platform else self._chat_id
             payload = {
                 "query": query,
