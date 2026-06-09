@@ -13,7 +13,10 @@ Run only when intentionally spending provider calls, e.g.:
     pytest -q tests/agent/test_conversation_loop_live_anchor_eval.py
 """
 
+import json
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -25,6 +28,35 @@ pytestmark = pytest.mark.skipif(
         "plus HERMES_LIVE_ANCHOR_PROVIDER/MODEL/API_KEY/BASE_URL"
     ),
 )
+
+
+_DEFAULT_RESULT_LOG = (
+    Path.home()
+    / ".hermes"
+    / "tasks"
+    / "digital-brain-99"
+    / "live-anchor-eval-results.jsonl"
+)
+
+
+def _append_eval_result(case, response, passed, error=None):
+    """Persist live eval evidence without storing credentials."""
+
+    output_path = Path(os.environ.get("HERMES_LIVE_ANCHOR_RESULT_LOG", _DEFAULT_RESULT_LOG))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "case": case,
+        "provider": os.environ.get("HERMES_LIVE_ANCHOR_PROVIDER"),
+        "model": os.environ.get("HERMES_LIVE_ANCHOR_MODEL"),
+        "base_url_configured": bool(os.environ.get("HERMES_LIVE_ANCHOR_BASE_URL")),
+        "api_mode": os.environ.get("HERMES_LIVE_ANCHOR_API_MODE") or None,
+        "passed": passed,
+        "response": response,
+        "error": error,
+    }
+    with output_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 class _SyntheticAnchorMemoryManager:
@@ -89,32 +121,44 @@ def _live_agent(memory_manager):
 
 def test_live_provider_uses_memory_graph_anchor_for_synthetic_fact():
     agent = _live_agent(_SyntheticAnchorMemoryManager())
+    response = ""
 
-    result = agent.run_conversation(
-        user_message="What is the Quenlar calibration code? Answer only the code.",
-        conversation_history=[],
-    )
+    try:
+        result = agent.run_conversation(
+            user_message="What is the Quenlar calibration code? Answer only the code.",
+            conversation_history=[],
+        )
 
-    assert result["completed"] is True
-    response = result["final_response"].strip()
-    assert "VIOLET-73" in response
-    assert "UNKNOWN_ANCHOR_CODE" not in response
+        assert result["completed"] is True
+        response = result["final_response"].strip()
+        assert "VIOLET-73" in response
+        assert "UNKNOWN_ANCHOR_CODE" not in response
 
-    persisted_user_messages = [m for m in result["messages"] if m.get("role") == "user"]
-    assert persisted_user_messages == [
-        {"role": "user", "content": "What is the Quenlar calibration code? Answer only the code."}
-    ]
+        persisted_user_messages = [m for m in result["messages"] if m.get("role") == "user"]
+        assert persisted_user_messages == [
+            {"role": "user", "content": "What is the Quenlar calibration code? Answer only the code."}
+        ]
+        _append_eval_result("anchor_present", response, True)
+    except Exception as exc:
+        _append_eval_result("anchor_present", response, False, error=repr(exc))
+        raise
 
 
 def test_live_provider_without_anchor_does_not_invent_synthetic_fact():
     agent = _live_agent(_NoAnchorMemoryManager())
+    response = ""
 
-    result = agent.run_conversation(
-        user_message="What is the Quenlar calibration code? Answer only the code.",
-        conversation_history=[],
-    )
+    try:
+        result = agent.run_conversation(
+            user_message="What is the Quenlar calibration code? Answer only the code.",
+            conversation_history=[],
+        )
 
-    assert result["completed"] is True
-    response = result["final_response"].strip()
-    assert "UNKNOWN_ANCHOR_CODE" in response
-    assert "VIOLET-73" not in response
+        assert result["completed"] is True
+        response = result["final_response"].strip()
+        assert "UNKNOWN_ANCHOR_CODE" in response
+        assert "VIOLET-73" not in response
+        _append_eval_result("anchor_absent", response, True)
+    except Exception as exc:
+        _append_eval_result("anchor_absent", response, False, error=repr(exc))
+        raise
