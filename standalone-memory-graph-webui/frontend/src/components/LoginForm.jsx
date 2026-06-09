@@ -193,12 +193,12 @@ const LoginForm = ({ onAuthenticated }) => {
 
   // 根据语言选择内容
   const features = lang === 'zh' ? [
-    { title: '默认私密', desc: '用户范围审核队列和命名空间检查，确保个人记忆不进入共享核心。' },
-    { title: '可审核变更', desc: '批准、拒绝、读回和回滚记忆更新，而不是信任静默写入。' },
+    { title: '默认私密', desc: '命名空间检查确保个人记忆不进入共享核心。' },
+    { title: '异常才打扰你', desc: '低风险自动写入；高风险、低置信或跨用户内容才进入安全阀。' },
     { title: '精心设计的召回', desc: '将对话转化为可搜索、可审计、可完善的活体外部大脑。' },
   ] : [
-    { title: 'Private by default', desc: 'User-scoped review queues and namespace checks keep personal memory out of shared core.' },
-    { title: 'Reviewable changes', desc: 'Approve, reject, read back, and roll back memory updates instead of trusting silent writes.' },
+    { title: 'Private by default', desc: 'Namespace checks keep personal memory out of shared core.' },
+    { title: 'Only exceptions interrupt you', desc: 'Low-risk memories write automatically; risky, uncertain, or cross-user content enters the safety valve.' },
     { title: 'Designed recall', desc: 'Turn conversations into a living external brain that can be searched, audited, and refined.' },
   ];
 
@@ -207,14 +207,14 @@ const LoginForm = ({ onAuthenticated }) => {
     : { line1: 'Your external brain,', line2: 'made', highlight: 'inspectable', suffix: '.' };
 
   const subtitle = lang === 'zh'
-    ? '记忆图谱将影子写入变为冷静的审核室：只批准属于的内容，保持用户隔离，并在成为可信召回之前通过读回验证每一个重要记忆。'
-    : 'Memory Graph turns shadow writes into a calm review room: approve only what belongs, keep users isolated, and verify every important memory by readback before it becomes trusted recall.';
+    ? '记忆图谱会自动写入低风险记忆，并把隐私、串用户、低置信或事故回滚这些少数异常放进安全阀。'
+    : 'Memory Graph writes low-risk memories automatically and keeps privacy, cross-user, low-confidence, and rollback cases in a safety valve.';
 
   const loginDesc = lang === 'zh'
-    ? '登录以审核记忆候选、检查命名空间，并保护外部大脑免受噪声或跨用户写入的干扰。'
-    : 'Sign in to review memory candidates, inspect namespaces, and protect the external brain from noisy or cross-user writes.';
+    ? '登录以查看记忆、检查异常队列，并保护外部大脑免受噪声或跨用户写入的干扰。'
+    : 'Sign in to browse memory, inspect exception queues, and protect the external brain from noisy or cross-user writes.';
 
-  const bottomText = lang === 'zh' ? '审核 • 读回 • 隔离' : 'Review • Readback • Isolation';
+  const bottomText = lang === 'zh' ? '自动记忆 • 读回 • 隔离' : 'Automatic memory • Readback • Isolation';
 
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden px-4 py-10 text-slate-100">
@@ -235,7 +235,7 @@ const LoginForm = ({ onAuthenticated }) => {
         >
           <div className="inline-flex items-center gap-2 rounded-full border border-indigo-500/30 bg-indigo-500/5 px-4 py-2 text-xs font-medium uppercase tracking-[0.28em] text-indigo-200 backdrop-blur-xl shadow-lg shadow-indigo-500/10">
             <span className="h-1.5 w-1.5 rounded-full bg-indigo-400 shadow-[0_0_8px_rgba(99,102,241,0.8)] animate-pulse" />
-            {lang === 'zh' ? '记忆审核工作台' : 'Memory Review Workbench'}
+            {lang === 'zh' ? '记忆安全控制台' : 'Memory Safety Console'}
           </div>
 
           <h1 className="max-w-3xl text-4xl sm:text-5xl md:text-6xl font-bold tracking-tight text-white leading-tight">

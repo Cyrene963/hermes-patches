@@ -152,10 +152,10 @@ function ReviewPage() {
 
   const handleClearAll = async () => {
     const accepted = await confirm({
-      title: '接受当前所有待审图谱变更？',
-      description: '这会把当前列表里的图谱快照全部标记为已处理。请只在你已经确认队列质量时使用。',
+      title: '标记当前所有安全事件已处理？',
+      description: '这会把当前列表里的图谱快照全部标记为已处理。请只在你已经确认隔离区质量时使用。',
       details: [`待处理数量：${changes.length}`],
-      confirmLabel: '全部接受',
+      confirmLabel: '全部标记已处理',
       variant: 'default',
       requireText: changes.length >= 10 ? 'APPROVE' : '',
     });
@@ -187,7 +187,7 @@ function ReviewPage() {
     setProposalActionLoading(true);
     setProposalActionError(null);
     try {
-      await rejectProposal(selectedProposal.proposal_id, 'Rejected from Memory Graph Review workbench');
+      await rejectProposal(selectedProposal.proposal_id, 'Kept out from Memory Graph safety valve');
       const data = await loadProposals();
       const proposals = data?.inbox?.proposals || [];
       setSelectedProposal(proposals.length > 0 ? proposals[0] : null);
@@ -206,35 +206,35 @@ function ReviewPage() {
     if (!selectedProposal || proposalActionLoading) return;
     if (selectedProposal.target_store !== 'memory_graph' || selectedProposal.review_stage !== 'ready_memory') {
       setProposalActionError(t('review.only_ready_memory_approvable'));
-      toast.warning(t('review.only_ready_memory_approvable'), { title: '无法批准' });
+      toast.warning(t('review.only_ready_memory_approvable'), { title: '无法放行' });
       return;
     }
     const accepted = await confirm({
-      title: '批准候选记忆写入 Memory Graph？',
-      description: '批准后系统会执行候选变更，并刷新图谱审核队列。',
+      title: '放行候选记忆写入 Memory Graph？',
+      description: '放行后系统会执行候选变更、读回验证，并刷新安全事件队列。',
       details: [
         `Proposal #${selectedProposal.proposal_id}`,
         selectedProposal.human_title || selectedProposal.reason || 'No readable summary provided.',
       ],
-      confirmLabel: '批准写入',
+      confirmLabel: '放行写入',
       variant: 'default',
     });
     if (!accepted) return;
     setProposalActionLoading(true);
     setProposalActionError(null);
     try {
-      await approveProposal(selectedProposal.proposal_id, 'Approved from Memory Graph Review workbench');
+      await approveProposal(selectedProposal.proposal_id, 'Released from Memory Graph safety valve');
       const data = await loadProposals();
       const proposals = data?.inbox?.proposals || [];
       setSelectedProposal(proposals.length > 0 ? proposals[0] : null);
       await loadChanges();
       setActiveQueue('graph');
-      toast.success(`#${selectedProposal.proposal_id}`, { title: '候选记忆已批准' });
+      toast.success(`#${selectedProposal.proposal_id}`, { title: '候选记忆已放行' });
     } catch (err) {
       const detail = err.response?.data?.detail;
       const message = typeof detail === 'string' ? detail : JSON.stringify(detail || err.message);
       setProposalActionError(message);
-      toast.error(message, { title: '批准候选失败' });
+      toast.error(message, { title: '放行候选失败' });
     } finally {
       setProposalActionLoading(false);
     }
@@ -454,7 +454,10 @@ function ReviewPage() {
                   {t('review.raw_material_bucket')} ({proposalInbox?.inbox?.raw_material_count ?? 0})
                 </button>
               </div>
-              <div className="uppercase tracking-widest text-slate-600">{t('review.no_pending_candidates')}</div>
+              <div className="rounded-xl border border-slate-800/60 bg-slate-900/30 p-4">
+                <div className="text-sm font-semibold text-slate-400">{t('review.no_pending_candidates')}</div>
+                <p className="mt-2 text-xs leading-5 text-slate-600">{t('review.no_pending_candidates_desc')}</p>
+              </div>
             </div>
           )}
         </div>
@@ -532,7 +535,8 @@ function ReviewPage() {
 
             {/* Diff Area */}
             <div className="flex-1 overflow-y-auto px-8 py-8 custom-scrollbar">
-              <div className="max-w-4xl mx-auto">
+              <div className="max-w-4xl mx-auto space-y-6">
+                <SafetyValveNote />
                 {diffError ? (
                   <div className="mt-20 flex flex-col items-center justify-center text-rose-500 gap-6 animate-in fade-in zoom-in duration-300">
                     <div className="w-20 h-20 bg-rose-950/20 rounded-full flex items-center justify-center border border-rose-900/50 shadow-xl">
@@ -710,6 +714,7 @@ function ReviewPage() {
 
             <div className="flex-1 overflow-y-auto px-8 py-8 custom-scrollbar">
               <div className="max-w-4xl mx-auto space-y-6">
+                <SafetyValveNote />
                 <div className="rounded-2xl border border-purple-500/20 bg-gradient-to-br from-purple-500/10 via-slate-900/60 to-indigo-500/5 p-6 shadow-[0_0_40px_rgba(124,58,237,0.10)]">
                   <div className="text-xs font-bold uppercase tracking-widest text-purple-300 mb-2">{t('review.what_to_do_title')}</div>
                   <p className="text-base text-slate-200 leading-7">
@@ -790,17 +795,38 @@ function ReviewPage() {
             <p className="text-sm font-medium opacity-50">Connection Lost</p>
           </div>
         ) : (
-          <div className="flex-1 flex flex-col items-center justify-center text-slate-700 gap-6 select-none">
-            <div className="relative">
-              <div className="absolute inset-0 bg-indigo-500/20 blur-3xl rounded-full opacity-20 animate-pulse"></div>
-              <Layout size={64} className="opacity-20 relative z-10" />
-            </div>
-            <div className="text-center">
-              <p className="text-lg font-light text-slate-500">{t('review.awaiting_input')}</p>
-              <p className="text-xs text-slate-600 mt-2 tracking-wide uppercase">{t('review.select_fragment')}</p>
+          <div className="flex-1 overflow-y-auto px-8 py-8 custom-scrollbar">
+            <div className="mx-auto flex min-h-full max-w-4xl flex-col items-center justify-center gap-8 text-slate-700 select-none">
+              <SafetyValveNote />
+              <div className="relative">
+                <div className="absolute inset-0 bg-indigo-500/20 blur-3xl rounded-full opacity-20 animate-pulse"></div>
+                <Layout size={64} className="opacity-20 relative z-10" />
+              </div>
+              <div className="text-center">
+                <p className="text-lg font-light text-slate-500">{t('review.awaiting_input')}</p>
+                <p className="text-sm text-slate-500 mt-3 max-w-xl leading-6">{t('review.select_fragment')}</p>
+              </div>
             </div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function SafetyValveNote() {
+  const { t } = useI18n();
+  return (
+    <div className="w-full rounded-2xl border border-indigo-500/20 bg-gradient-to-br from-indigo-500/10 via-slate-900/60 to-purple-500/5 p-6 shadow-[0_0_40px_rgba(79,70,229,0.08)]">
+      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div className="max-w-2xl">
+          <div className="text-xs font-bold uppercase tracking-[0.22em] text-indigo-300 mb-2">{t('review.safety_note_title')}</div>
+          <p className="text-base leading-7 text-slate-200">{t('review.safety_note_desc')}</p>
+        </div>
+        <div className="rounded-xl border border-slate-700/60 bg-slate-950/40 p-4 md:w-72">
+          <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 mb-2">{t('review.safety_note_when')}</div>
+          <p className="text-sm leading-6 text-slate-400">{t('review.safety_note_when_desc')}</p>
+        </div>
       </div>
     </div>
   );
