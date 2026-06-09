@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { getGroups, getGroupDiff, rollbackGroup, approveGroup, clearAll, getProposalInbox, rejectProposal, approveProposal } from '../../lib/api';
+import { getGroups, getGroupDiff, rollbackGroup, approveGroup, clearAll, getProposalInbox, rejectProposal, approveProposal, getMe } from '../../lib/api';
 import SnapshotList from '../../components/SnapshotList';
 import DiffViewer from '../../components/DiffViewer';
 import { AnimatedButton, AnimatedBadge, EmptyState } from '../../components/AnimatedUI';
@@ -38,12 +38,43 @@ function ReviewPage() {
   const [proposalError, setProposalError] = useState(null);
   const [proposalActionLoading, setProposalActionLoading] = useState(false);
   const [proposalActionError, setProposalActionError] = useState(null);
+  const [canReviewGraph, setCanReviewGraph] = useState(null);
 
   const diffRequestRef = useRef(0);
 
-  useEffect(() => { loadChanges(); loadProposals(); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    const boot = async () => {
+      let graphAllowed = false;
+      try {
+        const me = await getMe();
+        graphAllowed = Boolean(me?.authenticated && (me?.role === 'admin' || me?.username === 'admin'));
+      } catch {
+        graphAllowed = false;
+      }
+      if (cancelled) return;
+      setCanReviewGraph(graphAllowed);
+      if (graphAllowed) {
+        await loadChanges();
+      } else {
+        setActiveQueue('proposals');
+        setChanges([]);
+        setSelectedChange(null);
+        setDiffData(null);
+      }
+      await loadProposals();
+    };
+    void boot();
+    return () => { cancelled = true; };
+  }, []);
 
   const loadChanges = async () => {
+    if (canReviewGraph === false) {
+      setChanges([]);
+      setSelectedChange(null);
+      setDiffData(null);
+      return [];
+    }
     setLoading(true);
     try {
       const list = await getGroups();
@@ -58,8 +89,16 @@ function ReviewPage() {
         setDiffData(null);
       }
       return list;
-    } catch {
-      setDiffError("Disconnected from Neural Core (Backend offline).");
+    } catch (err) {
+      if (err.response?.status === 403) {
+        setCanReviewGraph(false);
+        setActiveQueue('proposals');
+        setChanges([]);
+        setSelectedChange(null);
+        setDiffData(null);
+      } else {
+        setDiffError("Disconnected from Neural Core (Backend offline).");
+      }
       return [];
     } finally {
       setLoading(false);
@@ -346,10 +385,13 @@ function ReviewPage() {
           </div>
           <div className="mt-4 grid grid-cols-2 gap-2">
             <button
-              onClick={() => { setActiveQueue('graph'); }}
+              onClick={() => { if (canReviewGraph !== false) setActiveQueue('graph'); }}
+              disabled={canReviewGraph === false}
               className={clsx(
                 "rounded-md border px-2 py-2 text-[10px] font-bold uppercase tracking-wider transition-colors",
-                activeQueue === 'graph'
+                canReviewGraph === false
+                  ? "cursor-not-allowed border-slate-900 bg-slate-950/40 text-slate-700"
+                  : activeQueue === 'graph'
                   ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-200"
                   : "border-slate-800 bg-slate-900/30 text-slate-500 hover:text-slate-300"
               )}
