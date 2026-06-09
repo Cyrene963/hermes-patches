@@ -277,7 +277,7 @@ class TestMemoryManager:
         fenced = build_memory_context_block(raw_context)
         model_user_content = "What are the student's DSE electives?\n\n" + fenced
 
-        assert "<memory-context>" in model_user_content
+        assert "## Recalled Memory Context" in model_user_content
         assert "## Memory Graph Anchors" in model_user_content
         assert "student-dse-electives" in model_user_content
         assert "Physics, Economics, ICT" in model_user_content
@@ -994,16 +994,15 @@ class TestSetupFieldFiltering:
 
 
 class TestMemoryContextFencing:
-    """Prefetch context must be wrapped in <memory-context> fence so the model
-    does not treat recalled memory as user discourse."""
+    """Prefetch context must be labeled as recalled memory, not user discourse."""
 
     def test_build_memory_context_block_wraps_content(self):
         from agent.memory_manager import build_memory_context_block
         result = build_memory_context_block(
             "## Holographic Memory\n- [0.8] user likes dark mode"
         )
-        assert result.startswith("<memory-context>")
-        assert result.rstrip().endswith("</memory-context>")
+        assert result.startswith("## Recalled Memory Context")
+        assert "<memory-context>" not in result
         assert "NOT new user input" in result
         assert "user likes dark mode" in result
 
@@ -1027,16 +1026,15 @@ class TestMemoryContextFencing:
         assert "</memory-context>" not in result.lower()
         assert "datamore" in result
 
-    def test_fenced_block_separates_user_from_recall(self):
+    def test_context_block_separates_user_from_recall(self):
         from agent.memory_manager import build_memory_context_block
         prefetch = "## Holographic Memory\n- [0.9] user is named Alice"
         block = build_memory_context_block(prefetch)
         user_msg = "What's the weather today?"
         combined = user_msg + "\n\n" + block
-        fence_start = combined.index("<memory-context>")
-        fence_end = combined.index("</memory-context>")
-        assert "Alice" in combined[fence_start:fence_end]
-        assert combined.index("weather") < fence_start
+        context_start = combined.index("## Recalled Memory Context")
+        assert "Alice" in combined[context_start:]
+        assert combined.index("weather") < context_start
 
 
 # ---------------------------------------------------------------------------

@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 
 from datetime import datetime, timezone
@@ -1327,6 +1328,46 @@ class HindsightMemoryProvider(MemoryProvider):
         )
         return f"{header}\n\n{text}"
 
+    def _memory_graph_query_variants(self, query: str) -> list[str]:
+        """Return focused Memory Graph search queries before the raw prompt.
+
+        User turns often include answer-format instructions ("return only...",
+        "if no such..."). Those terms can dominate ranking and push the actual
+        recall target out of the top anchors, so search concise target phrases
+        first and keep the full prompt as a fallback.
+        """
+        raw = " ".join(str(query or "").split())
+        if not raw:
+            return []
+
+        variants: list[str] = []
+
+        contains_match = re.search(
+            r"\bcontains\s+(?:the\s+)?(.+?)(?:[.!?]|$)", raw, flags=re.IGNORECASE
+        )
+        if contains_match:
+            variants.append(contains_match.group(1).strip())
+
+        stripped = re.split(
+            r"\b(?:return only|if no such|if no|answer unknown|respond with|please answer)\b",
+            raw,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip(" .;:\n\t")
+        if stripped:
+            variants.append(stripped)
+
+        variants.append(raw)
+
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for variant in variants:
+            key = variant.casefold()
+            if variant and key not in seen:
+                seen.add(key)
+                deduped.append(variant)
+        return deduped
+
     def _memory_graph_prefetch_text(self, query: str) -> str:
         if not self._memory_graph_prefetch or self._memory_graph_prefetch_limit <= 0:
             return ""
@@ -1338,25 +1379,33 @@ class HindsightMemoryProvider(MemoryProvider):
                 namespace = f"{self._platform}:{self._user_id}" if self._platform else self._user_id
             elif not namespace and self._chat_id:
                 namespace = f"{self._platform}:{self._chat_id}" if self._platform else self._chat_id
-            payload = {
-                "query": query,
-                "domain": "core",
-                "limit": self._memory_graph_prefetch_limit,
-            }
-            if namespace:
-                payload["namespace"] = namespace
-            raw = memory_graph_tool._search(payload)
-            data = json.loads(raw) if isinstance(raw, str) else raw
-            results = data.get("results") if isinstance(data, dict) else []
             lines: list[str] = []
-            for result in results or []:
-                if not isinstance(result, dict):
-                    continue
-                snippet = str(result.get("snippet") or result.get("content") or "").strip()
-                path = str(result.get("uri") or result.get("path") or "").strip()
-                text = " — ".join(part for part in (path, snippet) if part)
-                if text:
-                    lines.append(f"- {text}")
+            seen_text: set[str] = set()
+            for search_query in self._memory_graph_query_variants(query):
+                payload = {
+                    "query": search_query,
+                    "domain": "core",
+                    "limit": self._memory_graph_prefetch_limit,
+                }
+                if namespace:
+                    payload["namespace"] = namespace
+                raw = memory_graph_tool._search(payload)
+                data = json.loads(raw) if isinstance(raw, str) else raw
+                results = data.get("results") if isinstance(data, dict) else []
+                for result in results or []:
+                    if not isinstance(result, dict):
+                        continue
+                    snippet = str(result.get("snippet") or result.get("content") or "").strip()
+                    path = str(result.get("uri") or result.get("path") or "").strip()
+                    text = " — ".join(part for part in (path, snippet) if part)
+                    key = text.casefold()
+                    if text and key not in seen_text:
+                        seen_text.add(key)
+                        lines.append(f"- {text}")
+                        if len(lines) >= self._memory_graph_prefetch_limit:
+                            break
+                if len(lines) >= self._memory_graph_prefetch_limit:
+                    break
             if lines:
                 logger.debug("Prefetch: Memory Graph returned %d anchor results", len(lines))
                 return "## Memory Graph Anchors\n" + "\n".join(lines)
@@ -1412,6 +1461,16 @@ class HindsightMemoryProvider(MemoryProvider):
             except Exception as e:
                 logger.debug("Hindsight synchronous prefetch failed: %s", e, exc_info=True)
                 return ""
+        else:
+            try:
+                sync_query = query
+                if self._recall_max_input_chars and len(sync_query) > self._recall_max_input_chars:
+                    sync_query = sync_query[:self._recall_max_input_chars]
+                graph_text = self._memory_graph_prefetch_text(sync_query)
+                if graph_text:
+                    result = f"{graph_text}\n\n## Hindsight Recall\n{result}"
+            except Exception as e:
+                logger.debug("Memory Graph cached-prefetch supplement failed: %s", e, exc_info=True)
         if not result:
             logger.debug("Prefetch: no results available")
             return ""

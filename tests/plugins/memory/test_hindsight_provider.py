@@ -715,6 +715,58 @@ class TestPrefetch:
             "limit": 3,
         }
 
+    def test_prefetch_uses_explicit_memory_namespace(self, provider, monkeypatch):
+        captured_payload = None
+
+        def fake_search(payload):
+            nonlocal captured_payload
+            captured_payload = payload
+            return json.dumps({
+                "results": [
+                    {
+                        "uri": "core://eval/gateway-canary",
+                        "snippet": "Synthetic gateway canary code is GW-ANCHOR-12345",
+                    }
+                ]
+            })
+
+        provider._platform = "api_server"
+        provider._user_id = "test-user"
+        provider._chat_id = "test-user"
+        provider._memory_namespace = "test-namespace"
+        monkeypatch.setattr("tools.memory_graph_tool._search", fake_search)
+
+        result = provider.prefetch("gateway turn query")
+        assert "## Memory Graph Anchors" in result
+        assert captured_payload["namespace"] == "test-namespace"
+
+    def test_memory_graph_prefetch_uses_focused_query_before_full_prompt(self, provider, monkeypatch):
+        captured_queries = []
+
+        def fake_search(payload):
+            captured_queries.append(payload["query"])
+            if payload["query"] == "Veylix gateway recall probe code":
+                return json.dumps({
+                    "results": [
+                        {
+                            "uri": "core://eval/gateway-canary",
+                            "snippet": "Synthetic gateway canary code is GW-ANCHOR-12345",
+                        }
+                    ]
+                })
+            return json.dumps({"results": []})
+
+        monkeypatch.setattr("tools.memory_graph_tool._search", fake_search)
+
+        result = provider.prefetch(
+            "A temporary Memory Graph Anchor contains the Veylix gateway recall probe code. "
+            "Return only the exact GW-ANCHOR-* code visible in recalled memory context. "
+            "If no such code is visible, answer UNKNOWN."
+        )
+
+        assert "GW-ANCHOR-12345" in result
+        assert captured_queries[0] == "Veylix gateway recall probe code"
+
     def test_prefetch_keeps_hindsight_when_memory_graph_fails(self, provider, monkeypatch):
         def broken_search(payload):
             raise RuntimeError("memory graph unavailable")

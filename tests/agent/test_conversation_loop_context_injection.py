@@ -65,7 +65,7 @@ def _anchor_sensitive_response_from(api_kwargs, captured):
     )
 
 
-def test_current_user_message_gets_memory_graph_anchors_in_request_context():
+def test_current_user_message_gets_recalled_memory_context_without_persisting_source():
     msg = {"role": "user", "content": "What are the student's DSE electives?"}
     prefetch = (
         "# Hindsight Memory\n\n"
@@ -84,9 +84,8 @@ def test_current_user_message_gets_memory_graph_anchors_in_request_context():
     )
 
     content = api_msg["content"]
-    assert content.startswith("What are the student's DSE electives?")
-    assert "<memory-context>" in content
-    assert "authoritative reference data" in content
+    assert content.startswith("## Recalled Memory Context")
+    assert content.rstrip().endswith("What are the student's DSE electives?")
     assert "## Memory Graph Anchors" in content
     assert "student-dse-electives" in content
     assert "Physics, Economics, ICT" in content
@@ -119,7 +118,7 @@ def test_ephemeral_context_only_injects_current_user_message():
     assert assistant_api_msg == assistant_msg
 
 
-def test_plugin_context_appends_after_memory_context():
+def test_plugin_context_injects_into_current_user_message():
     msg = {"role": "user", "content": "Need context"}
 
     api_msg = _build_api_message_with_ephemeral_context(
@@ -132,6 +131,7 @@ def test_plugin_context_appends_after_memory_context():
 
     content = api_msg["content"]
     assert content.index("## Memory Graph Anchors") < content.index("## Plugin Context")
+    assert "Need context" in content
     assert "precise fact" in content
     assert "plugin fact" in content
 
@@ -170,8 +170,8 @@ def test_run_conversation_final_response_is_anchor_driven():
     request_user_messages = [m for m in captured["messages"] if m.get("role") == "user"]
     assert len(request_user_messages) == 1
     request_content = request_user_messages[0]["content"]
-    assert request_content.startswith("What are the student's DSE electives?")
-    assert "<memory-context>" in request_content
+    assert request_content.startswith("## Recalled Memory Context")
+    assert request_content.rstrip().endswith("What are the student's DSE electives?")
     assert "## Memory Graph Anchors" in request_content
     assert "Physics, Economics, ICT" in request_content
     assert request_content.index("## Memory Graph Anchors") < request_content.index("## Hindsight Recall")
@@ -213,7 +213,8 @@ def test_run_conversation_without_memory_graph_anchor_returns_sentinel():
     request_user_messages = [m for m in captured["messages"] if m.get("role") == "user"]
     assert len(request_user_messages) == 1
     request_content = request_user_messages[0]["content"]
-    assert "<memory-context>" in request_content
+    assert request_content.startswith("## Recalled Memory Context")
+    assert request_content.rstrip().endswith("What are the student's DSE electives?")
     assert "## Hindsight Recall" in request_content
     assert "## Memory Graph Anchors" not in request_content
     assert "Student studies Physics, Economics, ICT" not in request_content

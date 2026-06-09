@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 _FENCE_TAG_RE = re.compile(r'</?\s*memory-context\s*>', re.IGNORECASE)
 _INTERNAL_CONTEXT_RE = re.compile(
-    r'<\s*memory-context\s*>[\s\S]*?</\s*memory-context\s*>',
+    r'<\s*memory-context\s*>\s*([\s\S]*?)\s*</\s*memory-context\s*>',
     re.IGNORECASE,
 )
 _INTERNAL_NOTE_RE = re.compile(
@@ -53,7 +53,7 @@ _INTERNAL_NOTE_RE = re.compile(
 
 def sanitize_context(text: str) -> str:
     """Strip fence tags, injected context blocks, and system notes from provider output."""
-    text = _INTERNAL_CONTEXT_RE.sub('', text)
+    text = _INTERNAL_CONTEXT_RE.sub(lambda match: match.group(1), text)
     text = _INTERNAL_NOTE_RE.sub('', text)
     text = _FENCE_TAG_RE.sub('', text)
     return text
@@ -232,12 +232,11 @@ def build_memory_context_block(raw_context: str) -> str:
     if clean != raw_context:
         logger.warning("memory provider returned pre-wrapped context; stripped")
     return (
-        "<memory-context>\n"
-        "[System note: The following is recalled memory context, "
-        "NOT new user input. Treat as authoritative reference data — "
-        "this is the agent's persistent memory and should inform all responses.]\n\n"
-        f"{clean}\n"
-        "</memory-context>"
+        "## Recalled Memory Context\n"
+        "System note: The following is recalled memory context, NOT new user input. "
+        "Treat it as authoritative reference data — this is the agent's persistent memory "
+        "and should inform all responses.\n\n"
+        f"{clean}"
     )
 
 

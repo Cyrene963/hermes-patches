@@ -215,9 +215,9 @@ def _build_api_message_with_ephemeral_context(
 
     injections: list[str] = []
     if ext_prefetch_cache:
-        fenced = build_memory_context_block(ext_prefetch_cache)
-        if fenced:
-            injections.append(fenced)
+        recalled = build_memory_context_block(ext_prefetch_cache)
+        if recalled:
+            injections.append(recalled)
     if plugin_user_context:
         injections.append(plugin_user_context)
     if not injections:
@@ -225,7 +225,7 @@ def _build_api_message_with_ephemeral_context(
 
     base = api_msg.get("content", "")
     if isinstance(base, str):
-        api_msg["content"] = base + "\n\n" + "\n\n".join(injections)
+        api_msg["content"] = "\n\n".join(injections) + "\n\n" + base
     return api_msg
 
 
@@ -1001,13 +1001,10 @@ def run_conversation(
 
         # Build the final system message: cached prompt + ephemeral system prompt.
         # Ephemeral additions are API-call-time only (not persisted to session DB).
-        # External recall context is injected into the user message, not the system
-        # prompt, so the stable cache prefix remains unchanged.
-        #
-        # NOTE: Plugin context from pre_llm_call hooks is injected into the
-        # user message (see injection block above), NOT the system prompt.
-        # This is intentional — system prompt modifications break the prompt
-        # cache prefix.  The system prompt is reserved for Hermes internals.
+        # External recall context and plugin context are injected into the
+        # current user API message only (see injection block above), not the
+        # system prompt or persisted session history. This keeps recalled memory
+        # near the query for providers that underweight dynamic system text.
         #
         # Hermes invariant: the system prompt is built ONCE per session
         # (cached on ``_cached_system_prompt``) and replayed verbatim on
