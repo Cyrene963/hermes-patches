@@ -1218,6 +1218,11 @@ class HindsightMemoryProvider(MemoryProvider):
         # Recall controls
         self._auto_recall = self._config.get("auto_recall", True)
         self._recall_max_tokens = int(self._config.get("recall_max_tokens", 4096))
+        self._memory_graph_prefetch = self._config.get("memory_graph_prefetch", True)
+        self._memory_graph_prefetch_limit = max(
+            0,
+            int(self._config.get("memory_graph_prefetch_limit", 3)),
+        )
         recall_types = self._config.get("recall_types")
         if isinstance(recall_types, str):
             recall_types = [item.strip() for item in recall_types.split(",") if item.strip()]
@@ -1320,6 +1325,48 @@ class HindsightMemoryProvider(MemoryProvider):
         )
         return f"{header}\n\n{text}"
 
+    def _memory_graph_prefetch_text(self, query: str) -> str:
+        if not self._memory_graph_prefetch or self._memory_graph_prefetch_limit <= 0:
+            return ""
+        try:
+            import tools.memory_graph_tool as memory_graph_tool
+
+            namespace = ""
+            if self._user_id:
+                namespace = f"{self._platform}:{self._user_id}" if self._platform else self._user_id
+            elif self._chat_id:
+                namespace = f"{self._platform}:{self._chat_id}" if self._platform else self._chat_id
+            payload = {
+                "query": query,
+                "domain": "core",
+                "limit": self._memory_graph_prefetch_limit,
+                "namespace": namespace,
+            }
+            raw = memory_graph_tool._search(payload)
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            results = data.get("results") if isinstance(data, dict) else []
+            lines: list[str] = []
+            for result in results or []:
+                if not isinstance(result, dict):
+                    continue
+                snippet = str(result.get("snippet") or result.get("content") or "").strip()
+                path = str(result.get("uri") or result.get("path") or "").strip()
+                text = " — ".join(part for part in (path, snippet) if part)
+                if text:
+                    lines.append(f"- {text}")
+            if lines:
+                logger.debug("Prefetch: Memory Graph returned %d anchor results", len(lines))
+                return "## Memory Graph Anchors\n" + "\n".join(lines)
+        except Exception as exc:
+            logger.debug("Memory Graph prefetch anchors failed: %s", exc, exc_info=True)
+        return ""
+
+    def _merge_prefetch_text(self, query: str, hindsight_text: str) -> str:
+        graph_text = self._memory_graph_prefetch_text(query)
+        if graph_text and hindsight_text:
+            return f"{graph_text}\n\n## Hindsight Recall\n{hindsight_text}"
+        return graph_text or hindsight_text
+
     def _recall_prefetch_text(self, query: str) -> str:
         if self._prefetch_method == "reflect":
             logger.debug("Prefetch: calling reflect (bank=%s, query_len=%d)", self._bank_id, len(query))
@@ -1358,7 +1405,7 @@ class HindsightMemoryProvider(MemoryProvider):
                 sync_query = query
                 if self._recall_max_input_chars and len(sync_query) > self._recall_max_input_chars:
                     sync_query = sync_query[:self._recall_max_input_chars]
-                result = self._recall_prefetch_text(sync_query)
+                result = self._merge_prefetch_text(sync_query, self._recall_prefetch_text(sync_query))
             except Exception as e:
                 logger.debug("Hindsight synchronous prefetch failed: %s", e, exc_info=True)
                 return ""
@@ -1384,7 +1431,7 @@ class HindsightMemoryProvider(MemoryProvider):
 
         def _run():
             try:
-                text = self._recall_prefetch_text(query)
+                text = self._merge_prefetch_text(query, self._recall_prefetch_text(query))
                 if text:
                     with self._prefetch_lock:
                         self._prefetch_result = text

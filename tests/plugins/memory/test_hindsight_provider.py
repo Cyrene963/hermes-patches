@@ -230,6 +230,8 @@ class TestConfig:
         assert provider._retain_every_n_turns == 1
         assert provider._recall_max_tokens == 4096
         assert provider._recall_max_input_chars == 800
+        assert provider._memory_graph_prefetch is True
+        assert provider._memory_graph_prefetch_limit == 3
         assert provider._tags is None
         assert provider._recall_tags is None
         # Default recall narrowed to observation-only; world/experience are
@@ -275,6 +277,8 @@ class TestConfig:
             recall_types=["world", "experience"],
             recall_prompt_preamble="Custom preamble:",
             recall_max_input_chars=500,
+            memory_graph_prefetch=False,
+            memory_graph_prefetch_limit=2,
             bank_mission="Test agent mission",
         )
         assert p._tags == ["tag1", "tag2"]
@@ -293,6 +297,8 @@ class TestConfig:
         assert p._recall_types == ["world", "experience"]
         assert p._recall_prompt_preamble == "Custom preamble:"
         assert p._recall_max_input_chars == 500
+        assert p._memory_graph_prefetch is False
+        assert p._memory_graph_prefetch_limit == 2
         assert p._bank_mission == "Test agent mission"
 
     def test_config_from_env_fallback(self, tmp_path, monkeypatch):
@@ -633,7 +639,8 @@ class TestToolHandlers:
 
 
 class TestPrefetch:
-    def test_prefetch_returns_empty_when_no_result(self, provider):
+    def test_prefetch_returns_empty_when_no_result(self, provider_with_config):
+        provider = provider_with_config(memory_graph_prefetch=False)
         provider._client.arecall.return_value = SimpleNamespace(results=[])
         assert provider.prefetch("test") == ""
 
@@ -657,6 +664,39 @@ class TestPrefetch:
         result = p.prefetch("test")
         assert result.startswith("Custom header:")
         assert "- memory line" in result
+
+    def test_prefetch_prepends_memory_graph_anchors(self, provider, monkeypatch):
+        def fake_search(payload):
+            assert payload["query"] == "first turn query"
+            assert payload["domain"] == "core"
+            assert payload["limit"] == 3
+            assert payload["namespace"] == "cli:test-user"
+            return json.dumps({
+                "results": [
+                    {
+                        "uri": "core://用户档案/学习状态/DSE选修",
+                        "snippet": "Student DSE 选修 Physics、Economics、ICT，未选 M1/M2",
+                    }
+                ]
+            })
+
+        provider._user_id = "test-user"
+        monkeypatch.setattr("tools.memory_graph_tool._search", fake_search)
+
+        result = provider.prefetch("first turn query")
+        assert "## Memory Graph Anchors" in result
+        assert result.index("DSE 选修") < result.index("## Hindsight Recall")
+        assert "Memory 1" in result
+
+    def test_prefetch_keeps_hindsight_when_memory_graph_fails(self, provider, monkeypatch):
+        def broken_search(payload):
+            raise RuntimeError("memory graph unavailable")
+
+        monkeypatch.setattr("tools.memory_graph_tool._search", broken_search)
+
+        result = provider.prefetch("first turn query")
+        assert "Memory 1" in result
+        assert "Memory Graph Anchors" not in result
 
     def test_queue_prefetch_skipped_in_tools_mode(self, provider_with_config):
         p = provider_with_config(memory_mode="tools")
