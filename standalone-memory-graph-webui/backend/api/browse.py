@@ -5,7 +5,7 @@ This replaces the old Entity/Relation/Chapter conceptual split with a simple
 hierarchical browser. Every path is just a node with content and children.
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 from typing import Optional
 import config
@@ -34,14 +34,19 @@ class GlossaryRemove(BaseModel):
 
 
 @router.get("/namespaces")
-async def list_namespaces():
-    """Return all distinct namespaces that exist in the paths table.
+async def list_namespaces(request: Request):
+    """Return namespaces visible to the authenticated user.
 
-    Used by the Admin Dashboard namespace selector so the user can switch
-    between agent memory spaces without knowing the exact strings upfront.
-    An empty-string namespace is returned as "" and corresponds to the
-    default (single-agent) namespace.
+    Admin users can see every namespace. Regular users only see shared public
+    plus their own namespace so tenant identifiers do not leak through the UI.
     """
+    user = getattr(request.state, "user", None)
+    if user:
+        is_admin = user.get("role") == "admin" or user.get("username") == "admin"
+        if not is_admin:
+            own_ns = user.get("namespace", "")
+            return [ns for ns in ["", own_ns] if ns or ns == ""]
+
     db = get_db_manager()
     async with db.session() as session:
         result = await session.execute(

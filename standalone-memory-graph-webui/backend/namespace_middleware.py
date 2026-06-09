@@ -72,39 +72,44 @@ class NamespaceMiddleware:
         token = request.cookies.get(_COOKIE_NAME)
         if token:
             username = verify_session_token(token)
-            if username:
-                user = get_user(username)
-                if user:
-                    user_is_admin = user.get("role") == "admin" or user.get("username") == "admin"
-                    override_ns = request.headers.get("x-namespace") or request.query_params.get("namespace")
-                    if override_ns is not None:
-                        # Explicit namespace selection. Admin may use the reserved
-                        # maintenance scope "__all__"; normal reads stay scoped.
-                        if user_is_admin and override_ns == "__all__":
-                            ns = ""
-                            is_admin = True
-                        elif user_is_admin:
-                            ns = override_ns
-                            is_admin = False
-                        else:
-                            # Regular users may browse shared public ("") or their own
-                            # namespace only. Never let a client-controlled header or
-                            # localStorage-selected namespace jump into another user's
-                            # private graph.
-                            own_ns = user.get("namespace", "")
-                            if override_ns not in {"", own_ns}:
-                                await _send_403(send, "Namespace override is outside current user's scope.")
-                                return
-                            ns = override_ns or own_ns
-                            is_admin = False
-                    elif not user_is_admin:
-                        # Regular users default to their own namespace.
-                        ns = user.get("namespace", "")
-                        is_admin = False
-                    else:
-                        # Admin default is shared public, not private and not all.
-                        ns = ""
-                        is_admin = False
+            if not username:
+                await _send_403(send, "Invalid or expired session.")
+                return
+            user = get_user(username)
+            if not user:
+                await _send_403(send, "Session user no longer exists.")
+                return
+            scope.setdefault("state", {})["user"] = user
+            user_is_admin = user.get("role") == "admin" or user.get("username") == "admin"
+            override_ns = request.headers.get("x-namespace") or request.query_params.get("namespace")
+            if override_ns is not None:
+                # Explicit namespace selection. Admin may use the reserved
+                # maintenance scope "__all__"; normal reads stay scoped.
+                if user_is_admin and override_ns == "__all__":
+                    ns = ""
+                    is_admin = True
+                elif user_is_admin:
+                    ns = override_ns
+                    is_admin = False
+                else:
+                    # Regular users may browse shared public ("") or their own
+                    # namespace only. Never let a client-controlled header or
+                    # localStorage-selected namespace jump into another user's
+                    # private graph.
+                    own_ns = user.get("namespace", "")
+                    if override_ns not in {"", own_ns}:
+                        await _send_403(send, "Namespace override is outside current user's scope.")
+                        return
+                    ns = override_ns or own_ns
+                    is_admin = False
+            elif not user_is_admin:
+                # Regular users default to their own namespace.
+                ns = user.get("namespace", "")
+                is_admin = False
+            else:
+                # Admin default is shared public, not private and not all.
+                ns = ""
+                is_admin = False
 
         # Fallback to header/query param if no auth-based namespace
         if not ns and not token:

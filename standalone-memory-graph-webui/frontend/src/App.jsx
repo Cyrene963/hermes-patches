@@ -1,12 +1,12 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { Suspense, useState, useEffect, useCallback } from 'react';
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
-import { ShieldCheck, Database, LayoutGrid, Sparkles, AlertCircle, Layers, Settings, LogOut } from 'lucide-react';
+import { ShieldCheck, Database, LayoutGrid, Sparkles, AlertCircle, Layers, Settings, LogOut, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 
-import ReviewPage from './features/review/ReviewPage';
-import MemoryBrowser from './features/memory/MemoryBrowser';
-import MaintenancePage from './features/maintenance/MaintenancePage';
-import SettingsDrawer from './features/settings/SettingsDrawer';
+const ReviewPage = React.lazy(() => import('./features/review/ReviewPage'));
+const MemoryBrowser = React.lazy(() => import('./features/memory/MemoryBrowser'));
+const MaintenancePage = React.lazy(() => import('./features/maintenance/MaintenancePage'));
+const SettingsDrawer = React.lazy(() => import('./features/settings/SettingsDrawer'));
 import LoginForm from './components/LoginForm';
 import { AUTH_ERROR_EVENT, getNamespaces, getMe, logout } from './lib/api';
 import { I18nProvider, LanguageToggle, useI18n } from './lib/i18n';
@@ -99,21 +99,32 @@ function NamespaceSelector({ user }) {
   );
 }
 
+function PageFallback() {
+  return (
+    <div className="flex h-full items-center justify-center bg-slate-950 text-slate-300" role="status" aria-live="polite">
+      <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.04] px-5 py-4 shadow-2xl shadow-indigo-950/20">
+        <Loader2 className="h-5 w-5 animate-spin text-indigo-300" />
+        <span className="text-sm font-medium">Loading workspace…</span>
+      </div>
+    </div>
+  );
+}
+
 function Layout({ user, onLogout }) {
   const location = useLocation();
   const isReviewPage = location.pathname.startsWith('/review');
   const { t } = useI18n();
 
   return (
-    <div className="flex flex-col h-screen bg-slate-950 text-slate-200">
+    <div className="flex h-dvh flex-col bg-slate-950 text-slate-200">
       {/* Top Navigation Bar */}
-      <div className="h-12 border-b border-slate-800 bg-slate-900 flex items-center px-4 gap-6 flex-shrink-0 z-10">
+      <header className="min-h-12 border-b border-slate-800 bg-slate-900/95 backdrop-blur flex flex-wrap items-center px-3 sm:px-4 gap-2 sm:gap-4 flex-shrink-0 z-10">
         <div className="font-bold text-slate-100 flex items-center gap-2 mr-4">
           <LayoutGrid className="w-5 h-5 text-indigo-500" />
           <span>{t('nav.memory_graph')}</span>
         </div>
 
-        <nav className="flex items-center gap-1 h-full">
+        <nav className="flex h-12 items-center gap-1 overflow-x-auto" aria-label="Primary navigation">
           <NavLink
             to="/review"
             className={({ isActive }) => clsx(
@@ -148,7 +159,7 @@ function Layout({ user, onLogout }) {
           </NavLink>
         </nav>
 
-        <div className="ml-auto flex items-center gap-4">
+        <div className="ml-auto flex min-h-12 flex-wrap items-center justify-end gap-2 sm:gap-3">
           {!isReviewPage && <NamespaceSelector user={user} />}
           <LanguageToggle />
           <button
@@ -169,19 +180,21 @@ function Layout({ user, onLogout }) {
             </button>
           )}
         </div>
-      </div>
+      </header>
+      <main className="flex-1 min-h-0 overflow-hidden">
+        <Suspense fallback={<PageFallback />}>
+          <Routes>
+            <Route path="/" element={<Navigate to="/memory" replace />} />
+            <Route path="/review" element={<ReviewPage />} />
+            <Route path="/memory" element={<MemoryBrowser />} />
+            <Route path="/maintenance" element={<MaintenancePage />} />
+          </Routes>
+        </Suspense>
+      </main>
 
-      {/* Main Area */}
-      <div className="flex-1 min-h-0 overflow-hidden">
-        <Routes>
-          <Route path="/" element={<Navigate to="/memory" replace />} />
-          <Route path="/review" element={<ReviewPage />} />
-          <Route path="/memory" element={<MemoryBrowser />} />
-          <Route path="/maintenance" element={<MaintenancePage />} />
-        </Routes>
-      </div>
-
-      <SettingsDrawer />
+      <Suspense fallback={null}>
+        <SettingsDrawer />
+      </Suspense>
     </div>
   );
 }

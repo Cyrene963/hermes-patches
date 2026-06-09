@@ -1,10 +1,10 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Body
 from db import get_graph_service
 from db.models import MemoryAccessLog
 from db.namespace import get_namespace
 from sqlalchemy import select, func, delete
 from datetime import datetime, timedelta
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 
 router = APIRouter(prefix="/api/maintenance", tags=["maintenance"])
@@ -81,7 +81,7 @@ async def get_access_log_stats():
 
 
 class ClearLogsRequest(BaseModel):
-    keep_days: Optional[int] = None
+    keep_days: Optional[int] = Field(default=None, ge=0, le=3650)
 
 @router.delete("/access-logs")
 async def clear_access_logs(req: ClearLogsRequest):

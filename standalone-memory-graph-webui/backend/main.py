@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -37,6 +37,14 @@ def require_auth(request: Request) -> dict:
     user = get_current_user(request)
     if not user:
         raise HTTPException(401, "Not authenticated")
+    return user
+
+
+def require_admin(request: Request) -> dict:
+    """Dependency: require an authenticated administrator."""
+    user = require_auth(request)
+    if not (user.get("role") == "admin" or user.get("username") == "admin"):
+        raise HTTPException(403, "Admin privileges required")
     return user
 
 
@@ -87,9 +95,11 @@ app = FastAPI(
 )
 
 # CORS
-cors_origins = _cfg.get("cors_origins") or ["*"]
+cors_origins = _cfg.get("cors_origins")
 if isinstance(cors_origins, str):
-    cors_origins = [o.strip() for o in cors_origins.split(",")]
+    cors_origins = [o.strip() for o in cors_origins.split(",") if o.strip()]
+if not cors_origins:
+    cors_origins = ["http://127.0.0.1:8233", "http://localhost:8233"]
 
 app.add_middleware(NamespaceMiddleware)
 app.add_middleware(
@@ -114,7 +124,16 @@ async def api_login(request: Request, response: Response = None):
         raise HTTPException(401, "Invalid credentials")
     token = create_session_token(username)
     resp = JSONResponse({"ok": True, "username": username, "namespace": user.get("namespace", "")})
-    resp.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax", max_age=86400 * 7, path="/")
+    secure_cookie = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https"
+    resp.set_cookie(
+        COOKIE_NAME,
+        token,
+        httponly=True,
+        secure=secure_cookie,
+        samesite="lax",
+        max_age=86400 * 7,
+        path="/",
+    )
     return resp
 
 
@@ -138,9 +157,9 @@ async def api_me(request: Request):
 app.include_router(health_router)
 app.include_router(review_router)
 app.include_router(proposal_review_router)
-app.include_router(browse_router)
-app.include_router(maintenance_router)
-app.include_router(settings_router)
+app.include_router(browse_router, dependencies=[Depends(require_auth)])
+app.include_router(maintenance_router, dependencies=[Depends(require_auth)])
+app.include_router(settings_router, dependencies=[Depends(require_admin)])
 
 # ─── Mount MCP SSE Server ─────────────────────────────────────
 # Mount the MCP server's SSE transport at /mcp (SSE endpoint at /mcp/sse)
@@ -156,13 +175,23 @@ except Exception as e:
 import os
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from starlette.staticfiles import StaticFiles as StarletteStaticFiles
 
 FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend", "dist")
+
+
+class ImmutableAssets(StarletteStaticFiles):
+    """Serve hashed Vite assets with long immutable cache headers."""
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+        return response
 
 # Mount static assets
 _assets_dir = os.path.join(FRONTEND_DIST, "assets")
 if os.path.exists(_assets_dir):
-    app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
+    app.mount("/assets", ImmutableAssets(directory=_assets_dir), name="assets")
 
 @app.get("/{full_path:path}")
 async def serve_spa(request: Request, full_path: str):

@@ -2,18 +2,77 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html,
+  body,
+  #root {
+    min-height: 100%;
+    background: #020617;
+  }
+
+  body {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    scrollbar-color: #475569 #0f172a;
+  }
+
+  ::selection {
+    background: rgba(99, 102, 241, 0.35);
+    color: #f8fafc;
+  }
+
+  :focus-visible {
+    outline: 2px solid rgba(129, 140, 248, 0.95);
+    outline-offset: 3px;
+  }
+
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  [role="button"]:focus-visible {
+    box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.18);
+  }
+}
+
+@layer components {
+  .mg-panel {
+    @apply rounded-2xl border border-white/10 bg-white/[0.045] shadow-2xl shadow-slate-950/30 backdrop-blur-xl;
+  }
+
+  .mg-muted-copy {
+    @apply text-slate-300/90;
+  }
+}
+
 /* Custom Scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: #0f172a; 
+  background: #0f172a;
 }
 ::-webkit-scrollbar-thumb {
-  background: #334155; 
+  background: #334155;
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #475569; 
+  background: #475569;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }

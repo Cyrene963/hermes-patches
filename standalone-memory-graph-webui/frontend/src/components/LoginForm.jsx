@@ -14,13 +14,15 @@ const NeuralStarfield = () => {
 
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let animationFrame;
 
     const resize = () => {
       canvas.width = window.innerWidth * dpr;
       canvas.height = window.innerHeight * dpr;
       canvas.style.width = `${window.innerWidth}px`;
       canvas.style.height = `${window.innerHeight}px`;
-      ctx.scale(dpr, dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
     resize();
     window.addEventListener('resize', resize);
@@ -92,8 +94,8 @@ const NeuralStarfield = () => {
       }
     }
 
-    const nodes = Array.from({ length: 35 }, () => new NeuralNode());
-    const stars = Array.from({ length: 200 }, () => new Star());
+    const nodes = Array.from({ length: reduceMotion ? 14 : 35 }, () => new NeuralNode());
+    const stars = Array.from({ length: reduceMotion ? 60 : 200 }, () => new Star());
 
     const animate = () => {
       ctx.fillStyle = 'rgba(7, 11, 24, 0.05)';
@@ -136,19 +138,23 @@ const NeuralStarfield = () => {
 
       nodes.forEach(node => node.draw(ctx));
 
-      requestAnimationFrame(animate);
+      if (!reduceMotion) {
+        animationFrame = requestAnimationFrame(animate);
+      }
     };
 
     animate();
 
     return () => {
       window.removeEventListener('resize', resize);
+      if (animationFrame) cancelAnimationFrame(animationFrame);
     };
   }, []);
 
   return (
     <canvas
       ref={canvasRef}
+      aria-hidden="true"
       className="absolute inset-0 pointer-events-none"
       style={{ background: 'linear-gradient(to bottom, #050810, #0a0e1a, #070b18)' }}
     />
@@ -182,6 +188,8 @@ const LoginForm = ({ onAuthenticated }) => {
       setLoading(false);
     }
   }, [username, password, onAuthenticated, t]);
+
+  const hasError = Boolean(error);
 
   // 根据语言选择内容
   const features = lang === 'zh' ? [
@@ -238,6 +246,7 @@ const LoginForm = ({ onAuthenticated }) => {
               <span className="relative z-10 bg-gradient-to-r from-indigo-400 via-purple-400 to-cyan-400 bg-clip-text text-transparent">
                 {tagline.highlight}
               </span>
+              <span>{tagline.suffix}</span>
               <motion.span
                 className="absolute inset-0 bg-gradient-to-r from-indigo-400/20 via-purple-400/20 to-cyan-400/20 blur-xl"
                 animate={{
@@ -250,7 +259,6 @@ const LoginForm = ({ onAuthenticated }) => {
                 }}
               />
             </span>
-            {tagline.suffix}
           </h1>
 
           <p className="max-w-2xl text-base sm:text-lg leading-7 sm:leading-8 text-slate-300">
@@ -319,7 +327,9 @@ const LoginForm = ({ onAuthenticated }) => {
                       placeholder={t('login.username')}
                       disabled={loading}
                       autoFocus
-                      className="w-full rounded-xl sm:rounded-2xl border border-white/10 bg-slate-900/40 py-2.5 sm:py-3 pl-10 sm:pl-11 pr-3 sm:pr-4 text-sm text-slate-100 placeholder-slate-600 outline-none transition-all duration-200 focus:border-indigo-400/60 focus:bg-slate-900/60 focus:ring-2 focus:ring-indigo-500/20 disabled:opacity-50"
+                      aria-invalid={hasError}
+                      aria-describedby={hasError ? 'login-error' : undefined}
+                      className="w-full rounded-xl sm:rounded-2xl border border-white/10 bg-slate-900/40 py-2.5 sm:py-3 pl-10 sm:pl-11 pr-3 sm:pr-4 text-sm text-slate-100 placeholder-slate-500 outline-none transition-all duration-200 focus:border-indigo-400/60 focus:bg-slate-900/60 focus:ring-2 focus:ring-indigo-500/20 disabled:opacity-50"
                     />
                   </div>
                 </div>
@@ -342,13 +352,18 @@ const LoginForm = ({ onAuthenticated }) => {
                       }}
                       placeholder={t('login.password')}
                       disabled={loading}
-                      className="w-full rounded-xl sm:rounded-2xl border border-white/10 bg-slate-900/40 py-2.5 sm:py-3 pl-10 sm:pl-11 pr-3 sm:pr-4 text-sm text-slate-100 placeholder-slate-600 outline-none transition-all duration-200 focus:border-indigo-400/60 focus:bg-slate-900/60 focus:ring-2 focus:ring-indigo-500/20 disabled:opacity-50"
+                      aria-invalid={hasError}
+                      aria-describedby={hasError ? 'login-error' : undefined}
+                      className="w-full rounded-xl sm:rounded-2xl border border-white/10 bg-slate-900/40 py-2.5 sm:py-3 pl-10 sm:pl-11 pr-3 sm:pr-4 text-sm text-slate-100 placeholder-slate-500 outline-none transition-all duration-200 focus:border-indigo-400/60 focus:bg-slate-900/60 focus:ring-2 focus:ring-indigo-500/20 disabled:opacity-50"
                     />
                   </div>
                 </div>
 
                 {error && (
                   <motion.div
+                    id="login-error"
+                    role="alert"
+                    aria-live="polite"
                     className="flex items-center gap-2 rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs text-red-200"
                     initial={{ opacity: 0, y: -10 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -361,7 +376,9 @@ const LoginForm = ({ onAuthenticated }) => {
                 <motion.button
                   type="submit"
                   disabled={loading || !username.trim() || !password}
-                  className="group relative mt-2 flex w-full items-center justify-center gap-2 overflow-hidden rounded-xl sm:rounded-2xl bg-gradient-to-r from-indigo-500 via-purple-500 to-indigo-600 px-4 py-2.5 sm:py-3 text-sm font-bold text-white shadow-lg shadow-indigo-500/30 transition-all duration-200 hover:shadow-xl hover:shadow-indigo-500/40 active:scale-[0.98] disabled:from-slate-800 disabled:via-slate-800 disabled:to-slate-800 disabled:text-slate-500 disabled:shadow-none"
+                  aria-disabled={loading || !username.trim() || !password}
+                  title={!username.trim() || !password ? (lang === 'zh' ? '请输入用户名和密码' : 'Enter username and password') : undefined}
+                  className="group relative mt-2 flex w-full items-center justify-center gap-2 overflow-hidden rounded-xl sm:rounded-2xl bg-gradient-to-r from-indigo-500 via-purple-500 to-indigo-600 px-4 py-2.5 sm:py-3 text-sm font-bold text-white shadow-lg shadow-indigo-500/30 transition-all duration-200 hover:shadow-xl hover:shadow-indigo-500/40 active:scale-[0.98] disabled:from-slate-800 disabled:via-slate-800 disabled:to-slate-800 disabled:text-slate-400 disabled:shadow-none"
                   whileHover={{ scale: loading ? 1 : 1.02 }}
                   whileTap={{ scale: loading ? 1 : 0.98 }}
                 >
