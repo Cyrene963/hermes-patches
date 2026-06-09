@@ -26,6 +26,25 @@ def test_expand_query_terms_preserves_cjk_compounds_for_ranking():
     assert "宏观理性" in expanded
 
 
+def test_query_rank_terms_prioritize_high_signal_terms_over_question_noise():
+    terms = SearchIndexer._query_rank_terms("user-a DSE 选修科目是什么？有没有 M1/M2？")
+    term_names = [term for term, _weight in terms]
+
+    assert "dse" in term_names[:6]
+    assert "m1" in term_names[:5]
+    assert "m2" in term_names[:5]
+    assert "是什么" not in term_names
+    assert "有没有" not in term_names
+
+
+def test_snippet_uses_high_signal_term_not_first_low_signal_match():
+    content = "这是一段低价值命中：是什么、有没有。真正答案：user-a DSE 选修 Physics/物理、Economics/经济、ICT，未选 M1/M2。"
+    snippet = SearchIndexer._format_search_snippet(content, "user-a DSE 选修科目是什么？有没有 M1/M2？")
+
+    assert any(token in snippet for token in ["Physics", "物理", "DSE", "M1", "M2", "ICT"])
+    assert "是什么、有没有" not in snippet
+
+
 def test_search_indexer_or_query_allows_partial_memory_matches():
     class FakeSession:
         def __init__(self):

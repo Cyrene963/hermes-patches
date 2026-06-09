@@ -50,9 +50,9 @@ class SearchIndexer:
     # Query helpers (stateless)
     # -----------------------------------------------------------------
 
-    @staticmethod
-    def _format_search_snippet(content: str, query: str) -> str:
-        """Build a short content snippet around the first literal hit or token hit."""
+    @classmethod
+    def _format_search_snippet(cls, content: str, query: str) -> str:
+        """Build a short content snippet around the strongest query-term hit."""
         if not content:
             return ""
 
@@ -63,8 +63,7 @@ class SearchIndexer:
         match_len = len(query)
 
         if pos < 0:
-            tokens = expand_query_terms(query).split()
-            for token in tokens:
+            for token, _weight in cls._query_rank_terms(query):
                 if not token:
                     continue
                 pos = content_lower.find(token.lower())
@@ -76,8 +75,8 @@ class SearchIndexer:
             fallback = content[:80]
             return fallback + ("..." if len(content) > 80 else "")
 
-        start = max(0, pos - 30)
-        end = min(len(content), pos + match_len + 30)
+        start = max(0, pos - 12)
+        end = min(len(content), pos + match_len + 40)
         prefix = "..." if start > 0 else ""
         suffix = "..." if end < len(content) else ""
         return prefix + content[start:end] + suffix
@@ -248,14 +247,52 @@ class SearchIndexer:
     )
 
     @staticmethod
-    def _to_or_tsquery(normalized_query: str) -> str:
-        """Convert normalized whitespace-delimited tokens into a safe OR tsquery.
+    def _query_rank_terms(query: str) -> List[tuple[str, int]]:
+        """Return weighted high-signal query terms for semantic reranking."""
+        stop_terms = {
+            "什么", "怎么", "哪些", "哪个", "是否", "有没有", "能不能", "不能", "可以",
+            "我们", "之前", "现在", "必须", "应该", "需要", "是什么", "的吗", "的是",
+            "修复", "同步", "写入", "直接", "查询", "记得", "目标", "长期", "源图",
+        }
+        weighted: list[tuple[str, int]] = []
+        seen: set[str] = set()
+        for term in expand_query_terms(query).split():
+            raw = term.strip()
+            key = raw.lower()
+            if not raw or key in seen or raw in stop_terms:
+                continue
+            if any(noise in raw for noise in stop_terms):
+                continue
+            if not raw.isascii() and any(ch in raw for ch in "什么哪些哪个是否没有怎么？吗的"):
+                continue
+            is_ascii = raw.isascii()
+            if is_ascii and len(raw) < 2:
+                continue
+            if not is_ascii and len(raw) < 2:
+                continue
+            weight = 1
+            if is_ascii:
+                if raw.isupper() or any(ch.isdigit() for ch in raw):
+                    weight += 3
+                elif len(raw) >= 4:
+                    weight += 2
+            else:
+                if len(raw) >= 4:
+                    weight += 4
+                elif len(raw) == 3:
+                    weight += 2
+            if key in {"dse", "ict", "m1", "m2", "memory", "os", "focuspomo", "hermes", "graph", "raw", "material", "ai", "studio"}:
+                weight += 4
+            if raw in {"user-a", "物理", "经济", "选修", "数字替身", "外置大脑", "Memory OS", "FocusPomo", "番茄", "四端", "patch", "install", "蒸馏"}:
+                weight += 5
+            seen.add(key)
+            weighted.append((key, weight))
+        weighted.sort(key=lambda item: (-item[1], -len(item[0]), item[0]))
+        return weighted
 
-        PostgreSQL websearch/plainto parsing effectively behaves too narrowly for
-        multi-facet memory questions: one unrelated token can make a stored fact
-        disappear. Memory recall should prefer broad candidate retrieval followed
-        by ranking, so we OR unique sanitized tokens here.
-        """
+    @staticmethod
+    def _to_or_tsquery(normalized_query: str) -> str:
+        """Convert normalized whitespace-delimited tokens into a safe OR tsquery."""
         tokens = []
         seen = set()
         for raw in (normalized_query or "").split():
@@ -406,7 +443,8 @@ class SearchIndexer:
                         "disclosure": row.disclosure,
                     })
 
-            terms = [t for t in expand_query_terms(query).split() if len(t) >= 2]
+            weighted_terms = self._query_rank_terms(query)
+            terms = [term for term, _weight in weighted_terms]
 
             def _path_rank(path: str) -> int:
                 if path.startswith("用户档案"):
@@ -423,11 +461,15 @@ class SearchIndexer:
 
             def _semantic_rank(item: Dict[str, Any]):
                 hay = f"{item.get('uri','')} {item.get('path','')} {item.get('snippet','')}".lower()
-                hit_count = sum(1 for t in terms if t.lower() in hay)
-                long_hit_count = sum(1 for t in terms if len(t) >= 4 and t.lower() in hay)
+                weighted_hit_score = sum(weight for term, weight in weighted_terms if term in hay)
+                high_signal_hits = sum(1 for term, weight in weighted_terms if weight >= 5 and term in hay)
+                hit_count = sum(1 for t in terms if t in hay)
+                long_hit_count = sum(1 for t in terms if len(t) >= 4 and t in hay)
                 exact_phrase = 1 if query.strip().lower() in hay else 0
                 return (
                     -exact_phrase,
+                    -high_signal_hits,
+                    -weighted_hit_score,
                     -long_hit_count,
                     -hit_count,
                     -float(item.get("score", 0) or 0),
