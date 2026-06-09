@@ -688,6 +688,33 @@ class TestPrefetch:
         assert result.index("DSE 选修") < result.index("## Hindsight Recall")
         assert "Memory 1" in result
 
+    def test_prefetch_omits_empty_namespace_to_allow_tool_fallback(self, provider, monkeypatch):
+        captured_payload = None
+
+        def fake_search(payload):
+            nonlocal captured_payload
+            captured_payload = payload
+            return json.dumps({
+                "results": [
+                    {
+                        "uri": "core://eval/cli-canary",
+                        "snippet": "Synthetic CLI canary code is CLI-ANCHOR-12345",
+                    }
+                ]
+            })
+
+        provider._user_id = ""
+        provider._chat_id = ""
+        monkeypatch.setattr("tools.memory_graph_tool._search", fake_search)
+
+        result = provider.prefetch("first turn query")
+        assert "## Memory Graph Anchors" in result
+        assert captured_payload == {
+            "query": "first turn query",
+            "domain": "core",
+            "limit": 3,
+        }
+
     def test_prefetch_keeps_hindsight_when_memory_graph_fails(self, provider, monkeypatch):
         def broken_search(payload):
             raise RuntimeError("memory graph unavailable")

@@ -1340,8 +1340,9 @@ class HindsightMemoryProvider(MemoryProvider):
                 "query": query,
                 "domain": "core",
                 "limit": self._memory_graph_prefetch_limit,
-                "namespace": namespace,
             }
+            if namespace:
+                payload["namespace"] = namespace
             raw = memory_graph_tool._search(payload)
             data = json.loads(raw) if isinstance(raw, str) else raw
             results = data.get("results") if isinstance(data, dict) else []
