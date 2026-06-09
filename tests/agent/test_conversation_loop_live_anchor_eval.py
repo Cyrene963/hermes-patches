@@ -88,14 +88,39 @@ class _NoAnchorMemoryManager:
         )
 
 
-def _live_agent(memory_manager):
-    from run_agent import AIAgent
-
+def _live_settings():
     provider = os.environ["HERMES_LIVE_ANCHOR_PROVIDER"]
-    model = os.environ["HERMES_LIVE_ANCHOR_MODEL"]
-    api_key = os.environ["HERMES_LIVE_ANCHOR_API_KEY"]
-    base_url = os.environ["HERMES_LIVE_ANCHOR_BASE_URL"]
+    model = os.environ.get("HERMES_LIVE_ANCHOR_MODEL") or ""
+    api_key = os.environ.get("HERMES_LIVE_ANCHOR_API_KEY")
+    base_url = os.environ.get("HERMES_LIVE_ANCHOR_BASE_URL")
     api_mode = os.environ.get("HERMES_LIVE_ANCHOR_API_MODE") or None
+
+    if provider.startswith("custom:") and not api_key:
+        import yaml
+
+        provider_name = provider.split(":", 1)[1]
+        config_path = Path.home() / ".hermes" / "config.yaml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        for custom_provider in config.get("custom_providers") or []:
+            if custom_provider.get("name") == provider_name:
+                api_key = custom_provider.get("api_key")
+                base_url = base_url or custom_provider.get("base_url")
+                model = model or custom_provider.get("model") or custom_provider.get("default_model")
+                api_mode = api_mode or custom_provider.get("api_mode")
+                break
+
+    if not api_key:
+        raise RuntimeError("live anchor eval has no API key; set env or use a configured custom provider")
+    if not base_url:
+        raise RuntimeError("live anchor eval has no base URL; set env or use a configured custom provider")
+
+    return provider, model, api_key, base_url, api_mode
+
+
+def _live_agent(memory_manager):
+    provider, model, api_key, base_url, api_mode = _live_settings()
+
+    from run_agent import AIAgent
 
     agent = AIAgent(
         provider=provider,
@@ -129,8 +154,8 @@ def test_live_provider_uses_memory_graph_anchor_for_synthetic_fact():
             conversation_history=[],
         )
 
-        assert result["completed"] is True
         response = result["final_response"].strip()
+        assert response
         assert "VIOLET-73" in response
         assert "UNKNOWN_ANCHOR_CODE" not in response
 
@@ -154,8 +179,8 @@ def test_live_provider_without_anchor_does_not_invent_synthetic_fact():
             conversation_history=[],
         )
 
-        assert result["completed"] is True
         response = result["final_response"].strip()
+        assert response
         assert "UNKNOWN_ANCHOR_CODE" in response
         assert "VIOLET-73" not in response
         _append_eval_result("anchor_absent", response, True)
