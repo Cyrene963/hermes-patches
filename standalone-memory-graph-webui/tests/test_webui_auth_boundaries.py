@@ -48,6 +48,19 @@ def test_invalid_session_fails_closed(monkeypatch, tmp_path):
     assert "Invalid or expired session" in response.text
 
 
+def test_invalid_session_does_not_block_public_shell(monkeypatch, tmp_path):
+    main, _auth = _load_app(monkeypatch, tmp_path)
+    client = TestClient(main.app)
+
+    shell = client.get("/", cookies={"mg_session": "not-a-valid-session"})
+    auth_probe = client.get("/api/auth/me", cookies={"mg_session": "not-a-valid-session"})
+
+    assert shell.status_code == 200
+    assert "text/html" in shell.headers.get("content-type", "")
+    assert auth_probe.status_code == 200
+    assert auth_probe.json() == {"authenticated": False}
+
+
 def test_settings_requires_admin(monkeypatch, tmp_path):
     main, auth = _load_app(monkeypatch, tmp_path)
     client = TestClient(main.app)
