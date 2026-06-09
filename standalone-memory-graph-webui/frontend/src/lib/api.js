@@ -58,8 +58,8 @@ export const approveGroup = (nodeUuid) =>
 export const clearAll = () =>
   api.delete('/review').then(res => res.data);
 
-export const getProposalInbox = ({ status = 'pending', limit = 50 } = {}) =>
-  api.get('/proposal-review/inbox', { params: { status, limit } }).then(res => res.data);
+export const getProposalInbox = ({ status = 'pending', stage = 'ready_memory', limit = 50 } = {}) =>
+  api.get('/proposal-review/inbox', { params: { status, stage, limit } }).then(res => res.data);
 
 export const rejectProposal = (proposalId, reason) =>
   api.post(`/proposal-review/proposals/${encodeId(proposalId)}/reject`, { reason }).then(res => res.data);

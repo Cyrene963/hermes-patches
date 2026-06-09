@@ -6,7 +6,7 @@
 
 ## 🧠 什么是 Memory Graph？
 
-Memory Graph 是一个**生产级的 AI 记忆管理系统**，专为需要长期记忆的 AI Agent 设计。它将"影子写入"（shadow writes）转变为"冷静的审核室"（calm review room）：
+Memory Graph WebUI 是一个 AI 记忆审核工作台，专为需要长期记忆的 AI Agent 设计。它将“影子写入”（shadow writes）转变为“冷静的审核室”（calm review room）：
 
 - ✅ **审核后采纳** - 只批准真正属于记忆图谱的内容
 - ✅ **用户隔离** - 用户作用域的审核队列和命名空间检查
@@ -81,9 +81,9 @@ Memory Graph 的解决方案：
 - 自动记录可回滚的变更集
 
 **特色**：
-- 中英文国际化 100% 覆盖
+- 中英文国际化覆盖主要导航、登录、审核、记忆浏览和设置页面
 - 交错动画，列表加载如波浪展开
-- 移动端完美适配
+- 响应式移动端布局；真实设备体验仍需按部署环境验证
 
 ### 2. 记忆浏览器（Memory Explorer）
 
@@ -142,12 +142,11 @@ Memory Graph 的解决方案：
 - **认证**：Basic Auth / Session
 - **端口**：8900（默认）
 
-### 性能优化
+### 性能说明
 
-- **包大小**：502KB（gzip: 157KB）
-- **首屏加载**：< 1s（国内 CDN）
-- **动画性能**：60fps（GPU 加速）
-- **移动端适配**：完整响应式
+- 当前本地构建产物约为：CSS 57.65KB，JS 510.45KB（gzip 约 160KB）
+- Vite build 会提示主 JS chunk >500KB；后续可通过 code-splitting 优化
+- 首屏速度、移动端耗电和 CDN 表现需要按实际部署环境验证
 
 ---
 
@@ -178,15 +177,10 @@ Memory Graph 的解决方案：
 - 🇨🇳 简体中文（zh）
 - 🇺🇸 English（en）
 
-### 覆盖率
-- ✅ 导航菜单：100%
-- ✅ 登录页面：100%
-- ✅ 审核页面：100%（包括确认对话框）
-- ✅ 记忆浏览器：100%
-- ✅ 设置页面：100%
-- ✅ 错误提示：100%
-
-### 自动检测
+### 当前覆盖范围
+- 导航菜单、登录页面、审核页面、记忆浏览器、设置页面已有中英文文案
+- 新增页面或错误分支可能仍需要逐项补齐
+- 浏览器语言自动检测：
 ```javascript
 // 浏览器语言自动检测
 const browserLang = navigator.language || 'en';
@@ -334,29 +328,19 @@ VITE_API_BASE_URL=https://api.yourdomain.com
 
 ---
 
-## 📊 性能指标
+## 📊 已验证指标
 
-### Lighthouse 评分（桌面）
-- **Performance**: 95/100
-- **Accessibility**: 100/100
-- **Best Practices**: 100/100
-- **SEO**: 90/100
+### 本轮本地验证
+- `PYTHONPATH=backend pytest -q tests/test_namespace_isolation.py tests/test_proposal_review_action_hints.py` → 21 passed
+- `npm run build` → built successfully；Vite 提示主 JS chunk >500KB
 
-### 关键指标
-- **FCP**（First Contentful Paint）: 0.8s
-- **LCP**（Largest Contentful Paint）: 1.2s
-- **TBT**（Total Blocking Time）: 50ms
-- **CLS**（Cumulative Layout Shift）: 0.01
-
-### 包大小分析
+### 包大小（本地 Vite build）
 ```
-dist/assets/index-*.js   502KB  (gzip: 157KB)
-├─ framer-motion         180KB
-├─ react + react-dom     130KB
-├─ axios                  30KB
-├─ lucide-react          50KB
-└─ 业务代码              112KB
+dist/assets/index-*.css   57.65KB  (gzip: 9.56KB)
+dist/assets/index-*.js   510.45KB  (gzip: 160.07KB)
 ```
+
+未在本 README 中声称 Lighthouse/真机移动端分数；这些需要按实际部署域名单独测量。
 
 ---
 

@@ -20,12 +20,15 @@ ALICE_NS = "test_user_alice"
 BOB_NS = "test_user_bob"
 ALICE_TOKEN = "ALICE_ONLY_7391"
 BOB_TOKEN = "BOB_ONLY_4826"
-ALICE_UUID = "aaaa0000-0000-0000-0000-000000000001"
-BOB_UUID = "bbbb0000-0000-0000-0000-000000000001"
+ROOT_UUID = "00000000-0000-0000-0000-000000000000"
+ALICE_UUID = "aaaa" + ROOT_UUID[4:-1] + "1"
+BOB_UUID = "bbbb" + ROOT_UUID[4:-1] + "1"
+CORE_TOKEN = "CORE_SHARED_1937"
+CORE_UUID = "cccc" + ROOT_UUID[4:-1] + "1"
 
 @pytest.fixture(scope="module", autouse=True)
 def setup():
-    parent = sql("SELECT uuid FROM mg_nodes WHERE uuid != '00000000-0000-0000-0000-000000000000' LIMIT 1")
+    parent = sql(f"SELECT uuid FROM mg_nodes WHERE uuid != '{ROOT_UUID}' LIMIT 1")
     if not parent:
         parent = sql("SELECT uuid FROM mg_nodes LIMIT 1")
     
@@ -46,13 +49,23 @@ def setup():
     eid2 = sql(f"SELECT id FROM mg_edges WHERE child_uuid = '{BOB_UUID}' LIMIT 1")
     if eid2:
         sql(f"INSERT INTO mg_paths (namespace, domain, path, edge_id, node_uuid, created_at) VALUES ('{BOB_NS}', 'core', 'users/bob/private', {eid2}, '{BOB_UUID}', NOW())")
+
+    # Synthetic shared core fixture. Do not depend on production core data
+    # existing; privacy cleanup may legitimately leave shared core empty.
+    sql(f"INSERT INTO mg_nodes (uuid, created_at) VALUES ('{CORE_UUID}', NOW()) ON CONFLICT DO NOTHING")
+    sql(f"INSERT INTO mg_memories (node_uuid, content, review_state, confidence, source_type, deprecated) VALUES ('{CORE_UUID}', '{CORE_TOKEN} shared public fixture', 'approved', 0.95, 'manual', false) ON CONFLICT DO NOTHING")
+    sql(f"DELETE FROM mg_paths WHERE node_uuid = '{CORE_UUID}'")
+    sql(f"INSERT INTO mg_edges (parent_uuid, child_uuid, name, priority, created_at) VALUES ('{parent}', '{CORE_UUID}', 'core_shared_fixture', 5, NOW()) ON CONFLICT DO NOTHING")
+    eid3 = sql(f"SELECT id FROM mg_edges WHERE child_uuid = '{CORE_UUID}' LIMIT 1")
+    if eid3:
+        sql(f"INSERT INTO mg_paths (namespace, domain, path, edge_id, node_uuid, created_at) VALUES ('', 'core', 'shared/test/core-fixture', {eid3}, '{CORE_UUID}', NOW())")
     
     yield
     
-    sql(f"DELETE FROM mg_paths WHERE namespace IN ('{ALICE_NS}', '{BOB_NS}')")
-    sql(f"DELETE FROM mg_memories WHERE node_uuid IN ('{ALICE_UUID}', '{BOB_UUID}')")
-    sql(f"DELETE FROM mg_edges WHERE child_uuid IN ('{ALICE_UUID}', '{BOB_UUID}')")
-    sql(f"DELETE FROM mg_nodes WHERE uuid IN ('{ALICE_UUID}', '{BOB_UUID}')")
+    sql(f"DELETE FROM mg_paths WHERE namespace IN ('{ALICE_NS}', '{BOB_NS}') OR node_uuid = '{CORE_UUID}'")
+    sql(f"DELETE FROM mg_memories WHERE node_uuid IN ('{ALICE_UUID}', '{BOB_UUID}', '{CORE_UUID}')")
+    sql(f"DELETE FROM mg_edges WHERE child_uuid IN ('{ALICE_UUID}', '{BOB_UUID}', '{CORE_UUID}')")
+    sql(f"DELETE FROM mg_nodes WHERE uuid IN ('{ALICE_UUID}', '{BOB_UUID}', '{CORE_UUID}')")
 
 class TestReadIsolation:
     def test_alice_can_read_own(self):
@@ -85,8 +98,9 @@ class TestGlossaryIsolation:
         assert sql(f"SELECT COUNT(*) FROM mg_glossary_keywords WHERE namespace='{BOB_NS}' AND keyword ILIKE '%alice%'") == "0"
 
 class TestCoreShared:
-    def test_core_data_exists(self):
-        assert int(sql("SELECT COUNT(*) FROM mg_paths WHERE namespace=''")) > 0
+    def test_synthetic_core_data_exists(self):
+        c = sql(f"SELECT m.content FROM mg_paths p JOIN mg_memories m ON m.node_uuid=p.node_uuid WHERE p.namespace='' AND p.path='shared/test/core-fixture'")
+        assert CORE_TOKEN in c
 
 class TestAdminSafety:
     def test_empty_ns_not_admin(self):

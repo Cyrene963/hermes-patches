@@ -29,6 +29,7 @@ function ReviewPage() {
   const [diffError, setDiffError] = useState(null);
   const [activeQueue, setActiveQueue] = useState('graph');
   const [proposalInbox, setProposalInbox] = useState(null);
+  const [proposalStage, setProposalStage] = useState('ready_memory');
   const [selectedProposal, setSelectedProposal] = useState(null);
   const [proposalLoading, setProposalLoading] = useState(false);
   const [proposalError, setProposalError] = useState(null);
@@ -66,7 +67,7 @@ function ReviewPage() {
     setProposalLoading(true);
     setProposalError(null);
     try {
-      const data = await getProposalInbox({ status: 'pending', limit: 100 });
+      const data = await getProposalInbox({ status: 'pending', stage: proposalStage, limit: 100 });
       setProposalInbox(data);
       const proposals = data?.inbox?.proposals || [];
       if (selectedProposal && !proposals.find(p => p.proposal_id === selectedProposal.proposal_id)) {
@@ -83,6 +84,10 @@ function ReviewPage() {
       setProposalLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (activeQueue === 'proposals') loadProposals();
+  }, [proposalStage]);
 
   useEffect(() => {
     if (selectedChange) {
@@ -165,8 +170,8 @@ function ReviewPage() {
 
   const handleApproveProposal = async () => {
     if (!selectedProposal || proposalActionLoading) return;
-    if (selectedProposal.target_store !== 'memory_graph') {
-      setProposalActionError(t('review.only_mg_approvable', { store: selectedProposal.target_store || 'unknown' }));
+    if (selectedProposal.target_store !== 'memory_graph' || selectedProposal.review_stage !== 'ready_memory') {
+      setProposalActionError(t('review.only_ready_memory_approvable'));
       return;
     }
     if (!confirm(t('review.confirm_approve_proposal', { id: selectedProposal.proposal_id }))) return;
@@ -252,8 +257,8 @@ function ReviewPage() {
     }
   };
 
-  const proposalEligibleForDirectApproval = selectedProposal?.target_store === 'memory_graph';
-  const proposalReadbackState = selectedProposal?.target_store === 'memory_graph'
+  const proposalEligibleForDirectApproval = selectedProposal?.target_store === 'memory_graph' && selectedProposal?.review_stage === 'ready_memory';
+  const proposalReadbackState = proposalEligibleForDirectApproval
     ? t('review.readback_will_run')
     : t('review.direct_approval_unavailable');
   const proposalContentText = selectedProposal?.content_preview?.text || t('review.redacted');
@@ -293,7 +298,7 @@ function ReviewPage() {
           </div>
           <div className="mt-4 grid grid-cols-2 gap-2">
             <button
-              onClick={() => setActiveQueue('graph')}
+              onClick={() => { setActiveQueue('graph'); }}
               className={clsx(
                 "rounded-md border px-2 py-2 text-[10px] font-bold uppercase tracking-wider transition-colors",
                 activeQueue === 'graph'
@@ -304,7 +309,7 @@ function ReviewPage() {
               {t('review.graph_changes_plain')} ({changes.length})
             </button>
             <button
-              onClick={() => setActiveQueue('proposals')}
+              onClick={() => { setProposalStage('ready_memory'); setActiveQueue('proposals'); }}
               className={clsx(
                 "rounded-md border px-2 py-2 text-[10px] font-bold uppercase tracking-wider transition-colors",
                 activeQueue === 'proposals'
@@ -312,7 +317,7 @@ function ReviewPage() {
                   : "border-slate-800 bg-slate-900/30 text-slate-500 hover:text-slate-300"
               )}
             >
-              {t('review.pending_memories')} ({proposalInbox?.inbox?.pending_count ?? 0})
+              {t('review.pending_memories')} ({proposalInbox?.inbox?.ready_memory_count ?? 0})
             </button>
           </div>
         </div>
@@ -337,7 +342,31 @@ function ReviewPage() {
           ) : proposalError ? (
             <div className="p-4 text-xs text-rose-400/80">{proposalError}</div>
           ) : (proposalInbox?.inbox?.proposals || []).length > 0 ? (
-            <div className="space-y-1 px-2">
+            <div className="space-y-2 px-2">
+              <div className="grid grid-cols-2 gap-2 px-1 pb-2">
+                <button
+                  onClick={() => setProposalStage('ready_memory')}
+                  className={clsx(
+                    "rounded-md border px-2 py-1.5 text-[10px] font-bold transition-colors",
+                    proposalStage === 'ready_memory'
+                      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+                      : "border-slate-800 bg-slate-900/30 text-slate-500 hover:text-slate-300"
+                  )}
+                >
+                  {t('review.ready_memory_bucket')} ({proposalInbox?.inbox?.ready_memory_count ?? 0})
+                </button>
+                <button
+                  onClick={() => setProposalStage('raw_material')}
+                  className={clsx(
+                    "rounded-md border px-2 py-1.5 text-[10px] font-bold transition-colors",
+                    proposalStage === 'raw_material'
+                      ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                      : "border-slate-800 bg-slate-900/30 text-slate-500 hover:text-slate-300"
+                  )}
+                >
+                  {t('review.raw_material_bucket')} ({proposalInbox?.inbox?.raw_material_count ?? 0})
+                </button>
+              </div>
               {(proposalInbox?.inbox?.proposals || []).map((proposal) => (
                 <button
                   key={proposal.proposal_id}
@@ -351,7 +380,12 @@ function ReviewPage() {
                 >
                   <div className="flex items-center justify-between gap-2">
                     <span className="truncate text-xs font-semibold">{proposalListTitle(proposal)}</span>
-                    <span className="shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[9px] uppercase text-emerald-300 border border-emerald-500/20">{t('review.ready_to_confirm')}</span>
+                    <span className={clsx(
+                      "shrink-0 rounded px-1.5 py-0.5 text-[9px] uppercase border",
+                      proposal.review_stage === 'ready_memory'
+                        ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/20"
+                        : "bg-amber-500/10 text-amber-300 border-amber-500/20"
+                    )}>{proposal.review_stage === 'ready_memory' ? t('review.ready_to_confirm') : t('review.needs_distillation')}</span>
                   </div>
                   <div className="mt-1 truncate text-[11px] text-slate-500">{proposal.namespace || t('review.private_source')}</div>
                   <div className="mt-2 flex items-center justify-end gap-2 text-[10px] text-slate-600">
@@ -363,7 +397,17 @@ function ReviewPage() {
               ))}
             </div>
           ) : (
-            <div className="p-6 text-center text-xs uppercase tracking-widest text-slate-600">{t('review.no_pending_candidates')}</div>
+            <div className="space-y-3 p-4 text-center text-xs text-slate-500">
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={() => setProposalStage('ready_memory')} className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-2 text-emerald-200">
+                  {t('review.ready_memory_bucket')} ({proposalInbox?.inbox?.ready_memory_count ?? 0})
+                </button>
+                <button onClick={() => setProposalStage('raw_material')} className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-2 text-amber-200">
+                  {t('review.raw_material_bucket')} ({proposalInbox?.inbox?.raw_material_count ?? 0})
+                </button>
+              </div>
+              <div className="uppercase tracking-widest text-slate-600">{t('review.no_pending_candidates')}</div>
+            </div>
           )}
         </div>
 
@@ -575,7 +619,7 @@ function ReviewPage() {
                 </div>
                 <div className="min-w-0 flex flex-col">
                   <h2 className="text-lg font-medium text-slate-100 truncate tracking-tight flex items-center gap-3">
-                    <span>{t('review.review_this_memory')}</span>
+                    <span>{selectedProposal.review_stage === 'ready_memory' ? t('review.review_this_memory') : t('review.review_raw_material')}</span>
                     <span className="text-[10px] px-2 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20 tracking-widest font-mono uppercase">
                       {t('review.waiting_for_you')}
                     </span>
@@ -607,8 +651,8 @@ function ReviewPage() {
                 </button>
                 <button
                   onClick={handleApproveProposal}
-                  disabled={proposalActionLoading || selectedProposal.target_store !== 'memory_graph'}
-                  title={selectedProposal.target_store !== 'memory_graph' ? `Direct approval unavailable: target_store=${selectedProposal.target_store || 'unknown'}` : 'Approve into Memory Graph with readback verification'}
+                  disabled={proposalActionLoading || !proposalEligibleForDirectApproval}
+                  title={!proposalEligibleForDirectApproval ? t('review.direct_approval_unavailable') : t('review.approve_title')}
                   className="flex items-center gap-2 px-5 py-2 bg-purple-600/10 hover:bg-purple-500/20 border border-purple-500/30 hover:border-purple-500/50 text-purple-300 hover:text-purple-200 rounded-md transition-all duration-200 text-xs font-bold uppercase tracking-wider disabled:opacity-40 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900/40 disabled:text-slate-500"
                 >
                   <Check size={14} /> {t('review.approve_and_write')}
@@ -621,7 +665,7 @@ function ReviewPage() {
                 <div className="rounded-2xl border border-purple-500/20 bg-gradient-to-br from-purple-500/10 via-slate-900/60 to-indigo-500/5 p-6 shadow-[0_0_40px_rgba(124,58,237,0.10)]">
                   <div className="text-xs font-bold uppercase tracking-widest text-purple-300 mb-2">{t('review.what_to_do_title')}</div>
                   <p className="text-base text-slate-200 leading-7">
-                    {proposalStillRedacted ? t('review.redacted_warning') : t('review.what_to_do_desc')}
+                    {proposalStillRedacted ? t('review.redacted_warning') : (selectedProposal.review_stage === 'ready_memory' ? t('review.what_to_do_desc') : t('review.raw_material_desc'))}
                   </p>
                   <div className="mt-5 grid gap-3 md:grid-cols-3">
                     {[
@@ -639,7 +683,7 @@ function ReviewPage() {
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-6">
-                    <h3 className="text-xs font-bold text-emerald-300 uppercase mb-4 tracking-widest">{t('review.proposed_memory')}</h3>
+                    <h3 className="text-xs font-bold text-emerald-300 uppercase mb-4 tracking-widest">{selectedProposal.review_stage === 'ready_memory' ? t('review.proposed_memory') : t('review.raw_material_title')}</h3>
                     <div className="text-base text-slate-100 leading-7 whitespace-pre-wrap">{proposalContentText}</div>
                     <div className="mt-3 text-[10px] uppercase tracking-widest text-slate-600">{t('review.length')}: {selectedProposal.content_preview?.length ?? 0}</div>
                   </div>
