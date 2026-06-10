@@ -62,7 +62,7 @@ def digest_text(*parts: str) -> str:
         h.update((p or '').encode('utf-8', errors='ignore')); h.update(b'\0')
     return h.hexdigest()[:16]
 
-def draft_from(payload: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+def draft_from(payload: dict[str, Any], action: dict[str, Any], private_dir: Path | None = None) -> dict[str, Any]:
     c=payload.get('candidate') or {}
     decision=payload.get('decision') or {}
     changeset=payload.get('changeset') or {}
@@ -85,6 +85,35 @@ def draft_from(payload: dict[str, Any], action: dict[str, Any]) -> dict[str, Any
         'needs_distillation_before_memory_graph': 'distill_raw_material_before_memory_graph',
         'eligible_memory_graph_approval_review': 'direct_memory_graph_approval_review',
     }.get(action_hint, 'manual_review')
+    private_raw_path = ''
+    if private_dir is not None:
+        private_raw_path = str(private_dir / f"{proposal_id or action.get('proposal_id') or digest_text(content)}.json")
+        raw_payload = {
+            'proposal_id': proposal_id,
+            'line_no': payload.get('_line_no') or action.get('line_no'),
+            'route': route,
+            'action_hint': action_hint,
+            'namespace_scope': namespace,
+            'candidate_kind': kind,
+            'risk_level': risk,
+            'target_store': target_store,
+            'target_path': target_path,
+            'content': content,
+            'evidence_quote': evidence,
+            'readback_queries': queries,
+            'distillation_prompt': (
+                'Distill this raw source material into one concise durable memory only if it states a stable user preference, '
+                'system rule, project convention, or self-model fact. Preserve uncertainty. Do not store raw excerpts directly.'
+            ),
+            'proposed_memory_draft': '',
+            'approval_status': 'needs_private_distillation_review',
+        }
+        p = Path(private_raw_path)
+        p.write_text(json.dumps(raw_payload, ensure_ascii=False, indent=2), encoding='utf-8')
+        try:
+            os.chmod(p, 0o600)
+        except OSError:
+            pass
     # Do NOT include raw content by default. Store hashes/lengths for dedup and optional private expansion.
     return {
         'draft_id': 'draft_'+digest_text(proposal_id, action_hint, namespace, kind, target_path, content),
@@ -108,6 +137,9 @@ def draft_from(payload: dict[str, Any], action: dict[str, Any]) -> dict[str, Any
         'evidence_length': len(evidence),
         'readback_queries_redacted': [digest_text(str(q)) for q in queries[:5]],
         'readback_query_count': len(queries),
+        'private_raw_path': private_raw_path,
+        'private_raw_available': bool(private_raw_path),
+        'private_raw_mode': '0600_local_file' if private_raw_path else '',
         'recommended_next_step': {
             'skill_or_procedural_memory_review': 'Review raw candidate privately; if generic reusable workflow, patch/create an appropriate skill and mark proposal consumed with evidence.',
             'private_tool_route_memory_review': 'Review raw candidate privately; if it is a durable credential/tool route, store only the route pointer in private namespace, never the secret.',
@@ -127,7 +159,12 @@ def main() -> int:
     ap.add_argument('--write-raw-private', action='store_true', help='Unsafe for reports; currently refused unless explicitly implemented later.')
     args=ap.parse_args()
     if args.write_raw_private:
-        raise SystemExit('write-raw-private is intentionally not implemented in dry-run consumer')
+        private_dir = DRAFT_DIR / 'private_raw'
+        private_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(private_dir, 0o700)
+        except OSError:
+            pass
     queue=Path(args.queue)
     aq=Path(args.action_queue) if args.action_queue else latest_action_queue()
     ts=time.strftime('%Y%m%d_%H%M%S')
@@ -156,13 +193,14 @@ def main() -> int:
             action_hint=str(a.get('action_hint') or '')
             if action_hint not in SAFE_ACTIONS:
                 skipped['unsafe_or_manual_action']+=1; continue
-            d=draft_from(p,a)
+            d=draft_from(p,a, private_dir if args.write_raw_private else None)
             drafts.append(d)
             if len(drafts)>=args.limit: break
         by_route=Counter(d['route'] for d in drafts)
         by_risk=Counter(d['risk_level'] or 'unknown' for d in drafts)
         by_ns=Counter(d['namespace_scope'] or 'unknown' for d in drafts)
-        report['counts']={'drafts':len(drafts),'skipped':dict(skipped),'by_route':dict(by_route),'by_risk':dict(by_risk),'by_namespace':dict(by_ns)}
+        private_raw_files=sum(1 for d in drafts if d.get('private_raw_available'))
+        report['counts']={'drafts':len(drafts),'private_raw_files':private_raw_files,'skipped':dict(skipped),'by_route':dict(by_route),'by_risk':dict(by_risk),'by_namespace':dict(by_ns)}
         if not drafts:
             report['findings'].append({'severity':'P1','title':'no conversion drafts generated'})
         if by_route.get('manual_review',0):
