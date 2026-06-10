@@ -273,8 +273,10 @@ def ai_studio_stats() -> dict:
 
 def score(report: dict) -> dict:
     gates = []
-    def gate(name, ok, weight, note=''):
-        gates.append({'name': name, 'ok': bool(ok), 'weight': weight, 'note': note})
+    def gate(name, ok, weight, note='', status=None):
+        if status is None:
+            status = 'pass' if ok else 'fail'
+        gates.append({'name': name, 'ok': bool(ok), 'weight': weight, 'note': note, 'status': status})
     api = report['api']
     prop = report['proposal_stats']
     shadow = report['shadow_stats']
@@ -300,12 +302,20 @@ def score(report: dict) -> dict:
     gate('Hermes memory modules import', repo['hermes_memory_imports'].get('ok'), 8)
     tests = report['focused_tests']
     if tests.get('skipped'):
-        gate('Focused Memory OS tests', False, 12, 'skipped in lightweight cron')
+        gate('Focused Memory OS tests', None, 12, 'skipped in lightweight watchdog; set RUN_FOCUSED_TESTS=1 for strict gate', status='skipped')
     else:
         gate('Focused Memory OS tests', tests.get('ok'), 12)
-    earned = sum(g['weight'] for g in gates if g['ok'])
-    total = sum(g['weight'] for g in gates)
-    return {'score_percent': round(earned / total * 100, 1) if total else 0, 'earned': earned, 'total': total, 'gates': gates}
+    scored_gates = [g for g in gates if g.get('status') != 'skipped']
+    earned = sum(g['weight'] for g in scored_gates if g['ok'])
+    total = sum(g['weight'] for g in scored_gates)
+    return {
+        'score_percent': round(earned / total * 100, 1) if total else 0,
+        'earned': earned,
+        'total': total,
+        'scored_total': total,
+        'skipped_weight': sum(g['weight'] for g in gates if g.get('status') == 'skipped'),
+        'gates': gates,
+    }
 
 
 def main() -> int:
@@ -336,7 +346,8 @@ def main() -> int:
     lines.append('')
     lines.append('## Gates')
     for g in report['score']['gates']:
-        lines.append(f"- {'PASS' if g['ok'] else 'FAIL'} — {g['name']} ({g['weight']}) {g.get('note','')}")
+        label = {'pass': 'PASS', 'fail': 'FAIL', 'skipped': 'SKIP'}.get(g.get('status'), 'PASS' if g['ok'] else 'FAIL')
+        lines.append(f"- {label} — {g['name']} ({g['weight']}) {g.get('note','')}")
     lines.append('')
     lines.append('## Proposal queue')
     ps = report['proposal_stats']
