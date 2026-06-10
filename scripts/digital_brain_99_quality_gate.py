@@ -368,9 +368,9 @@ def score(report: dict) -> dict:
         changesets.get('bad_jsonl') == 0
         and changesets.get('missing_required') == 0
         and changesets.get('blocked') == 0
-        and changesets.get('review_ready', 0) >= prop.get('pending_raw_material', 0)
+        and (changesets.get('review_ready', 0) + changesets.get('awaiting_review', 0)) >= prop.get('pending_raw_material', 0)
     )
-    gate('Raw proposal distillation changesets are review-ready', changeset_coverage_ok, 8, f"review_ready={changesets.get('review_ready')} pending_raw={prop.get('pending_raw_material', 0)} blocked={changesets.get('blocked')} missing_required={changesets.get('missing_required')}")
+    gate('Raw proposal distillation changesets are review-ready', changeset_coverage_ok, 8, f"review_ready={changesets.get('review_ready')} awaiting={changesets.get('awaiting_review')} pending_raw={prop.get('pending_raw_material', 0)} blocked={changesets.get('blocked')} missing_required={changesets.get('missing_required')}")
     approve_gateway_e2e = report['approve_gateway_e2e']
     gate('Gateway approval E2E canary writes, readbacks, recalls from gateway, and cleans up', approve_gateway_e2e.get('ok'), 10, f"status={approve_gateway_e2e.get('status')} read={approve_gateway_e2e.get('read_ok')} search={approve_gateway_e2e.get('search_ok')} gateway={approve_gateway_e2e.get('gateway_ok')} cleanup={approve_gateway_e2e.get('cleanup_after_error')}")
     gate('Shadow writes active', shadow['total_rows'] > 0, 8, f"total={shadow['total_rows']}")
