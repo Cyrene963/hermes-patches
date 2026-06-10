@@ -484,7 +484,7 @@ if [ -f "$PATCHES_DIR/scripts/memory_os_shadow_namespace_watchdog.py" ]; then
     chmod +x "$PROFILE_DIR/scripts/memory_os_shadow_namespace_watchdog.py"
     echo "   ✅ memory_os_shadow_namespace_watchdog.py 已安装"
 fi
-for script_name in build_memory_backfill_review_queue.py backfill_review_proposal_readback_queries.py digital_brain_99_baseline.py digital_brain_99_quality_gate.py proposal-triage-audit.py proposal-review-consumer-dry-run.py proposal_approve_e2e_canary.py hindsight_backlog_watchdog.py migrate_review_backlog_to_clarification.py triage_memory_repair_queue.py memory_graph_lifecycle_canary.py; do
+for script_name in build_memory_backfill_review_queue.py backfill_review_proposal_readback_queries.py digital_brain_99_baseline.py digital_brain_99_quality_gate.py proposal-triage-audit.py proposal-review-consumer-dry-run.py proposal-distillation-suggestions.py proposal_approve_e2e_canary.py hindsight_backlog_watchdog.py migrate_review_backlog_to_clarification.py triage_memory_repair_queue.py memory_graph_lifecycle_canary.py; do
     if [ -f "$PATCHES_DIR/scripts/$script_name" ]; then
         mkdir -p "$PROFILE_DIR/scripts"
         cp "$PATCHES_DIR/scripts/$script_name" "$PROFILE_DIR/scripts/$script_name"
