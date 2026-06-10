@@ -233,6 +233,11 @@ if [ -f "$PATCHES_DIR/plugins/image_gen/openai/__init__.py" ]; then
     cp "$PATCHES_DIR/plugins/image_gen/openai/__init__.py" "$HERMES_DIR/plugins/image_gen/openai/__init__.py"
     echo "   ✅ OpenAI image_gen provider 已复制"
 fi
+if [ -f "$PATCHES_DIR/plugins/memory-graph/__init__.py" ]; then
+    mkdir -p "$PROFILE_DIR/plugins/memory-graph"
+    cp "$PATCHES_DIR/plugins/memory-graph/__init__.py" "$PROFILE_DIR/plugins/memory-graph/__init__.py"
+    echo "   ✅ Memory Graph profile plugin 已复制"
+fi
 
 # memory-tencentdb provider overlay. Install the provider by default so the
 # feature survives hermes update; activation still depends on memory.provider
@@ -397,6 +402,9 @@ fi
 if [ -d "$HERMES_DIR/plugins/memory/memory_tencentdb" ]; then
     find "$HERMES_DIR/plugins/memory/memory_tencentdb" -name "*.pyc" -delete 2>/dev/null
 fi
+if [ -d "$PROFILE_DIR/plugins/memory-graph" ]; then
+    find "$PROFILE_DIR/plugins/memory-graph" -name "*.pyc" -delete 2>/dev/null
+fi
 if [ -d "$HERMES_DIR/venv/lib/python3.11/site-packages/hindsight_api" ]; then
     find "$HERMES_DIR/venv/lib/python3.11/site-packages/hindsight_api" -name "embeddings*.pyc" -delete 2>/dev/null
     find "$HERMES_DIR/venv/lib/python3.11/site-packages/hindsight_api" -name "openai_compatible_llm*.pyc" -delete 2>/dev/null
@@ -441,6 +449,9 @@ if [ -n "$PYTHON_BIN" ]; then
             compile_files+=("$HERMES_DIR/$rel")
         fi
     done
+    if [ -f "$PROFILE_DIR/plugins/memory-graph/__init__.py" ]; then
+        compile_files+=("$PROFILE_DIR/plugins/memory-graph/__init__.py")
+    fi
     if [ ${#compile_files[@]} -gt 0 ]; then
         "$PYTHON_BIN" -m py_compile "${compile_files[@]}"
         echo "   ✅ 关键 Python 文件 py_compile 通过"
@@ -484,14 +495,18 @@ if [ -f "$PATCHES_DIR/scripts/memory_os_shadow_namespace_watchdog.py" ]; then
     chmod +x "$PROFILE_DIR/scripts/memory_os_shadow_namespace_watchdog.py"
     echo "   ✅ memory_os_shadow_namespace_watchdog.py 已安装"
 fi
-for script_name in build_memory_backfill_review_queue.py backfill_review_proposal_readback_queries.py digital_brain_99_baseline.py digital_brain_99_quality_gate.py proposal-triage-audit.py proposal-review-consumer-dry-run.py proposal-distillation-suggestions.py proposal-materialize-review-changesets.py proposal_approve_e2e_canary.py hindsight_backlog_watchdog.py migrate_review_backlog_to_clarification.py triage_memory_repair_queue.py memory_graph_lifecycle_canary.py; do
-    if [ -f "$PATCHES_DIR/scripts/$script_name" ]; then
-        mkdir -p "$PROFILE_DIR/scripts"
-        cp "$PATCHES_DIR/scripts/$script_name" "$PROFILE_DIR/scripts/$script_name"
-        chmod +x "$PROFILE_DIR/scripts/$script_name"
-        echo "   ✅ $script_name 已安装"
-    fi
-done
+if [ "${HERMES_INSTALL_MAINTAINER_SCRIPTS:-0}" = "1" ]; then
+    for script_name in build_memory_backfill_review_queue.py backfill_review_proposal_readback_queries.py digital_brain_99_baseline.py digital_brain_99_quality_gate.py proposal-triage-audit.py proposal-review-consumer-dry-run.py proposal-distillation-suggestions.py proposal-materialize-review-changesets.py proposal_approve_e2e_canary.py hindsight_backlog_watchdog.py migrate_review_backlog_to_clarification.py triage_memory_repair_queue.py memory_graph_lifecycle_canary.py; do
+        if [ -f "$PATCHES_DIR/scripts/$script_name" ]; then
+            mkdir -p "$PROFILE_DIR/scripts"
+            cp "$PATCHES_DIR/scripts/$script_name" "$PROFILE_DIR/scripts/$script_name"
+            chmod +x "$PROFILE_DIR/scripts/$script_name"
+            echo "   ✅ maintainer script $script_name 已安装"
+        fi
+    done
+else
+    echo "   ⏭️ maintainer scripts skipped (set HERMES_INSTALL_MAINTAINER_SCRIPTS=1 to install)"
+fi
 if [ -f "$PATCHES_DIR/scripts/hermes-ast-grep-audit.sh" ]; then
     mkdir -p "$PROFILE_DIR/scripts"
     cp "$PATCHES_DIR/scripts/hermes-ast-grep-audit.sh" "$PROFILE_DIR/scripts/hermes-ast-grep-audit.sh"
@@ -540,12 +555,16 @@ if [ -d "$PATCHES_DIR/standalone-memory-graph-webui" ]; then
     echo "   ✅ standalone Memory Graph WebUI overlay 已复制"
 fi
 if [ -f "$PATCHES_DIR/scripts/deploy-standalone-memory-graph-webui.sh" ]; then
-    mkdir -p "$PROFILE_DIR/scripts"
-    cp "$PATCHES_DIR/scripts/deploy-standalone-memory-graph-webui.sh" "$PROFILE_DIR/scripts/deploy-standalone-memory-graph-webui.sh"
-    chmod +x "$PROFILE_DIR/scripts/deploy-standalone-memory-graph-webui.sh"
-    echo "   ✅ deploy-standalone-memory-graph-webui.sh 已安装"
-    if [ "${HERMES_DEPLOY_STANDALONE_MG_WEBUI:-0}" = "1" ] && [ -n "${MG_PROJECT_DIR:-}" ] && [ "$(id -u)" -eq 0 ]; then
-        PATCHES_DIR="$PROFILE_DIR" "$PROFILE_DIR/scripts/deploy-standalone-memory-graph-webui.sh" || echo "   ⚠️ standalone Memory Graph WebUI 部署失败，请手动运行 $PROFILE_DIR/scripts/deploy-standalone-memory-graph-webui.sh"
+    if [ "${HERMES_INSTALL_DEPLOY_HELPERS:-0}" = "1" ]; then
+        mkdir -p "$PROFILE_DIR/scripts"
+        cp "$PATCHES_DIR/scripts/deploy-standalone-memory-graph-webui.sh" "$PROFILE_DIR/scripts/deploy-standalone-memory-graph-webui.sh"
+        chmod +x "$PROFILE_DIR/scripts/deploy-standalone-memory-graph-webui.sh"
+        echo "   ✅ deploy-standalone-memory-graph-webui.sh 已安装"
+        if [ "${HERMES_DEPLOY_STANDALONE_MG_WEBUI:-0}" = "1" ] && [ -n "${MG_PROJECT_DIR:-}" ] && [ "$(id -u)" -eq 0 ]; then
+            PATCHES_DIR="$PROFILE_DIR" "$PROFILE_DIR/scripts/deploy-standalone-memory-graph-webui.sh" || echo "   ⚠️ standalone Memory Graph WebUI 部署失败，请手动运行 $PROFILE_DIR/scripts/deploy-standalone-memory-graph-webui.sh"
+        fi
+    else
+        echo "   ⏭️ deploy helpers skipped (set HERMES_INSTALL_DEPLOY_HELPERS=1 to install)"
     fi
 fi
 

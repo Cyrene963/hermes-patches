@@ -42,3 +42,27 @@ def test_auto_recall_uses_content_not_only_snippet(monkeypatch):
     assert result and "context" in result
     assert "--betas context-1m-2025-08-07" in result["context"]
     assert "Do not stop at Not logged in" in result["context"]
+
+
+def test_learning_event_messages_expand_to_target_function_queries():
+    mod = _load_plugin()
+
+    queries = mod._build_recall_queries("我今天英文作文那个复盘你还记得吗")
+    joined = "\n".join(queries)
+
+    assert "学习事件" in joined
+    assert "考后复盘" in joined
+    assert "主动召回" in joined
+    assert "target function" in joined
+    assert "Paper 2 task coverage" in joined
+
+
+def test_unrelated_messages_do_not_get_learning_event_expansion():
+    mod = _load_plugin()
+
+    queries = mod._build_recall_queries("今天天气怎么样")
+    joined = "\n".join(queries)
+
+    assert queries == ["今天天气怎么样"]
+    assert "学习事件" not in joined
+    assert "target function" not in joined

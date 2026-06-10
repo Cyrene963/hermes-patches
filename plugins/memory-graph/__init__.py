@@ -174,6 +174,8 @@ def _build_recall_queries(user_message: str, max_chars: int = 320, max_tokens: i
     ranked = sorted({t.strip().lower() for t in tokens if t.strip()}, key=lambda s: (-len(s), s))
 
     queries = [msg]
+    learning_queries = _build_learning_event_recall_queries(msg)
+    queries.extend(learning_queries)
     if ranked:
         queries.append(" ".join(ranked[:max_tokens]))
         queries.extend(ranked[: min(5, max_tokens)])
@@ -186,6 +188,60 @@ def _build_recall_queries(user_message: str, max_chars: int = 320, max_tokens: i
             seen.add(query)
             deduped.append(query)
     return deduped
+
+
+def _build_learning_event_recall_queries(user_message: str) -> list[str]:
+    """Return generic recall queries for learning events and target functions.
+
+    Learning-event memories are often stored under abstract wording such as
+    "考后复盘", "学习事件", "目标函数", or "训练重点". A later user message may
+    only say "英文作文", "错题", or "你不记得了吗", so the literal-message query
+    alone can miss the durable rule. Keep this generic: expand by event class and
+    domain words from the current message, not by user-specific facts.
+    """
+    import re
+
+    text = _coerce_text(user_message).strip()
+    if not text:
+        return []
+    lowered = text.lower()
+
+    domain_markers = {
+        "exam": ("考试", "考后", "作文", "英文", "英语", "english", "paper", "part", "分数", "扣分", "错题", "复盘", "dse"),
+        "project": ("项目", "代码", "架构", "bug", "补丁", "验证", "测试", "部署", "project", "patch", "test"),
+        "writing": ("写作", "作文", "小说", "文章", "句型", "表达", "writing", "prose"),
+        "memory": ("记忆", "外置大脑", "数字替身", "忘", "不记得", "memory", "recall"),
+    }
+    trigger_markers = (
+        "复盘", "错题", "扣分", "分数", "弱点", "训练", "学会", "掌握",
+        "不记得", "忘", "之前", "刚才", "换窗口", "换上下文", "纠正", "错错错",
+        "target function", "learning event", "postmortem", "review", "recall",
+    )
+    has_trigger = any(marker in lowered for marker in trigger_markers)
+    domains = [name for name, markers in domain_markers.items() if any(marker in lowered for marker in markers)]
+    if not has_trigger and not domains:
+        return []
+
+    token_re = r"[A-Za-z0-9_]{3,}|[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,}"
+    tokens = re.findall(token_re, text)
+    ranked = sorted({t.strip().lower() for t in tokens if t.strip()}, key=lambda s: (-len(s), s))
+    domain_text = " ".join(ranked[:6])
+
+    queries = []
+    base_terms = [
+        "学习事件 考后复盘 训练重点 主动召回",
+        "target function learning event proactive recall",
+        "用户纠正 目标函数 执行标准 验证 readback",
+    ]
+    if domain_text:
+        queries.extend(f"{domain_text} {terms}" for terms in base_terms)
+    else:
+        queries.extend(base_terms)
+    if "exam" in domains or "writing" in domains:
+        queries.append(f"{domain_text} 考后复盘 英文作文 Paper 2 task coverage 训练重点".strip())
+    if "memory" in domains:
+        queries.append(f"{domain_text} 自动按需存取 换窗口 换上下文 主动召回".strip())
+    return queries[:5]
 
 
 def _context_budget(default: int = 1200) -> int:
