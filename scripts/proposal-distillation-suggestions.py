@@ -13,7 +13,6 @@ import argparse
 import json
 import os
 import re
-import stat
 import time
 from pathlib import Path
 from typing import Any
@@ -30,6 +29,22 @@ def _chmod(path: Path, mode: int) -> None:
         os.chmod(path, mode)
     except OSError:
         pass
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _chmod(path.parent, 0o700)
+    data = json.dumps(payload, ensure_ascii=False, indent=2)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(data)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:
@@ -107,8 +122,7 @@ def main() -> int:
         suggestion = _suggestion_from(raw, raw_path)
         proposal_id = str(raw.get("proposal_id") or raw_path.stem)
         out_path = out_dir / f"{proposal_id}.distilled.json"
-        out_path.write_text(json.dumps(suggestion, ensure_ascii=False, indent=2), encoding="utf-8")
-        _chmod(out_path, 0o600)
+        _atomic_write_json(out_path, suggestion)
         summary.append(
             {
                 "proposal_id_suffix": proposal_id[-8:],

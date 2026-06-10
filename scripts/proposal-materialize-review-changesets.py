@@ -33,6 +33,22 @@ def _chmod(path: Path, mode: int) -> None:
         pass
 
 
+def _atomic_write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _chmod(path.parent, 0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + '\n')
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
 def _sha(value: Any, n: int = 16) -> str:
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:n]
@@ -62,7 +78,6 @@ def _slug(text: str, fallback: str) -> str:
     text = " ".join(str(text or "").split())
     if not text:
         return fallback
-    # Keep URI segment short and filesystem/URL friendly while preserving unicode text.
     text = re.sub(r"[\\/#?%*:|\"<>]+", " ", text).strip()
     text = re.sub(r"\s+", "-", text)[:56].strip("-")
     return text or fallback
@@ -95,7 +110,8 @@ def _validate(suggestion: dict[str, Any]) -> tuple[str, list[str]]:
         warnings.append("unexpected approval_status")
     if str(suggestion.get("confidence")) == "low_to_medium_auto_distillation":
         warnings.append("auto-distilled; needs strong-model or human review before write")
-    status = "blocked" if any(w.startswith("missing") or "too short" in w for w in warnings) else "review_ready"
+    has_blocking = any(w.startswith("missing") or "too short" in w for w in warnings)
+    status = "blocked" if has_blocking else ("review_ready" if not warnings else "awaiting_review")
     return status, warnings
 
 
@@ -181,10 +197,7 @@ def main() -> int:
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
     changeset_path = changeset_dir / f"review-changesets-{stamp}.jsonl"
-    with changeset_path.open("w", encoding="utf-8") as handle:
-        for cs in changesets:
-            handle.write(json.dumps(cs, ensure_ascii=False, sort_keys=True) + "\n")
-    _chmod(changeset_path, 0o600)
+    _atomic_write_jsonl(changeset_path, changesets)
 
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -192,6 +205,7 @@ def main() -> int:
         "changeset_file": str(changeset_path),
         "count": len(changesets),
         "review_ready": sum(1 for cs in changesets if cs.get("review_status") == "review_ready"),
+        "awaiting_review": sum(1 for cs in changesets if cs.get("review_status") == "awaiting_review"),
         "blocked": sum(1 for cs in changesets if cs.get("review_status") == "blocked"),
         "items": report_items,
         "privacy_note": "Report redacts content/namespace/target URI. Private changeset JSONL is 0600 and contains proposed memory text.",
@@ -201,7 +215,7 @@ def main() -> int:
 
     print(report_path)
     print(changeset_path)
-    print(f"changesets {len(changesets)} review_ready {report['review_ready']} blocked {report['blocked']}")
+    print(f"changesets {len(changesets)} review_ready {report['review_ready']} awaiting_review {report['awaiting_review']} blocked {report['blocked']}")
     return 0 if report["blocked"] == 0 else 1
 
 
