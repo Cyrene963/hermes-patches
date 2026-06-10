@@ -51,6 +51,10 @@ case "$HERMES_DIR" in
             HERMES_INSTALL_GIT_HOOKS=0
             echo "   ⏭️ detected temporary/smoke checkout; skipping patch-repo git hook installation (set HERMES_INSTALL_GIT_HOOKS=1 to override)"
         fi
+        if [ -z "${HERMES_INSTALL_NPM_TOOLS+x}" ]; then
+            HERMES_INSTALL_NPM_TOOLS=0
+            echo "   ⏭️ detected temporary/smoke checkout; skipping global npm tool installation (set HERMES_INSTALL_NPM_TOOLS=1 to override)"
+        fi
         ;;
 esac
 
@@ -553,12 +557,14 @@ if [ -d "$PATCHES_DIR/ast-grep-rules" ]; then
     cp -R "$PATCHES_DIR/ast-grep-rules/." "$PROFILE_DIR/ast-grep-rules/"
     echo "   ✅ ast-grep structural audit rules 已安装"
 fi
-if ! command -v ast-grep >/dev/null 2>&1; then
+if [ "${HERMES_INSTALL_NPM_TOOLS:-1}" != "0" ] && ! command -v ast-grep >/dev/null 2>&1; then
     if command -v npm >/dev/null 2>&1; then
         npm install -g @ast-grep/cli >/dev/null 2>&1 || echo "   ⚠️ ast-grep 自动安装失败，可手动运行: npm install -g @ast-grep/cli"
     else
         echo "   ⚠️ npm 不存在，跳过 ast-grep 安装；可手动安装 @ast-grep/cli"
     fi
+elif [ "${HERMES_INSTALL_NPM_TOOLS:-1}" = "0" ]; then
+    echo "   ⏭️ ast-grep global install skipped (set HERMES_INSTALL_NPM_TOOLS=1 to install)"
 fi
 if [ -f "$PATCHES_DIR/scripts/hermes_deep_research_orchestrator.py" ]; then
     mkdir -p "$PROFILE_DIR/scripts"
