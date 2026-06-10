@@ -43,6 +43,10 @@ case "$HERMES_DIR" in
             HERMES_INSTALL_DB=0
             echo "   ⏭️ detected temporary/smoke checkout; skipping live DB role initialization (set HERMES_INSTALL_DB=1 to override)"
         fi
+        if [ -z "${HERMES_INSTALL_DEPS+x}" ]; then
+            HERMES_INSTALL_DEPS=0
+            echo "   ⏭️ detected temporary/smoke checkout; skipping system package installation (set HERMES_INSTALL_DEPS=1 to override)"
+        fi
         ;;
 esac
 
@@ -63,7 +67,7 @@ fi
 # If `hermes update` or a fresh system image omits them, the web UI can look
 # "installed" but fail immediately on launch. Install the Debian packages when
 # possible so the runtime is self-healing instead of silently degraded.
-if command -v python3 >/dev/null 2>&1; then
+if [ "${HERMES_INSTALL_DEPS:-1}" != "0" ] && command -v python3 >/dev/null 2>&1; then
     missing_deps=()
     for mod in bcrypt jieba asyncpg ahocorasick; do
         if ! python3 - <<PY >/dev/null 2>&1
