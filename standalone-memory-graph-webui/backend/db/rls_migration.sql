@@ -88,3 +88,59 @@ END;
 $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION set_app_context IS 'Set app context for RLS. Call at start of each request.';
+
+-- 12. Node visibility is derived from reachable paths, but new graph writes must
+-- be able to insert the node before its path row exists. Keep reads and
+-- mutations path-scoped, and allow ordinary inserts so the follow-up mg_paths
+-- WITH CHECK remains the namespace ownership gate.
+ALTER TABLE mg_nodes ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS mg_nodes_isolation ON mg_nodes;
+DROP POLICY IF EXISTS mg_nodes_select_isolation ON mg_nodes;
+DROP POLICY IF EXISTS mg_nodes_insert_isolation ON mg_nodes;
+DROP POLICY IF EXISTS mg_nodes_update_isolation ON mg_nodes;
+DROP POLICY IF EXISTS mg_nodes_delete_isolation ON mg_nodes;
+CREATE POLICY mg_nodes_select_isolation ON mg_nodes
+    FOR SELECT
+    USING (
+        current_setting('app.is_admin', true) = 'true'
+        OR uuid IN (
+            SELECT node_uuid FROM mg_paths
+            WHERE namespace = current_setting('app.current_namespace', true)
+               OR namespace = ''
+               OR namespace IS NULL
+        )
+    );
+CREATE POLICY mg_nodes_insert_isolation ON mg_nodes
+    FOR INSERT
+    WITH CHECK (true);
+CREATE POLICY mg_nodes_update_isolation ON mg_nodes
+    FOR UPDATE
+    USING (
+        current_setting('app.is_admin', true) = 'true'
+        OR uuid IN (
+            SELECT node_uuid FROM mg_paths
+            WHERE namespace = current_setting('app.current_namespace', true)
+               OR namespace = ''
+               OR namespace IS NULL
+        )
+    )
+    WITH CHECK (
+        current_setting('app.is_admin', true) = 'true'
+        OR uuid IN (
+            SELECT node_uuid FROM mg_paths
+            WHERE namespace = current_setting('app.current_namespace', true)
+               OR namespace = ''
+               OR namespace IS NULL
+        )
+    );
+CREATE POLICY mg_nodes_delete_isolation ON mg_nodes
+    FOR DELETE
+    USING (
+        current_setting('app.is_admin', true) = 'true'
+        OR uuid IN (
+            SELECT node_uuid FROM mg_paths
+            WHERE namespace = current_setting('app.current_namespace', true)
+               OR namespace = ''
+               OR namespace IS NULL
+        )
+    );

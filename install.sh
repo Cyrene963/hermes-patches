@@ -355,6 +355,9 @@ CREATE POLICY mg_edges_isolation ON mg_edges
         )
     );
 SQL
+        if [ -f "$PATCHES_DIR/db/rls_migration.sql" ]; then
+            sudo -u postgres psql -d hindsight -v ON_ERROR_STOP=1 < "$PATCHES_DIR/db/rls_migration.sql" >/dev/null || echo "   ⚠️ Memory Graph RLS migration 应用失败，请手动检查 PostgreSQL"
+        fi
         echo "   ✅ mg_app least-privileged DB role 已确认"
     fi
 fi
