@@ -290,6 +290,7 @@ def changeset_stats() -> dict:
         'bad_jsonl': bad,
         'status': dict(status.most_common()),
         'review_ready': status.get('review_ready', 0),
+        'awaiting_review': status.get('awaiting_review', 0),
         'blocked': status.get('blocked', 0),
         'missing_required': missing_required,
     }
@@ -308,12 +309,16 @@ def approve_gateway_e2e_stats() -> dict:
     verification = approval.get('verification') or {}
     cleanup = payload.get('cleanup') or {}
     gateway = payload.get('gateway') or {}
+    probes = gateway.get('probes') or []
+    exact_hits = gateway.get('exact_hits')
+    if exact_hits is None and isinstance(probes, list):
+        exact_hits = sum(1 for p in probes if isinstance(p, dict) and p.get('ok') is True)
     ok = (
         payload.get('status') == 'pass'
         and approval.get('ok') is True
         and verification.get('read_ok') is True
         and verification.get('search_ok') is True
-        and gateway.get('ok') is True
+        and (exact_hits or 0) >= 2
         and bool((cleanup.get('after') or {}).get('error'))
     )
     return {
@@ -324,8 +329,8 @@ def approve_gateway_e2e_stats() -> dict:
         'status': payload.get('status', ''),
         'read_ok': verification.get('read_ok'),
         'search_ok': verification.get('search_ok'),
-        'gateway_ok': gateway.get('ok'),
-        'gateway_content': gateway.get('content'),
+        'gateway_ok': (exact_hits or 0) >= 2,
+        'gateway_content': [p.get('content') for p in probes],
         'cleanup_after_error': bool((cleanup.get('after') or {}).get('error')),
     }
 
