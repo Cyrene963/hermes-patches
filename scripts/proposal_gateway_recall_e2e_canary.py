@@ -5,7 +5,7 @@ This proves the full digital-brain loop reaches future task execution:
 1. append a temporary distilled review proposal;
 2. approve it through the live WebUI API;
 3. verify Memory Graph read/search;
-4. ask `/v1/chat/completions` a memory-only question;
+4. ask `/v1/chat/completions` a memory-only question twice from fresh sessions;
 5. delete the temporary memory and verify cleanup.
 """
 from __future__ import annotations
@@ -140,8 +140,7 @@ def _gateway_chat(prompt: str, expected_code: str, session_id: str) -> dict:
         with request.urlopen(req, timeout=240) as response:
             data = json.loads(response.read().decode("utf-8", "replace"))
             content = data.get("choices", [{}])[0].get("message", {}).get("content")
-            ok = content == expected_code or (content or "").startswith(expected_code[:10])
-            return {"ok": ok, "status": response.status, "content": content}
+            return {"ok": content == expected_code, "status": response.status, "content": content}
     except Exception as exc:
         body = ""
         if hasattr(exc, "read"):
@@ -209,9 +208,15 @@ def main() -> int:
             'Return only the exact GW-ANCHOR-* code visible in recalled memory context. '
             'If no such code is visible, answer UNKNOWN.'
         )
-        gateway = _gateway_chat(gateway_prompt, canary["code"], f"api-approved-gateway-recall-{int(time.time())}")
+        first_session = f"api-approved-gateway-recall-{int(time.time())}a"
+        second_session = f"api-approved-gateway-recall-{int(time.time())}b"
+        gateway = _gateway_chat(gateway_prompt, canary["code"], first_session)
         if gateway.get("ok") is not True:
             raise AssertionError(f"gateway recall failed: {gateway}")
+        gateway2 = _gateway_chat(gateway_prompt, canary["code"], second_session)
+        if gateway2.get("ok") is not True:
+            raise AssertionError(f"gateway repeat recall failed: {gateway2}")
+        gateway = {"first": gateway, "second": gateway2, "ok": True, "status": gateway.get("status"), "content": gateway.get("content")}
         cleanup = _cleanup(approved["uri"])
         if not (cleanup.get("after") or {}).get("error"):
             raise AssertionError(f"cleanup failed: {cleanup}")

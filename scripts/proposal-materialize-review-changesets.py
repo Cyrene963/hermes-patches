@@ -49,6 +49,21 @@ def _atomic_write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
         raise
 
 
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _chmod(path.parent, 0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
 def _sha(value: Any, n: int = 16) -> str:
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:n]
@@ -211,7 +226,7 @@ def main() -> int:
         "privacy_note": "Report redacts content/namespace/target URI. Private changeset JSONL is 0600 and contains proposed memory text.",
     }
     report_path = report_dir / f"proposal-review-changesets-{stamp}.json"
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    _atomic_write_json(report_path, report)
 
     print(report_path)
     print(changeset_path)
