@@ -47,6 +47,10 @@ case "$HERMES_DIR" in
             HERMES_INSTALL_DEPS=0
             echo "   ⏭️ detected temporary/smoke checkout; skipping system package installation (set HERMES_INSTALL_DEPS=1 to override)"
         fi
+        if [ -z "${HERMES_INSTALL_GIT_HOOKS+x}" ]; then
+            HERMES_INSTALL_GIT_HOOKS=0
+            echo "   ⏭️ detected temporary/smoke checkout; skipping patch-repo git hook installation (set HERMES_INSTALL_GIT_HOOKS=1 to override)"
+        fi
         ;;
 esac
 
@@ -535,10 +539,12 @@ if [ -f "$PATCHES_DIR/scripts/hermes-public-patch-privacy-guard.sh" ]; then
     mkdir -p "$PROFILE_DIR/scripts"
     cp "$PATCHES_DIR/scripts/hermes-public-patch-privacy-guard.sh" "$PROFILE_DIR/scripts/hermes-public-patch-privacy-guard.sh"
     chmod +x "$PROFILE_DIR/scripts/hermes-public-patch-privacy-guard.sh"
-    if [ -d "$PATCHES_DIR/.git/hooks" ]; then
+    if [ "${HERMES_INSTALL_GIT_HOOKS:-1}" != "0" ] && [ -d "$PATCHES_DIR/.git/hooks" ]; then
         cp "$PATCHES_DIR/scripts/hermes-public-patch-privacy-guard.sh" "$PATCHES_DIR/.git/hooks/pre-push"
         chmod +x "$PATCHES_DIR/.git/hooks/pre-push"
         echo "   ✅ patch repo pre-push privacy guard 已安装"
+    else
+        echo "   ⏭️ patch repo pre-push privacy guard hook skipped (set HERMES_INSTALL_GIT_HOOKS=1 to install)"
     fi
     echo "   ✅ hermes-public-patch-privacy-guard.sh 已安装"
 fi
