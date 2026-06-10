@@ -464,7 +464,12 @@ fi
 # running dashboard process keeps old imported modules in memory. Restart only
 # the dashboard (never the gateway) so WebUI API fixes take effect without
 # interrupting messaging sessions. Operators can opt out with
-# HERMES_RESTART_DASHBOARD_AFTER_PATCH=0.
+# HERMES_RESTART_DASHBOARD_AFTER_PATCH=0. Clean/smoke installs that set
+# HERMES_INSTALL_SYSTEMD=0 also skip dashboard restarts unless explicitly
+# overridden with HERMES_RESTART_DASHBOARD_AFTER_PATCH=1.
+if [ -z "${HERMES_RESTART_DASHBOARD_AFTER_PATCH+x}" ] && [ "${HERMES_INSTALL_SYSTEMD:-1}" = "0" ]; then
+    HERMES_RESTART_DASHBOARD_AFTER_PATCH=0
+fi
 if [ "${HERMES_RESTART_DASHBOARD_AFTER_PATCH:-1}" != "0" ] && command -v systemctl >/dev/null 2>&1; then
     if systemctl --user list-unit-files hermes-dashboard.service --no-legend 2>/dev/null | grep -q '^hermes-dashboard\.service'; then
         if systemctl --user restart hermes-dashboard.service 2>/dev/null; then
