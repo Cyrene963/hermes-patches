@@ -232,7 +232,7 @@ title = 'guard-smoke-' + stamp
 created = json.loads(m._create({'parent_uri':'','title':title,'content':'Patch-chain guard temporary Memory Graph smoke '+stamp,'priority':9,'domain':'core'}))
 if created.get('error'):
     raise SystemExit('create failed: ' + json.dumps(created, ensure_ascii=False))
-uri = created.get('uri') or 'core://Memory Graph Watchdog Smoke/' + title
+uri = created.get('uri') or 'core://' + title
 search = json.loads(m._search({'query':title,'limit':5,'domain':'core'}))
 if not any(title in (r.get('path','') + r.get('snippet','') + r.get('name','')) for r in search.get('results', [])):
     raise SystemExit('search miss after create')
