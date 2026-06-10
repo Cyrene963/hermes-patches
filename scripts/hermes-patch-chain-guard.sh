@@ -43,6 +43,11 @@ if [ -d "$PATCHES_DIR/hermes_cli/web_dist/assets" ] && [ -d "$HERMES_DIR/hermes_
   else
     fail "Dashboard web_dist asset mismatch patch=[$patch_assets] runtime=[$runtime_assets]"
   fi
+  if grep -Rqs 'session-source-filter-v2' "$PATCHES_DIR/hermes_cli/web_dist/assets" && grep -Rqs 'session-source-filter-v2' "$HERMES_DIR/hermes_cli/web_dist/assets"; then
+    ok "Dashboard session source filter marker present in patch and runtime bundles"
+  else
+    fail "Dashboard session source filter marker missing from patch or runtime web_dist"
+  fi
 fi
 
 if [ -f "$HERMES_DIR/toolsets.py" ]; then
