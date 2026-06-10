@@ -36,7 +36,7 @@ MG_REPO = Path(os.environ.get('MEMORY_GRAPH_REPO') or (ROOT / 'projects' / 'memo
 HERMES_REPO = Path(os.environ.get('HERMES_REPO') or (PROFILE_DIR / 'hermes-agent'))
 AI_STUDIO_INDEX = Path(os.environ.get('AI_STUDIO_INDEX') or (PROFILE_DIR / 'memories' / 'default' / 'aistudio_gemini' / 'conversation_index.jsonl'))
 CHANGESET_DIR = TASK_DIR / 'review_changesets'
-APPROVE_E2E_DIR = PROFILE_DIR / 'tasks' / 'digital-brain-99-baselines'
+APPROVE_GATEWAY_E2E_DIR = PROFILE_DIR / 'tasks' / 'digital-brain-99-baselines'
 
 
 def now_iso() -> str:
@@ -295,8 +295,8 @@ def changeset_stats() -> dict:
     }
 
 
-def approve_e2e_stats() -> dict:
-    files = sorted(APPROVE_E2E_DIR.glob('proposal-approve-e2e-*.json'), key=lambda p: p.stat().st_mtime) if APPROVE_E2E_DIR.exists() else []
+def approve_gateway_e2e_stats() -> dict:
+    files = sorted(APPROVE_GATEWAY_E2E_DIR.glob('proposal-gateway-recall-e2e-*.json'), key=lambda p: p.stat().st_mtime) if APPROVE_GATEWAY_E2E_DIR.exists() else []
     latest = files[-1] if files else None
     payload = {}
     if latest:
@@ -307,21 +307,25 @@ def approve_e2e_stats() -> dict:
     approval = payload.get('approval') or {}
     verification = approval.get('verification') or {}
     cleanup = payload.get('cleanup') or {}
+    gateway = payload.get('gateway') or {}
     ok = (
         payload.get('status') == 'pass'
         and approval.get('ok') is True
         and verification.get('read_ok') is True
         and verification.get('search_ok') is True
+        and gateway.get('ok') is True
         and bool((cleanup.get('after') or {}).get('error'))
     )
     return {
-        'dir_exists': APPROVE_E2E_DIR.exists(),
+        'dir_exists': APPROVE_GATEWAY_E2E_DIR.exists(),
         'files': len(files),
         'latest': str(latest) if latest else '',
         'ok': ok,
         'status': payload.get('status', ''),
         'read_ok': verification.get('read_ok'),
         'search_ok': verification.get('search_ok'),
+        'gateway_ok': gateway.get('ok'),
+        'gateway_content': gateway.get('content'),
         'cleanup_after_error': bool((cleanup.get('after') or {}).get('error')),
     }
 
@@ -367,8 +371,8 @@ def score(report: dict) -> dict:
         and changesets.get('review_ready', 0) >= prop.get('pending_raw_material', 0)
     )
     gate('Raw proposal distillation changesets are review-ready', changeset_coverage_ok, 8, f"review_ready={changesets.get('review_ready')} pending_raw={prop.get('pending_raw_material', 0)} blocked={changesets.get('blocked')} missing_required={changesets.get('missing_required')}")
-    approve_e2e = report['approve_e2e']
-    gate('Review approve E2E canary writes, readbacks, and cleans up', approve_e2e.get('ok'), 10, f"status={approve_e2e.get('status')} read={approve_e2e.get('read_ok')} search={approve_e2e.get('search_ok')} cleanup={approve_e2e.get('cleanup_after_error')}")
+    approve_gateway_e2e = report['approve_gateway_e2e']
+    gate('Gateway approval E2E canary writes, readbacks, recalls from gateway, and cleans up', approve_gateway_e2e.get('ok'), 10, f"status={approve_gateway_e2e.get('status')} read={approve_gateway_e2e.get('read_ok')} search={approve_gateway_e2e.get('search_ok')} gateway={approve_gateway_e2e.get('gateway_ok')} cleanup={approve_gateway_e2e.get('cleanup_after_error')}")
     gate('Shadow writes active', shadow['total_rows'] > 0, 8, f"total={shadow['total_rows']}")
     gate('Hermes memory modules import', repo['hermes_memory_imports'].get('ok'), 8)
     tests = report['focused_tests']
@@ -399,7 +403,7 @@ def main() -> int:
         'proposal_stats': proposal_stats(),
         'shadow_stats': shadow_stats(),
         'changesets': changeset_stats(),
-        'approve_e2e': approve_e2e_stats(),
+        'approve_gateway_e2e': approve_gateway_e2e_stats(),
         'ai_studio': ai_studio_stats(),
         'repo': repo_checks(),
         'focused_tests': focused_tests(),
@@ -438,10 +442,10 @@ def main() -> int:
     lines.append(f"- rows: {cs['rows']} bad_jsonl: {cs['bad_jsonl']} status: {cs['status']}")
     lines.append(f"- review_ready: {cs['review_ready']} blocked: {cs['blocked']} missing_required: {cs['missing_required']}")
     lines.append('')
-    lines.append('## Approve E2E')
-    ae = report['approve_e2e']
+    lines.append('## Gateway approval E2E')
+    ae = report['approve_gateway_e2e']
     lines.append(f"- latest: {ae['latest']}")
-    lines.append(f"- ok: {ae['ok']} status: {ae['status']} read_ok: {ae['read_ok']} search_ok: {ae['search_ok']} cleanup_after_error: {ae['cleanup_after_error']}")
+    lines.append(f"- ok: {ae['ok']} status: {ae['status']} read_ok: {ae['read_ok']} search_ok: {ae['search_ok']} gateway_ok: {ae['gateway_ok']} cleanup_after_error: {ae['cleanup_after_error']}")
     lines.append('')
     lines.append('## Shadow writes')
     ss = report['shadow_stats']
