@@ -140,24 +140,25 @@ def _scan_cron_prompt(prompt: str) -> str:
     return ""
 
 
-def _scan_cron_skill_assembled(prompt: str) -> str:
+def _scan_cron_skill_assembled(prompt: str) -> tuple[str, str]:
     """Scan a runtime-assembled cron prompt that includes skill content.
 
     Skill markdown commonly documents attack-shaped shell snippets in prose.
-    Runtime scanning therefore keeps the unambiguous prompt-injection and
-    invisible-unicode checks, but intentionally drops command-shape exfil
+    Runtime scanning therefore keeps unambiguous prompt-injection checks,
+    sanitizes invisible unicode, and intentionally drops command-shape exfil
     patterns; skills are vetted separately at install/edit time.
     """
+    cleaned = prompt
     prompt_for_invisible_scan = _strip_legitimate_emoji_zwj(prompt)
     for char in _CRON_INVISIBLE_CHARS:
         if char in prompt_for_invisible_scan:
-            return f"Blocked: prompt contains invisible unicode U+{ord(char):04X} (possible injection)."
+            cleaned = cleaned.replace(char, "")
     for pattern, pid in _CRON_THREAT_PATTERNS:
         if pid in {"read_secrets", "ssh_backdoor", "sudoers_mod", "destructive_root_rm"}:
             continue
-        if re.search(pattern, prompt, re.IGNORECASE):
-            return f"Blocked: prompt matches threat pattern '{pid}'. Cron prompts must not contain injection payloads."
-    return ""
+        if re.search(pattern, cleaned, re.IGNORECASE):
+            return cleaned, f"Blocked: prompt matches threat pattern '{pid}'. Cron prompts must not contain injection payloads."
+    return cleaned, ""
 
 
 def _origin_from_env() -> Optional[Dict[str, str]]:

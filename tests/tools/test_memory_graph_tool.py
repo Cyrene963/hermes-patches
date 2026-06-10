@@ -52,6 +52,59 @@ def test_create_refreshes_search_index(monkeypatch):
     assert calls[-1] == ("refresh", "node-created", "telegram:u1")
 
 
+def test_create_user_private_path_accepts_resolved_fallback_namespace(monkeypatch):
+    import tools.memory_graph_tool as mg
+
+    calls = []
+
+    class FakeGraph:
+        def create_memory(self, *args, **kwargs):
+            calls.append(("create", args, kwargs))
+            return {"node_uuid": "node-created", "uri": "core://用户档案/test"}
+
+    monkeypatch.setattr(mg, "_ensure_db", lambda: None)
+    monkeypatch.setattr(mg, "_get_namespace", lambda: "telegram:u1")
+    monkeypatch.setattr(mg, "_refresh_search_index", lambda node_uuid, ns: calls.append(("refresh", node_uuid, ns)))
+    monkeypatch.setattr(mg, "_run", lambda value: value)
+
+    import agent.request_context as request_context
+    import agent.memory_graph.services.graph as graph_mod
+
+    request_context.reset_context()
+    monkeypatch.setattr(graph_mod, "GraphService", FakeGraph)
+
+    out = json.loads(mg._create({
+        "parent_uri": "core://用户档案",
+        "content": "private learning memory",
+        "domain": "core",
+        "title": "test",
+    }))
+
+    assert "error" not in out
+    assert calls[0][2]["namespace"] == "telegram:u1"
+    assert calls[-1] == ("refresh", "node-created", "telegram:u1")
+
+
+def test_create_user_private_path_still_rejects_missing_namespace(monkeypatch):
+    import tools.memory_graph_tool as mg
+
+    monkeypatch.setattr(mg, "_ensure_db", lambda: None)
+    monkeypatch.setattr(mg, "_get_namespace", lambda: "")
+
+    import agent.request_context as request_context
+
+    request_context.reset_context()
+
+    out = json.loads(mg._create({
+        "parent_uri": "core://用户档案",
+        "content": "private learning memory",
+        "domain": "core",
+        "title": "test",
+    }))
+
+    assert "no namespace set" in out["error"]
+
+
 def test_search_logs_access_for_returned_nodes(monkeypatch):
     import tools.memory_graph_tool as mg
 

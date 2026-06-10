@@ -61,16 +61,25 @@ def get_namespace() -> str:
 
 def is_user_private_path(path: str) -> bool:
     """Check if a path contains user-private data."""
-    return any(path.startswith(p) for p in USER_PRIVATE_PREFIXES)
+    normalized = (path or "").strip("/")
+    for prefix in USER_PRIVATE_PREFIXES:
+        root = prefix.strip("/")
+        if normalized == root or normalized.startswith(prefix):
+            return True
+    return False
 
 
-def require_namespace_for_path(path: str) -> str:
+def require_namespace_for_path(path: str, namespace: Optional[str] = None) -> str:
     """Get namespace for a path, raising if user data has no namespace.
 
     Zero-default principle: user data MUST have namespace.
+
+    ``namespace`` lets tool wrappers pass a namespace that was resolved from
+    env/config/plugin fallback before this guard runs. Without it, a valid
+    fallback namespace can be rejected just because RequestContext is absent.
     """
+    ns = namespace if namespace is not None else get_namespace()
     if is_user_private_path(path):
-        ns = get_namespace()
         if not ns:
             raise ValueError(
                 f"Cannot write user data to path '{path}': no namespace set. "
@@ -78,7 +87,7 @@ def require_namespace_for_path(path: str) -> str:
                 f"Configure default_terminal_user in config.yaml."
             )
         return ns
-    return get_namespace()  # Non-user paths can be empty (core)
+    return ns  # Non-user paths can be empty (core)
 
 
 def reset_context() -> None:

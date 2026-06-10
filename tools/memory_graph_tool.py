@@ -181,10 +181,12 @@ def _create(args, **kw):
     ns = _resolve_namespace_arg(args)
     content = args["content"]
 
-    # Zero-default: user data MUST have namespace
+    # Zero-default: user data MUST have namespace. Validate the namespace that
+    # _resolve_namespace_arg() already resolved from RequestContext/env/plugin/
+    # config fallback; do not re-read RequestContext only and discard fallback.
     try:
         from agent.request_context import require_namespace_for_path
-        required_ns = require_namespace_for_path(parent_path)
+        required_ns = require_namespace_for_path(parent_path, namespace=ns)
         if required_ns:
             ns = required_ns
     except ValueError as e:
