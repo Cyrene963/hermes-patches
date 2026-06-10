@@ -35,6 +35,7 @@ SHADOW_DIR = Path(os.environ.get('SHADOW_WRITES_DIR') or (PROFILE_DIR / 'logs' /
 MG_REPO = Path(os.environ.get('MEMORY_GRAPH_REPO') or (ROOT / 'projects' / 'memory-graph'))
 HERMES_REPO = Path(os.environ.get('HERMES_REPO') or (PROFILE_DIR / 'hermes-agent'))
 AI_STUDIO_INDEX = Path(os.environ.get('AI_STUDIO_INDEX') or (PROFILE_DIR / 'memories' / 'default' / 'aistudio_gemini' / 'conversation_index.jsonl'))
+CHANGESET_DIR = TASK_DIR / 'review_changesets'
 
 
 def now_iso() -> str:
@@ -270,6 +271,29 @@ def focused_tests() -> dict:
     return run(cmd, HERMES_REPO, timeout=600)
 
 
+def changeset_stats() -> dict:
+    files = sorted(CHANGESET_DIR.glob('review-changesets-*.jsonl'), key=lambda p: p.stat().st_mtime) if CHANGESET_DIR.exists() else []
+    latest = files[-1] if files else None
+    rows, bad = load_jsonl(latest) if latest else ([], 0)
+    status = Counter(str(r.get('review_status') or 'unknown') for r in rows)
+    missing_required = 0
+    required = {'changeset_id', 'proposal_id', 'operator', 'namespace', 'operation_type', 'target_path_uri', 'before_snapshot', 'after_snapshot', 'diff', 'evidence_id', 'evidence_quote', 'reason', 'review_status', 'rollback_method', 'readback', 'approval_status'}
+    for r in rows:
+        if required - set(r):
+            missing_required += 1
+    return {
+        'dir_exists': CHANGESET_DIR.exists(),
+        'files': len(files),
+        'latest': str(latest) if latest else '',
+        'rows': len(rows),
+        'bad_jsonl': bad,
+        'status': dict(status.most_common()),
+        'review_ready': status.get('review_ready', 0),
+        'blocked': status.get('blocked', 0),
+        'missing_required': missing_required,
+    }
+
+
 def ai_studio_stats() -> dict:
     rows, bad = load_jsonl(AI_STUDIO_INDEX)
     chars = sum(int(r.get('prompt_char_count') or 0) for r in rows)
@@ -301,8 +325,16 @@ def score(report: dict) -> dict:
     gate('Dogfood proposal inbox is namespace-isolated', dogfood_no_cross_ns, 10, str(dogfood_parsed))
     gate('Review proposals exist', prop['rows'] > 0, 8, f"rows={prop['rows']}")
     gate('Proposal queue has namespaces', prop['missing_namespace'] == 0 and prop['rows'] > 0, 10, f"missing_namespace={prop['missing_namespace']}")
+    changesets = report['changesets']
     safe_proposal_routing = prop['direct_approvable'] > 0 or prop.get('pending_raw_material', 0) > 0
     gate('Proposal queue routes ready memories or blocks raw material', safe_proposal_routing, 8, f"ready={prop['direct_approvable']} raw_material={prop.get('pending_raw_material', 0)}")
+    changeset_coverage_ok = (
+        changesets.get('bad_jsonl') == 0
+        and changesets.get('missing_required') == 0
+        and changesets.get('blocked') == 0
+        and changesets.get('review_ready', 0) >= prop.get('pending_raw_material', 0)
+    )
+    gate('Raw proposal distillation changesets are review-ready', changeset_coverage_ok, 8, f"review_ready={changesets.get('review_ready')} pending_raw={prop.get('pending_raw_material', 0)} blocked={changesets.get('blocked')} missing_required={changesets.get('missing_required')}")
     gate('Shadow writes active', shadow['total_rows'] > 0, 8, f"total={shadow['total_rows']}")
     gate('Hermes memory modules import', repo['hermes_memory_imports'].get('ok'), 8)
     tests = report['focused_tests']
@@ -332,6 +364,7 @@ def main() -> int:
         'api': api_checks(),
         'proposal_stats': proposal_stats(),
         'shadow_stats': shadow_stats(),
+        'changesets': changeset_stats(),
         'ai_studio': ai_studio_stats(),
         'repo': repo_checks(),
         'focused_tests': focused_tests(),
@@ -363,6 +396,12 @@ def main() -> int:
     lines.append(f"- review_stage_pending: {ps.get('review_stage_pending', {})}")
     lines.append(f"- review_stage_all: {ps.get('review_stage_all', ps.get('review_stage', {}))}")
     lines.append(f"- ready_direct_approvable: {ps['direct_approvable']} pending_raw_material: {ps.get('pending_raw_material', 0)} pending_memory_graph_target: {ps['pending_memory_graph_target']} pending_non_memory_graph_target: {ps['pending_non_memory_graph_target']}")
+    lines.append('')
+    lines.append('## Review changesets')
+    cs = report['changesets']
+    lines.append(f"- latest: {cs['latest']}")
+    lines.append(f"- rows: {cs['rows']} bad_jsonl: {cs['bad_jsonl']} status: {cs['status']}")
+    lines.append(f"- review_ready: {cs['review_ready']} blocked: {cs['blocked']} missing_required: {cs['missing_required']}")
     lines.append('')
     lines.append('## Shadow writes')
     ss = report['shadow_stats']
