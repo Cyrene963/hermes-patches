@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import shutil
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
-from urllib import request
+from urllib import error, request
 
 QUEUE = pathlib.Path.home() / ".hermes" / "logs" / "memory_review_queue" / "review_proposals.current.jsonl"
 EVIDENCE_DIR = pathlib.Path.home() / ".hermes" / "tasks" / "digital-brain-99-baselines"
@@ -28,7 +29,7 @@ def _run(cmd: list[str], *, cwd: str | None = None) -> str:
 
 
 def _admin_token() -> str:
-    return _run([sys.executable, "-c", "from auth import create_session_token; print(create_session_token('admin'))"], cwd=os.environ.get("MG_BACKEND_DIR", str(Path.home() / "projects" / "memory-graph" / "backend")))
+    return _run([sys.executable, "-c", "from auth import create_session_token; print(create_session_token('admin'))"], cwd=os.environ.get("MG_BACKEND_DIR", str(pathlib.Path.home() / "projects" / "memory-graph" / "backend")))
 
 
 def _append_canary() -> dict:
@@ -38,7 +39,7 @@ def _append_canary() -> dict:
     shutil.copy2(QUEUE, backup)
     marker = f"memory-os-approval-e2e-canary-{int(time.time())}"
     proposal_id = "rp_canary_" + hashlib.sha256(marker.encode()).hexdigest()[:16]
-    target_uri = f"core://系统架构/Memory OS Approval E2E Canary {marker}"
+    target_uri = f"core://Memory OS Approval E2E Canary {marker}"
     content = f"Temporary verified Memory OS approval E2E canary {marker}. This row exists only to test approve, readback, changeset, and cleanup."
     row = {
         "proposal_id": proposal_id,
@@ -92,12 +93,16 @@ def _approve(proposal_id: str) -> dict:
         headers={"Content-Type": "application/json", "Cookie": f"mg_session={token}"},
         method="POST",
     )
-    with request.urlopen(req, timeout=60) as response:
-        return json.loads(response.read().decode())
+    try:
+        with request.urlopen(req, timeout=60) as response:
+            return json.loads(response.read().decode())
+    except error.HTTPError as exc:
+        body = exc.read().decode('utf-8', 'replace')
+        raise RuntimeError(f"approve HTTP {exc.code}: {body[:2000]}") from exc
 
 
 def _memory_tool_eval(code: str) -> str:
-    return _run([sys.executable, "-c", code], cwd=os.environ.get("HERMES_AGENT_DIR", str(Path.home() / ".hermes" / "hermes-agent")))
+    return _run([sys.executable, "-c", code], cwd=os.environ.get("HERMES_AGENT_DIR", str(pathlib.Path.home() / ".hermes" / "hermes-agent")))
 
 
 def _cleanup(uri: str) -> dict:
