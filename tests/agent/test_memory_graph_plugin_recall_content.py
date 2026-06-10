@@ -59,6 +59,19 @@ def test_high_signal_messages_expand_to_semantic_planner_queries():
     assert "写作方法论" in joined or "表达偏好" in joined
 
 
+def test_natural_writing_error_question_triggers_semantic_planner_without_explicit_recall_words():
+    mod = _load_plugin()
+
+    queries = mod._build_recall_queries("我这个英文作文 a variety of 写成 a various of 影响不大吧")
+    joined = "\n".join(queries)
+
+    assert len(queries) > 1
+    assert "target function" in joined
+    assert "disclosure" in joined
+    assert "readback" in joined
+    assert "写作方法论" in joined or "表达偏好" in joined
+
+
 def test_unrelated_messages_do_not_get_semantic_planner_expansion():
     mod = _load_plugin()
 
