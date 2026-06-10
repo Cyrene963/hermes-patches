@@ -229,7 +229,7 @@ import json, time
 from tools import memory_graph_tool as m
 stamp = str(int(time.time()))
 title = 'guard-smoke-' + stamp
-created = json.loads(m._create({'parent_uri':'core://Memory Graph Watchdog Smoke','title':title,'content':'Patch-chain guard temporary Memory Graph smoke '+stamp,'priority':9,'domain':'core'}))
+created = json.loads(m._create({'parent_uri':'','title':title,'content':'Patch-chain guard temporary Memory Graph smoke '+stamp,'priority':9,'domain':'core'}))
 if created.get('error'):
     raise SystemExit('create failed: ' + json.dumps(created, ensure_ascii=False))
 uri = created.get('uri') or 'core://Memory Graph Watchdog Smoke/' + title

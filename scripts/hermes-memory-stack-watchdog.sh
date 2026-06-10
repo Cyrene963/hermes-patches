@@ -120,7 +120,7 @@ from tools import memory_graph_tool as m
 stamp = str(int(time.time()))
 title = "watchdog-smoke-" + stamp
 content = "Temporary Memory Graph watchdog smoke node " + stamp
-parent = "core://Memory Graph Watchdog Smoke"
+parent = ""
 created = json.loads(m._create({"parent_uri": parent, "title": title, "content": content, "priority": 9, "domain": "core"}))
 if created.get("error"):
     raise SystemExit("create failed: " + json.dumps(created, ensure_ascii=False))
