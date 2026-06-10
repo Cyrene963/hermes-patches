@@ -149,6 +149,7 @@ def proposal_stats() -> dict:
     pending_mg = 0
     pending_non_mg = 0
     stage_counts = Counter()
+    pending_stage_counts = Counter()
     for r in rows:
         cand = r.get('candidate') or {}
         decision = r.get('decision') or {}
@@ -163,6 +164,8 @@ def proposal_stats() -> dict:
         kind[k] += 1
         namespace[ns] += 1
         stage_counts[stage] += 1
+        if row_status == 'pending':
+            pending_stage_counts[stage] += 1
         if not ns:
             missing_namespace += 1
         if target == 'memory_graph':
@@ -184,6 +187,8 @@ def proposal_stats() -> dict:
         'status': dict(status.most_common()),
         'candidate_kind': dict(kind.most_common(12)),
         'namespace_top': dict(namespace.most_common(12)),
+        'review_stage_all': dict(stage_counts.most_common()),
+        'review_stage_pending': dict(pending_stage_counts.most_common()),
         'review_stage': dict(stage_counts.most_common()),
         'missing_namespace': missing_namespace,
         'explicit_memory_graph_target': explicit_mg,
@@ -355,7 +360,8 @@ def main() -> int:
     lines.append(f"- status: {ps['status']}")
     lines.append(f"- candidate_kind: {ps['candidate_kind']}")
     lines.append(f"- namespace_top: {ps['namespace_top']}")
-    lines.append(f"- review_stage: {ps.get('review_stage', {})}")
+    lines.append(f"- review_stage_pending: {ps.get('review_stage_pending', {})}")
+    lines.append(f"- review_stage_all: {ps.get('review_stage_all', ps.get('review_stage', {}))}")
     lines.append(f"- ready_direct_approvable: {ps['direct_approvable']} pending_raw_material: {ps.get('pending_raw_material', 0)} pending_memory_graph_target: {ps['pending_memory_graph_target']} pending_non_memory_graph_target: {ps['pending_non_memory_graph_target']}")
     lines.append('')
     lines.append('## Shadow writes')
