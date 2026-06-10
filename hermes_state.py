@@ -1723,6 +1723,7 @@ class SessionDB:
             # still live — i.e., started_at < parent.ended_at).
             where_clauses.append(
                 "(s.parent_session_id IS NULL"
+                " OR (s.model_config IS NOT NULL AND instr(s.model_config, '\"_branched_from\"') > 0)"
                 " OR EXISTS (SELECT 1 FROM sessions p"
                 "            WHERE p.id = s.parent_session_id"
                 "            AND p.end_reason = 'branched'"
