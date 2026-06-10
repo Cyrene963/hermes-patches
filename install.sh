@@ -18,6 +18,14 @@ if [ ! -e "$HERMES_DIR/toolsets.py" ] && [ -d "$DEFAULT_HERMES_DIR" ]; then
     HERMES_DIR="$DEFAULT_HERMES_DIR"
 fi
 PROFILE_DIR="${HERMES_PROFILE_DIR:-$HOME/.hermes}"
+case "$HERMES_DIR" in
+    "$HOME/.hermes/tasks"/*|/tmp/*|/var/tmp/*)
+        if [ -z "${HERMES_PROFILE_DIR+x}" ]; then
+            PROFILE_DIR="$HERMES_DIR/.hermes-profile"
+            echo "   ⏭️ detected temporary/smoke checkout; using isolated profile dir: $PROFILE_DIR"
+        fi
+        ;;
+esac
 mkdir -p "$PROFILE_DIR"
 
 # Safety: installer smoke tests often run against throwaway clones under
