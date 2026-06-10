@@ -174,8 +174,8 @@ def _build_recall_queries(user_message: str, max_chars: int = 320, max_tokens: i
     ranked = sorted({t.strip().lower() for t in tokens if t.strip()}, key=lambda s: (-len(s), s))
 
     queries = [msg]
-    learning_queries = _build_learning_event_recall_queries(msg)
-    queries.extend(learning_queries)
+    planned_queries = _build_semantic_recall_plan_queries(msg)
+    queries.extend(planned_queries)
     if ranked:
         queries.append(" ".join(ranked[:max_tokens]))
         queries.extend(ranked[: min(5, max_tokens)])
@@ -190,14 +190,15 @@ def _build_recall_queries(user_message: str, max_chars: int = 320, max_tokens: i
     return deduped
 
 
-def _build_learning_event_recall_queries(user_message: str) -> list[str]:
-    """Return generic recall queries for learning events and target functions.
+def _build_semantic_recall_plan_queries(user_message: str) -> list[str]:
+    """Build generic intent/metadata recall queries for high-signal turns.
 
-    Learning-event memories are often stored under abstract wording such as
-    "考后复盘", "学习事件", "目标函数", or "训练重点". A later user message may
-    only say "英文作文", "错题", or "你不记得了吗", so the literal-message query
-    alone can miss the durable rule. Keep this generic: expand by event class and
-    domain words from the current message, not by user-specific facts.
+    The durable fix is not one branch per event class. High-value memories should
+    carry when-to-recall semantics: user intent, applicable domains, target
+    functions, disclosure triggers, reject gates, counterexamples, and readback
+    queries. Until those fields are first-class indexed metadata, this planner
+    approximates the same behavior by deriving a small intent plan from the live
+    turn and searching for those generic metadata concepts plus message facets.
     """
     import re
 
@@ -206,42 +207,47 @@ def _build_learning_event_recall_queries(user_message: str) -> list[str]:
         return []
     lowered = text.lower()
 
-    domain_markers = {
-        "exam": ("考试", "考后", "作文", "英文", "英语", "english", "paper", "part", "分数", "扣分", "错题", "复盘", "dse"),
-        "project": ("项目", "代码", "架构", "bug", "补丁", "验证", "测试", "部署", "project", "patch", "test"),
-        "writing": ("写作", "作文", "小说", "文章", "句型", "表达", "writing", "prose"),
-        "memory": ("记忆", "外置大脑", "数字替身", "忘", "不记得", "memory", "recall"),
+    signal_patterns = {
+        "continuation": ("继续", "接着", "之前", "刚才", "上次", "换窗口", "换上下文", "where we left", "previous"),
+        "correction": ("不对", "不是", "错", "错错错", "你又", "别再", "纠正", "扣分", "犯", "wrong", "mistake"),
+        "memory_failure": ("不记得", "忘", "记忆", "外置大脑", "数字替身", "recall", "memory"),
+        "evaluation": ("分数", "扣分", "评估", "预估", "前五", "标准", "验收", "quality", "score", "rubric"),
+        "implementation": ("去做", "去修", "修复", "代码", "架构", "补丁", "测试", "验证", "实现", "deploy", "patch", "test"),
+        "creation": ("写作", "作文", "文章", "小说", "图片", "设计", "表达", "writing", "draft"),
     }
-    trigger_markers = (
-        "复盘", "错题", "扣分", "分数", "弱点", "训练", "学会", "掌握",
-        "不记得", "忘", "之前", "刚才", "换窗口", "换上下文", "纠正", "错错错",
-        "target function", "learning event", "postmortem", "review", "recall",
-    )
-    has_trigger = any(marker in lowered for marker in trigger_markers)
-    domains = [name for name, markers in domain_markers.items() if any(marker in lowered for marker in markers)]
-    if not has_trigger and not domains:
+    intents = [name for name, markers in signal_patterns.items() if any(marker in lowered for marker in markers)]
+    high_signal = bool(intents) or _is_high_signal_short_message(text)
+    if not high_signal:
         return []
 
     token_re = r"[A-Za-z0-9_]{3,}|[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{2,}"
     tokens = re.findall(token_re, text)
-    ranked = sorted({t.strip().lower() for t in tokens if t.strip()}, key=lambda s: (-len(s), s))
-    domain_text = " ".join(ranked[:6])
+    facets = sorted({t.strip().lower() for t in tokens if t.strip()}, key=lambda s: (-len(s), s))[:8]
+    facet_text = " ".join(facets)
+
+    metadata_terms = [
+        "适用场景 触发语义 用户意图 目标函数 readback disclosure when to recall",
+        "执行标准 反例 reject gate 验证方法 future recall",
+    ]
+    intent_terms = {
+        "continuation": "active workstream previous context continuity handoff",
+        "correction": "用户纠正 防复发 错误模式 reject gate",
+        "memory_failure": "主动召回 自动按需存取 记忆失败 readback 路由验证",
+        "evaluation": "评分标准 rubric 质量标准 目标函数 验收",
+        "implementation": "通用方案 架构修复 测试验证 patch workflow",
+        "creation": "创作标准 写作方法论 表达偏好 target function",
+    }
 
     queries = []
-    base_terms = [
-        "学习事件 考后复盘 训练重点 主动召回",
-        "target function learning event proactive recall",
-        "用户纠正 目标函数 执行标准 验证 readback",
-    ]
-    if domain_text:
-        queries.extend(f"{domain_text} {terms}" for terms in base_terms)
+    if facet_text:
+        queries.append(f"{facet_text} {' '.join(intents)} target function disclosure readback")
+        queries.extend(f"{facet_text} {term}" for term in metadata_terms)
+        queries.extend(f"{facet_text} {intent_terms[name]}" for name in intents if name in intent_terms)
     else:
-        queries.extend(base_terms)
-    if "exam" in domains or "writing" in domains:
-        queries.append(f"{domain_text} 考后复盘 英文作文 Paper 2 task coverage 训练重点".strip())
-    if "memory" in domains:
-        queries.append(f"{domain_text} 自动按需存取 换窗口 换上下文 主动召回".strip())
-    return queries[:5]
+        queries.extend(metadata_terms)
+        queries.extend(intent_terms[name] for name in intents if name in intent_terms)
+
+    return queries[:6]
 
 
 def _context_budget(default: int = 1200) -> int:
