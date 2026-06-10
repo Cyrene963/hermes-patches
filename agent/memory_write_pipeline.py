@@ -789,7 +789,7 @@ class MemoryWritePipeline:
                             'duplicate_uri': item.get('uri', '')
                         }
         except Exception as exc:
-            logger.debug('Dedup check failed open (continuing to write): %s', exc)
+            logger.debug('Dedup check failed; continuing to write: %s', exc)
 
         # Gate 5a: Sensitive review-only routes must remain in the review lane.
         # They should never auto-write, but they must still produce redacted

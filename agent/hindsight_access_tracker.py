@@ -16,7 +16,7 @@ _BATCH_SIZE = 50
 
 def _env_file_value(path: Path, key: str) -> str:
     try:
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue

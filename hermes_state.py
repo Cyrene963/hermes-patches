@@ -1007,6 +1007,24 @@ class SessionDB:
             conn.execute("UPDATE sessions SET cwd = ? WHERE id = ?", (cwd, session_id))
 
         self._execute_write(_do)
+
+    def update_session_meta(
+        self,
+        session_id: str,
+        model_config: str,
+        model: Optional[str] = None,
+    ) -> None:
+        """Update session metadata while preserving the current model by default."""
+        if not session_id:
+            return
+
+        def _do(conn):
+            conn.execute(
+                "UPDATE sessions SET model_config = ?, model = COALESCE(?, model) WHERE id = ?",
+                (model_config, model, session_id),
+            )
+
+        self._execute_write(_do)
     # ──────────────────────────────────────────────────────────────────────
     # Compression locks
     # ──────────────────────────────────────────────────────────────────────
