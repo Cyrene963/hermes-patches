@@ -50,6 +50,28 @@ class FactVerdict:
     source: str = "llm"  # or "unavailable"
 
 
+# Circuit breaker: when the LLM endpoint is down, stop paying the per-candidate
+# timeout on every turn. After N consecutive failures, fast-fail for a cooldown.
+_CB = {"fails": 0, "open_until": 0.0}
+_CB_THRESHOLD = 2
+_CB_COOLDOWN_S = 120.0
+
+
+def _cb_open() -> bool:
+    import time
+    return _CB["fails"] >= _CB_THRESHOLD and time.monotonic() < _CB["open_until"]
+
+
+def _cb_record(ok: bool) -> None:
+    import time
+    if ok:
+        _CB["fails"] = 0
+        _CB["open_until"] = 0.0
+    else:
+        _CB["fails"] += 1
+        _CB["open_until"] = time.monotonic() + _CB_COOLDOWN_S
+
+
 def _parse(content: str) -> Optional[dict]:
     if not content:
         return None
@@ -82,11 +104,16 @@ def classifier_enabled() -> bool:
 
 
 def classify_fact(user_message: str, *, task: str = "title_generation",
-                  min_confidence: float = 0.7, timeout: float = 12.0) -> FactVerdict:
-    """Return a FactVerdict. Fail-closed to durable=False on any problem."""
+                  min_confidence: float = 0.7, timeout: float = 8.0) -> FactVerdict:
+    """Return a FactVerdict. Fail-closed to durable=False on any problem.
+
+    A circuit breaker fast-fails while the LLM endpoint is known-down, so a
+    dead endpoint doesn't add a per-candidate timeout to every turn."""
     text = (user_message or "").strip()
     if len(text) < 4:
         return FactVerdict(False, "none", "", 0.0, source="too_short")
+    if _cb_open():
+        return FactVerdict(False, "none", "", 0.0, source="unavailable")
     try:
         from agent.auxiliary_client import call_llm
         resp = call_llm(
@@ -98,7 +125,9 @@ def classify_fact(user_message: str, *, task: str = "title_generation",
             timeout=timeout,
         )
         content = (resp.choices[0].message.content or "")
+        _cb_record(True)
     except Exception as exc:  # no LLM / network / config → fail-closed
+        _cb_record(False)
         logger.debug("memory fact classifier unavailable (fail-closed): %s", exc)
         return FactVerdict(False, "none", "", 0.0, source="unavailable")
 
