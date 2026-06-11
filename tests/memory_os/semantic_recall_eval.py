@@ -165,10 +165,10 @@ class Harness:
                         f"leak_search={leaked_search} leak_carriage={leaked_carriage}",
                         (rs_b[0].get("snippet") if rs_b else "(empty)")))
 
-        S(NS_A, "dup_window", "Steven 的航班偏好：靠窗座位。")
-        S(NS_A, "dup_hotel", "Steven 的酒店偏好：高楼层安静房间。")
-        t = S(NS_A, "dup_coffee", "Steven 的咖啡偏好：美式不加糖。")
-        R.append(top1_case("7_top1_semantic", NS_A, "Steven 喝咖啡有什么偏好", t,
+        S(NS_A, "dup_window", "Alex 的航班偏好：靠窗座位。")
+        S(NS_A, "dup_hotel", "Alex 的酒店偏好：高楼层安静房间。")
+        t = S(NS_A, "dup_coffee", "Alex 的咖啡偏好：美式不加糖。")
+        R.append(top1_case("7_top1_semantic", NS_A, "Alex 喝咖啡有什么偏好", t,
                             also_anchor="美式", carriage_title="dup_coffee"))
 
         R.append(Result("8_hindsight_masking", "SKIP",

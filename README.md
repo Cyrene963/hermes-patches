@@ -4,6 +4,23 @@
 >
 > **适配状态：2026-06-07：已适配 Hermes Agent v0.16.0 / `v2026.6.5` 后的官方 `upstream/main`。** 本仓库只补充尚未进入官方 Hermes 的 Memory OS / Memory Graph / 检索与安全门控相关能力；官方已内置的功能不会冒充为补丁成果。当前发布版已在 clean upstream worktree 与本机运行环境中验证：installer 可应用、关键 Python 模块可 import、Memory Graph 14 个工具已注册、focused regression 通过、Memory Graph create → search → delete canary 通过、gateway 重启后加载成功。README 按 `Verified / Partially verified / Risk` 标注证据，不把“文件存在”写成“功能已跑通”。**
 
+## 这套记忆系统现在到底到哪了？（诚实能力矩阵，2026-06）
+
+> 一句话：这是一个**召回/隔离/拦截层已验证可靠的"外置大脑"**，但它**还不是 100% 自主学习的"数字替身"**——自动写入是有意关闭的，因为实测抽取精确率只有 ~10%（见下）。我们只标可复现验证过的东西，不把愿景写成成果。
+
+| 认知环节 | 状态 | 可复现证据 |
+|---|---|---|
+| 召回 top-1 语义正确 | ✅ 已验证 | `tests/memory_os/semantic_recall_eval.py` → 11 PASS / 0 FAIL / 1 SKIP；top-1 按 node 身份断言 + 真实 prompt 携带 |
+| 命名空间隔离（跨用户不泄漏） | ✅ 数据库级强制 | Postgres RLS（`mg_app` 非超级用户 + `set_app_context`）；eval case 6 通过 |
+| 行动前门控（防复发） | ✅ 已接入 | `tool_executor` 在工具 dispatch 前检查；`MEDIA:` / `linux.do` 可阻断 |
+| 写入卫生 + 密钥脱敏 | ✅ 已验证 | 卫生门丢弃截断拷贝/疑问/密钥候选；shadow 日志写盘前脱敏 |
+| 抽取蒸馏（存事实而非原话） | ✅ 已验证 | 真实 7 天日志：硬垃圾率 78.5% → 43%，56% 候选蒸馏出干净事实 |
+| **自主写入（学习闭环）** | ⏸ **机制就绪，默认关闭** | 类型+readback+quarantine 门已测好；实测干净子集精确率 **0.10 ≪ 0.95**，开启会污染 → 保持关闭 |
+
+**离真正的数字替身还差的那一环很具体**：让它**敢自主写入**。卡点是抽取质量——关键词启发式区分不了"用户陈述事实" vs"对话碎片/助手回声/疑问"，规则蒸馏已到顶（~56% 干净）。唯一能把精确率推到 0.95 的是一个 **LLM 事实分类器**（成本/延迟/非确定性的取舍，做成可开关）。在它达标前，写入走"影子 + 人工审核提案"，不自动落库。
+
+详细收敛方案、失败模式、验证矩阵见 [`docs/MEMORY_OS_CONVERGENCE_PLAN.md`](docs/MEMORY_OS_CONVERGENCE_PLAN.md)。
+
 ## 快速入口
 
 | 你想做什么 | 看这里 |
