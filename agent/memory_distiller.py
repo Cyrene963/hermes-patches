@@ -93,8 +93,13 @@ def distill_fact(text: str, *, max_len: int = 200) -> Tuple[str, bool]:
     if not text or not text.strip():
         return "", False
 
-    # 1) drop reply/quote blocks
+    # 1) drop reply/quote blocks (closed form first, then any unclosed remainder:
+    #    shadow logs truncate messages, so "[Replying to: <quote>" often loses its
+    #    closing "]" — strip from the marker to end so the quote can't pose as a fact)
     t = _REPLY_BLOCK_RE.sub(" ", text)
+    _m = re.search(r"\[(?:Replying to|回复)[:：]", t)
+    if _m:
+        t = t[: _m.start()]
     # 2) collapse whitespace
     t = re.sub(r"\s+", " ", t).strip()
     # 3) strip leading markers + trailing filler
