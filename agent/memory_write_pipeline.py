@@ -905,6 +905,23 @@ class MemoryWritePipeline:
         namespace = classification.get('namespace') or candidate.namespace or ''
         if self.config.get('never_auto_write_to_core', True) and not namespace:
             return False
+        # Final precision gate: an LLM must confirm this is a durable fact (not a
+        # question / chit-chat / the assistant's own words). This is what makes
+        # auto-write safe to keep ON by default. FAIL-CLOSED: if the classifier is
+        # disabled or the LLM endpoint is unreachable, classify_fact() returns
+        # durable=False and we do NOT auto-write (the candidate goes to review).
+        if self.config.get('require_llm_classifier', True):
+            try:
+                from agent.memory_fact_classifier import classifier_enabled, classify_fact
+                if not classifier_enabled():
+                    return False
+                verdict = classify_fact(candidate.evidence_quote or candidate.object_value or '')
+                if not verdict.durable:
+                    return False
+                if verdict.fact:  # store the LLM's clean atomic fact, not the raw message
+                    candidate.object_value = verdict.fact
+            except Exception:
+                return False
         return True
 
     def _memory_graph_title(self, candidate: CandidateFact) -> str:

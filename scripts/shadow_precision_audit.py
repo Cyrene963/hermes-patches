@@ -96,6 +96,53 @@ def score_labeled(path: str) -> int:
     return 0 if ok else 1
 
 
+def measure_llm(path: str, hermes_dir: str) -> int:
+    """Run the LLM fact classifier over a human-labeled to_label.jsonl and report
+    its precision/recall vs the labels. Use this once the LLM endpoint is reachable
+    to decide whether on-by-default auto-write is genuinely high-precision."""
+    import sys
+    if hermes_dir not in sys.path:
+        sys.path.insert(0, hermes_dir)
+    from agent.memory_fact_classifier import classify_fact
+    tp = fp = tn = fn = unavailable = 0
+    for line in open(path):
+        line = line.strip()
+        if not line:
+            continue
+        rec = json.loads(line)
+        lab = str(rec.get("label") or "").strip().lower()
+        if lab not in {"good", "bad"}:
+            continue
+        v = classify_fact(str(rec.get("object") or ""))
+        if v.source == "unavailable":
+            unavailable += 1
+            continue
+        pred_good = bool(v.durable)
+        if lab == "good" and pred_good:
+            tp += 1
+        elif lab == "bad" and pred_good:
+            fp += 1
+        elif lab == "bad" and not pred_good:
+            tn += 1
+        else:
+            fn += 1
+    if unavailable:
+        print(f"⚠️  LLM unreachable for {unavailable} records — cannot measure. Check the endpoint.")
+        if tp + fp + tn + fn == 0:
+            return 2
+    prec = tp / (tp + fp) if (tp + fp) else 0.0
+    rec_ = tp / (tp + fn) if (tp + fn) else 0.0
+    print("\nLLM Classifier vs human labels\n" + "=" * 48)
+    print(f"tp={tp} fp={fp} tn={tn} fn={fn}  unavailable={unavailable}")
+    print(f"precision (auto-written that are good): {prec:.3f}")
+    print(f"recall    (good facts captured)       : {rec_:.3f}")
+    ok = prec >= 0.95 and (tp + fp) >= 10
+    print("-" * 48)
+    print("PASS — on-by-default auto-write is genuinely high-precision" if ok
+          else f"REVIEW — precision {prec:.3f} (<0.95 or <10 writes). Tune the classifier prompt before trusting auto-write.")
+    return 0 if ok else 1
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--log-dir", default=os.path.expanduser("~/.hermes/logs/shadow_writes"))
@@ -104,10 +151,15 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=os.path.expanduser("~/.hermes/shadow_audit"))
     ap.add_argument("--seed", type=int, default=12345)
     ap.add_argument("--score", default="")
+    ap.add_argument("--measure-llm", default="", help="labeled to_label.jsonl: measure LLM classifier precision vs labels")
+    ap.add_argument("--hermes-dir", default=os.path.expanduser("~/.hermes/hermes-agent"))
     args = ap.parse_args(argv)
 
     if args.score:
         return score_labeled(args.score)
+    if getattr(args, "measure_llm", ""):
+        return measure_llm(args.measure_llm, args.hermes_dir)
+
 
     files = sorted(glob.glob(os.path.join(args.log_dir, "shadow_*.jsonl")))
     if args.days > 0:

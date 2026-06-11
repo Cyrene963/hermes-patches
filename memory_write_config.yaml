@@ -1,15 +1,21 @@
 # Memory Write Pipeline Configuration
-# Auto-write is disabled after a 2026-05-25 pollution incident where the
-# extractor misclassified ordinary dialogue as project tech_stack memories.
-# Keep shadow-only until extraction uses semantic validation and passes an
-# audited precision/readback suite on real shadow logs.
+# Auto-write is ON by default (limited_auto) but gated by an LLM fact classifier
+# (require_llm_classifier) + readback verification, so it only writes durable,
+# user-originated facts and is FAIL-CLOSED when the LLM is unreachable (writes
+# nothing rather than polluting — the lesson from the 2026-05-25 incident).
 
 memory_write:
   # Mode: shadow | limited_auto | full_auto
   mode: limited_auto
 
-  # Minimum importance score for future auto-write experiments.
-  auto_write_threshold: 0.95
+  # An LLM must confirm each candidate is a durable fact before auto-write.
+  # This is the precision gate that makes "on by default" safe. Set false to
+  # fall back to shadow/review only.
+  require_llm_classifier: true
+  llm_classifier: true
+
+  # Importance floor (the LLM classifier is the real precision gate now).
+  auto_write_threshold: 0.85
 
   # Types allowed for automatic writing when limited_auto is enabled.
   # These are explicit, user-originated, high-confidence digital-stand-in signals.
