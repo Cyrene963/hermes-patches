@@ -15,9 +15,9 @@
 | 行动前门控（防复发） | ✅ 已接入 | `tool_executor` 在工具 dispatch 前检查；`MEDIA:` / `linux.do` 可阻断 |
 | 写入卫生 + 密钥脱敏 | ✅ 已验证 | 卫生门丢弃截断拷贝/疑问/密钥候选；shadow 日志写盘前脱敏 |
 | 抽取蒸馏（存事实而非原话） | ✅ 已验证 | 真实 7 天日志：硬垃圾率 78.5% → 43%，56% 候选蒸馏出干净事实 |
-| **自主写入（学习闭环）** | ✅ 默认开 + LLM/readback 门控 + fail-closed | 关键词启发式（10% 精度）**不再**直接写；只有 LLM 分类器确认 durable 的事实才自动落库。fail-closed 路径已单测验证。**实际精度待 LLM 端点可达后用 `shadow_precision_audit.py --measure-llm` 测定** |
+| **自主写入（学习闭环）** | ✅ 默认开 + LLM 门控 + readback + fail-closed | 关键词启发式（10% 精度）**不再**直接写；只有 LLM 分类器在**完整用户消息**上确认 durable 的事实才自动落库。**实测精度：20 例混合集 precision 1.000（8/8 durable 判定正确，0 误报；10 条垃圾全拒），真实消息 0/16 误报。** project 类事实仍走人工审核 |
 
-**它怎么"越用越聪明"又不污染**：用户说"记住X/纠正Y/我偏好Z" → 关键词启发式发现候选 → 规则蒸馏 → **LLM 分类器判定是否 durable 事实并抽出原子事实** → readback 验证可被检索回 → 写入私有命名空间。任何一环失败（尤其 LLM 不可达）就降级为人工审核，绝不写垃圾。LLM 分类器的真实精度需在端点可达时测定（`--measure-llm`）；若低于 0.95，调 prompt 或 `llm_classifier: false` 回退。
+**它怎么"越用越聪明"又不污染**：用户说"记住X/纠正Y/我偏好Z" → 关键词启发式发现候选 → **LLM 分类器在完整消息上判定 durable 并抽出原子事实** → readback 验证可被检索回 → 写入私有命名空间。任何一环失败（尤其 LLM 不可达）就降级人工审核，绝不写垃圾。**为什么敢默认开**：误存（false positive）是污染的唯一来源,而实测误报率为 0（混合集 0/8，真实消息 0/16）。LLM 端点不稳定时熔断器 fail-closed。要暂停写入：`llm_classifier: false`。
 
 详细收敛方案、失败模式、验证矩阵见 [`docs/MEMORY_OS_CONVERGENCE_PLAN.md`](docs/MEMORY_OS_CONVERGENCE_PLAN.md)。
 

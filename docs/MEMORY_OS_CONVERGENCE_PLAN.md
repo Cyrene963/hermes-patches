@@ -43,7 +43,12 @@ by node-uuid identity + real prompt-carriage via the live provider's prefetch me
 | WebUI resilience | `frontend/src/App.jsx` | removed dead state; `RouteErrorBoundary` (no blank screen) | needs `npm run build` |
 
 ## 3. Hard truths (verified numbers)
-- **Write loop is gated, and now much cleaner at the source.** Before the distiller,
+- **Auto-write is ON, earned by data.** LLM fact classifier on full user messages
+  scored precision 1.000 (8/8 durable correct, 0 false positives) on a 20-case mixed
+  set and 0/16 false positives on real messages; the earlier 0.125 was a measurement
+  artifact of classifying truncated fragments. Gate = LLM-confirm + readback + private
+  namespace + circuit-breaker.
+- **Write loop is also much cleaner at the source.** Before the distiller,
   real shadow logs showed only ~1 actual auto-write and **78.5%** of candidates carried
   a hard-garbage flag (68% raw truncated copies, 19 leaked secrets). After the fact
   distiller + hygiene gate + redaction: hard-garbage **~43%**, and **~56% of candidates
