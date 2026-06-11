@@ -139,6 +139,11 @@ def _resolve_namespace_arg(args) -> str:
     return _get_namespace() if explicit is sentinel else (explicit or "")
 
 
+def _with_rls_namespace(namespace: str):
+    from agent.memory_graph.db import rls_context
+    return rls_context(namespace)
+
+
 def _refresh_search_index(node_uuid: str, namespace: str) -> None:
     """Best-effort sync of derived Memory Graph search rows after tool writes."""
     if not node_uuid:
@@ -165,9 +170,11 @@ def _read(args, **kw):
     domain, path = _parse_uri(uri, args.get("domain", "core"))
     ns = _resolve_namespace_arg(args)
     if domain == "system":
-        result = _run(handle_system_uri(path, GraphService(), None))
+        with _with_rls_namespace(ns):
+            result = _run(handle_system_uri(path, GraphService(), None))
         return json.dumps(result, ensure_ascii=False, default=str)
-    result = _run(GraphService().get_memory_by_path(path, domain=domain, namespace=ns))
+    with _with_rls_namespace(ns):
+        result = _run(GraphService().get_memory_by_path(path, domain=domain, namespace=ns))
     if result is None:
         return json.dumps({"error": f"Path '{domain}://{path}' not found"})
     return json.dumps(result, ensure_ascii=False, default=str)
@@ -192,10 +199,11 @@ def _create(args, **kw):
     except ValueError as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
-    result = _run(GraphService().create_memory(
-        parent_path, content, priority=args.get("priority", 0),
-        title=args.get("title") or None, domain=domain, namespace=ns,
-    ))
+    with _with_rls_namespace(ns):
+        result = _run(GraphService().create_memory(
+            parent_path, content, priority=args.get("priority", 0),
+            title=args.get("title") or None, domain=domain, namespace=ns,
+        ))
     _refresh_search_index(result.get("node_uuid", ""), ns)
     return json.dumps(result, ensure_ascii=False, default=str)
 
@@ -206,10 +214,11 @@ def _update(args, **kw):
     uri = args.get("uri", "")
     domain, path = _parse_uri(uri, args.get("domain", "core"))
     ns = _resolve_namespace_arg(args)
-    result = _run(GraphService().update_memory(
-        path, args["content"], domain=domain, namespace=ns,
-        priority=args.get("priority"),
-    ))
+    with _with_rls_namespace(ns):
+        result = _run(GraphService().update_memory(
+            path, args["content"], domain=domain, namespace=ns,
+            priority=args.get("priority"),
+        ))
     _refresh_search_index(result.get("node_uuid", ""), ns)
     return json.dumps(result, ensure_ascii=False, default=str)
 
@@ -220,9 +229,10 @@ def _delete(args, **kw):
     uri = args.get("uri", "")
     domain, path = _parse_uri(uri, args.get("domain", "core"))
     ns = _resolve_namespace_arg(args)
-    node = _run(GraphService().get_memory_by_path(path, domain=domain, namespace=ns))
-    node_uuid = (node or {}).get("node_uuid", "")
-    result = _run(GraphService().delete_memory(path, domain=domain, namespace=ns))
+    with _with_rls_namespace(ns):
+        node = _run(GraphService().get_memory_by_path(path, domain=domain, namespace=ns))
+        node_uuid = (node or {}).get("node_uuid", "")
+        result = _run(GraphService().delete_memory(path, domain=domain, namespace=ns))
     if node_uuid:
         _refresh_search_index(node_uuid, ns)
     return json.dumps({"deleted": result, "uri": f"{domain}://{path}"})
@@ -236,14 +246,15 @@ def _list(args, **kw):
     domain, path = _parse_uri(uri, args.get("domain", "core"))
     ns = _resolve_namespace_arg(args)
     graph = GraphService()
-    if path:
-        node = _run(graph.get_memory_by_path(path, domain=domain, namespace=ns))
-        if not node:
-            return json.dumps({"error": f"Not found: {domain}://{path}"})
-        node_uuid = node["node_uuid"]
-    else:
-        node_uuid = ROOT_NODE_UUID
-    children = _run(graph.get_children(node_uuid, domain=domain, namespace=ns))
+    with _with_rls_namespace(ns):
+        if path:
+            node = _run(graph.get_memory_by_path(path, domain=domain, namespace=ns))
+            if not node:
+                return json.dumps({"error": f"Not found: {domain}://{path}"})
+            node_uuid = node["node_uuid"]
+        else:
+            node_uuid = ROOT_NODE_UUID
+        children = _run(graph.get_children(node_uuid, domain=domain, namespace=ns))
     return json.dumps({
         "parent": f"{domain}://{path}" if path else "(root)",
         "namespace": ns,
@@ -255,17 +266,19 @@ def _search(args, **kw):
     _ensure_db()
     from agent.memory_graph.services.search import SearchIndexer
     ns = _resolve_namespace_arg(args)
-    results = _run(SearchIndexer().search(
-        args["query"], domain=args.get("domain") or None,
-        namespace=ns or "", limit=args.get("limit", 20),
-    ))
+    with _with_rls_namespace(ns):
+        results = _run(SearchIndexer().search(
+            args["query"], domain=args.get("domain") or None,
+            namespace=ns or "", limit=args.get("limit", 20),
+        ))
     try:
         from agent.memory_graph.services.graph import GraphService
         graph = GraphService()
         for item in results:
             node_uuid = item.get("node_uuid")
             if node_uuid:
-                _run(graph.log_access(node_uuid, namespace=ns or "", context="tool_search"))
+                with _with_rls_namespace(ns):
+                    _run(graph.log_access(node_uuid, namespace=ns or "", context="tool_search"))
     except Exception as exc:
         logger.debug("Failed to log Memory Graph search access: %s", exc, exc_info=True)
     return json.dumps({"query": args["query"], "namespace": ns, "results": results, "count": len(results)},
@@ -280,7 +293,8 @@ def _alias(args, **kw):
     domain, path = _parse_uri(uri, args.get("domain", "core"))
     alias_domain, alias_path = _parse_uri(alias_uri, domain)
     ns = _resolve_namespace_arg(args)
-    result = _run(GraphService().add_alias(path, alias_path, domain=domain, alias_domain=alias_domain, namespace=ns))
+    with _with_rls_namespace(ns):
+        result = _run(GraphService().add_alias(path, alias_path, domain=domain, alias_domain=alias_domain, namespace=ns))
     _refresh_search_index(result.get("node_uuid", ""), ns)
     return json.dumps(result, ensure_ascii=False, default=str)
 
@@ -292,10 +306,12 @@ def _glossary_add(args, **kw):
     node_uri = args.get("node_uri", "")
     domain, path = _parse_uri(node_uri, args.get("domain", "core"))
     ns = _resolve_namespace_arg(args)
-    node = _run(GraphService().get_memory_by_path(path, domain=domain, namespace=ns))
+    with _with_rls_namespace(ns):
+        node = _run(GraphService().get_memory_by_path(path, domain=domain, namespace=ns))
     if not node:
         return json.dumps({"error": f"Node not found: {domain}://{path}"})
-    result = _run(GlossaryService().add_keyword(args["keyword"], node["node_uuid"], namespace=ns))
+    with _with_rls_namespace(ns):
+        result = _run(GlossaryService().add_keyword(args["keyword"], node["node_uuid"], namespace=ns))
     _refresh_search_index(node.get("node_uuid", ""), ns)
     return json.dumps(result, ensure_ascii=False, default=str)
 
@@ -304,7 +320,8 @@ def _glossary_scan(args, **kw):
     _ensure_db()
     from agent.memory_graph.services.glossary import GlossaryService
     ns = _resolve_namespace_arg(args)
-    matches = _run(GlossaryService().scan_content(args["content"], namespace=ns))
+    with _with_rls_namespace(ns):
+        matches = _run(GlossaryService().scan_content(args["content"], namespace=ns))
     return json.dumps({"matches": matches, "count": len(matches)},
                        ensure_ascii=False, default=str)
 

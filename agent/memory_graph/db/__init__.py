@@ -6,7 +6,8 @@ Shares the same database as Hindsight (default: hindsight DB).
 
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Optional, Tuple
 from urllib.parse import quote_plus
@@ -25,6 +26,9 @@ DEFAULT_DB_URL = "postgresql+asyncpg://mg_app@127.0.0.1/hindsight"
 
 _engine = None
 _session_factory = None
+_rls_context_override: ContextVar[Optional[Tuple[str, bool]]] = ContextVar(
+    "memory_graph_rls_context_override", default=None
+)
 
 
 def _read_env_file_value(key: str) -> str:
@@ -73,6 +77,10 @@ def _current_rls_context() -> Tuple[str, bool]:
     Falls back to memory_graph.default_terminal_user for CLI sessions so terminal
     reads/writes do not silently run as shared core with a blank namespace.
     """
+    override = _rls_context_override.get()
+    if override is not None:
+        return override
+
     namespace = os.environ.get("MEMORY_GRAPH_NAMESPACE", "")
     is_admin = os.environ.get("MEMORY_GRAPH_IS_ADMIN", "").lower() in {"1", "true", "yes"}
 
@@ -97,6 +105,16 @@ def _current_rls_context() -> Tuple[str, bool]:
     if namespace and namespace in admin_ids:
         is_admin = True
     return namespace, is_admin
+
+
+@contextmanager
+def rls_context(namespace: str, is_admin: bool = False):
+    """Temporarily bind Memory Graph RLS context for explicit tool namespaces."""
+    token = _rls_context_override.set((namespace or "", bool(is_admin)))
+    try:
+        yield
+    finally:
+        _rls_context_override.reset(token)
 
 
 async def _apply_rls_context(session: AsyncSession) -> None:

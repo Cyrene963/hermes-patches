@@ -85,6 +85,50 @@ def test_create_user_private_path_accepts_resolved_fallback_namespace(monkeypatc
     assert calls[-1] == ("refresh", "node-created", "telegram:u1")
 
 
+def test_create_binds_explicit_namespace_to_rls_context(monkeypatch):
+    import tools.memory_graph_tool as mg
+
+    calls = []
+
+    class FakeContext:
+        def __init__(self, namespace):
+            self.namespace = namespace
+
+        def __enter__(self):
+            calls.append(("enter_rls", self.namespace))
+
+        def __exit__(self, exc_type, exc, tb):
+            calls.append(("exit_rls", self.namespace))
+
+    class FakeGraph:
+        def create_memory(self, *args, **kwargs):
+            calls.append(("create", kwargs["namespace"]))
+            return {"node_uuid": "node-created", "uri": "core://x"}
+
+    monkeypatch.setattr(mg, "_ensure_db", lambda: None)
+    monkeypatch.setattr(mg, "_with_rls_namespace", lambda namespace: FakeContext(namespace))
+    monkeypatch.setattr(mg, "_refresh_search_index", lambda node_uuid, ns: calls.append(("refresh", ns)))
+    monkeypatch.setattr(mg, "_run", lambda value: value)
+
+    import agent.memory_graph.services.graph as graph_mod
+    monkeypatch.setattr(graph_mod, "GraphService", FakeGraph)
+
+    out = json.loads(mg._create({
+        "parent_uri": "core://_canary",
+        "content": "hello",
+        "domain": "core",
+        "title": "x",
+        "namespace": "cron:db99-canary",
+    }))
+
+    assert out["node_uuid"] == "node-created"
+    assert calls[:3] == [
+        ("enter_rls", "cron:db99-canary"),
+        ("create", "cron:db99-canary"),
+        ("exit_rls", "cron:db99-canary"),
+    ]
+
+
 def test_create_user_private_path_still_rejects_missing_namespace(monkeypatch):
     import tools.memory_graph_tool as mg
 
@@ -132,7 +176,7 @@ def test_search_logs_access_for_returned_nodes(monkeypatch):
     monkeypatch.setattr(search_mod, "SearchIndexer", FakeIndexer)
     monkeypatch.setattr(graph_mod, "GraphService", FakeGraph)
 
-    out = json.loads(mg._search({"query": "user-a", "domain": "core", "limit": 2}))
+    out = json.loads(mg._search({"query": "student alpha", "domain": "core", "limit": 2}))
 
     assert out["count"] == 2
     assert ("log_access", "node-1", "telegram:u1", "tool_search") in calls
