@@ -1,20 +1,22 @@
 # Memory Write Pipeline Configuration
-# Auto-write is ON by default (limited_auto) but gated by an LLM fact classifier
-# (require_llm_classifier) + readback verification, so it only writes durable,
-# user-originated facts and is FAIL-CLOSED when the LLM is unreachable (writes
-# nothing rather than polluting — the lesson from the 2026-05-25 incident).
+# Auto-write stays OFF until the LLM fact classifier reaches >=0.95 precision.
+# Measured 2026-06-12 on real shadow candidates: precision 0.125 (1 good of 8
+# "durable" verdicts) — the upstream heuristic feeds truncated fragments the
+# classifier can't reliably judge. Fix: run the LLM classifier UPSTREAM on the
+# full user message (detect+extract in one step), then re-measure. Flip
+# llm_classifier:true only after a fair measurement clears 0.95.
 
 memory_write:
   # Mode: shadow | limited_auto | full_auto
   mode: limited_auto
 
   # An LLM must confirm each candidate is a durable fact before auto-write.
-  # This is the precision gate that makes "on by default" safe. Set false to
-  # fall back to shadow/review only.
+  # require_llm_classifier keeps the gate wired; llm_classifier=false disables the
+  # actual classifier call so auto-write is held (fail-closed) until precision is earned.
   require_llm_classifier: true
-  llm_classifier: true
+  llm_classifier: false
 
-  # Importance floor (the LLM classifier is the real precision gate now).
+  # Importance floor (the LLM classifier is the real precision gate when enabled).
   auto_write_threshold: 0.85
 
   # Types allowed for automatic writing when limited_auto is enabled.

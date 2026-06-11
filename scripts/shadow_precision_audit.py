@@ -103,7 +103,11 @@ def measure_llm(path: str, hermes_dir: str) -> int:
     import sys
     if hermes_dir not in sys.path:
         sys.path.insert(0, hermes_dir)
+    import agent.memory_fact_classifier as mfc
     from agent.memory_fact_classifier import classify_fact
+    # Measurement uses a generous timeout and disables the live circuit breaker so
+    # one slow call doesn't fast-fail the rest (the live path keeps the breaker).
+    mfc._CB_THRESHOLD = 10_000
     tp = fp = tn = fn = unavailable = 0
     for line in open(path):
         line = line.strip()
@@ -113,7 +117,8 @@ def measure_llm(path: str, hermes_dir: str) -> int:
         lab = str(rec.get("label") or "").strip().lower()
         if lab not in {"good", "bad"}:
             continue
-        v = classify_fact(str(rec.get("object") or ""))
+        v = classify_fact(str(rec.get("object") or ""), timeout=35)
+        mfc._CB["fails"] = 0  # never let the breaker open during measurement
         if v.source == "unavailable":
             unavailable += 1
             continue
