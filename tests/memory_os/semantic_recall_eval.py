@@ -20,7 +20,7 @@ import uuid
 from dataclasses import dataclass, asdict
 from typing import Optional
 
-HERMES_DIR = os.environ.get("HERMES_DIR", "~/.hermes/hermes-agent")
+HERMES_DIR = os.environ.get("HERMES_DIR", os.path.expanduser("~/.hermes/hermes-agent"))
 if HERMES_DIR not in sys.path:
     sys.path.insert(0, HERMES_DIR)
 
