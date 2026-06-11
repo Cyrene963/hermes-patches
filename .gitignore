@@ -1,3 +1,11 @@
 
 __pycache__/
 *.py[cod]
+
+# Deployment-local identity config — real names/paths live here, never committed.
+memory_identity.local.yaml
+*.local.yaml
+
+# Local eval / audit artifacts
+shadow_audit/
+memory_os_eval_*.json

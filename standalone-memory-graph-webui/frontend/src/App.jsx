@@ -200,16 +200,50 @@ function Layout({ user, onLogout }) {
   );
 }
 
-function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
-  const [backendError, setBackendError] = useState(false);
-  const [user, setUser] = useState(null);
+// Catches lazy-chunk load failures and render errors so a broken route shows a
+// recoverable message instead of a blank white screen.
+class RouteErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(error, info) {
+    if (typeof console !== 'undefined') console.error('UI error boundary caught:', error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex flex-col items-center justify-center h-screen bg-slate-950 text-slate-400">
+          <div className="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mb-4">
+            <AlertCircle className="w-6 h-6 text-amber-500" />
+          </div>
+          <div className="text-lg font-bold text-slate-100 mb-1">Something broke while loading this view</div>
+          <div className="text-sm text-slate-500 max-w-md text-center mt-1">
+            A view failed to load (often a stale cached bundle after an update).
+          </div>
+          <button
+            onClick={() => window.location.reload()}
+            className="mt-6 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm transition-colors"
+          >
+            Reload
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
+function App() {
   return (
     <I18nProvider>
       <AppProviders>
-        <AppInner />
+        <RouteErrorBoundary>
+          <AppInner />
+        </RouteErrorBoundary>
       </AppProviders>
     </I18nProvider>
   );

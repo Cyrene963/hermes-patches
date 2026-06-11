@@ -34,6 +34,10 @@ AIza[0-9A-Za-z_-]{20,}
 /root/\.hermes
 ~/projects
 telegram:[0-9]{7,}
+user-a
+user-b
+focus-app
+focus-app
 PATTERNS
 
 if [ -n "${HERMES_PRIVACY_EXTRA_PATTERNS_FILE:-}" ] && [ -f "$HERMES_PRIVACY_EXTRA_PATTERNS_FILE" ]; then

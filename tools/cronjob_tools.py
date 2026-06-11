@@ -17,6 +17,26 @@ from hermes_constants import display_hermes_home
 
 logger = logging.getLogger(__name__)
 
+
+def _cron_surname_pairs() -> Dict[str, str]:
+    """Optional {alias_lower: surname} pairs for identity-mismatch detection.
+
+    Loaded from ~/.hermes/memory_identity.local.yaml (key: cron_surname_pairs) so
+    no real names are hardcoded in the public repo. Defaults to empty (neutral).
+    """
+    try:
+        import yaml
+        p = os.environ.get("MEMORY_GRAPH_IDENTITY_CONFIG") or (Path.home() / ".hermes" / "memory_identity.local.yaml")
+        data = yaml.safe_load(Path(p).read_text()) if Path(p).exists() else None
+        if isinstance(data, dict) and isinstance(data.get("cron_surname_pairs"), dict):
+            return {str(k).lower(): str(v) for k, v in data["cron_surname_pairs"].items()}
+    except Exception:
+        pass
+    return {}
+
+
+_CRON_SURNAME_PAIRS = _cron_surname_pairs()
+
 # Import from cron module (will be available when properly installed)
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -444,7 +464,7 @@ def _cron_academic_identity_guard(
         return [
             rf"\bfor\s+{compact}\b",
             rf"\b{compact}'s\b",
-            rf"\b{compact}\s+shen\b" if alias.lower() == "steven" else r"a^",
+            rf"\b{compact}\s+{_CRON_SURNAME_PAIRS[alias.lower()]}\b" if alias.lower() in _CRON_SURNAME_PAIRS else r"a^",
             rf"为\s*{compact}",
             rf"給\s*{compact}",
             rf"给\s*{compact}",

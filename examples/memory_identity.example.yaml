@@ -1,0 +1,15 @@
+# Memory Graph identity config — EXAMPLE (neutral fixtures only).
+#
+# Copy to ~/.hermes/memory_identity.local.yaml and put YOUR real identities here.
+# That local file is gitignored and never committed — keep real names out of the repo.
+#
+# entities: canonical name -> aliases that appear in user messages.
+# entity_paths: canonical name -> its memory-graph path prefix.
+
+entities:
+  Alice: [Alice, alice]
+  acme-project: [acme, "Acme Project", acme-proj]
+
+entity_paths:
+  Alice: 用户档案/Alice
+  acme-project: 项目/acme

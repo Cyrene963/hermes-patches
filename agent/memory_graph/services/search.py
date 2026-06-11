@@ -24,6 +24,31 @@ from ..db.models import (
 from ..db import get_session
 from .search_terms import build_document_search_terms, expand_query_terms
 
+
+def _load_boost_terms() -> set:
+    """Deployment-specific high-signal terms that get a ranking boost.
+
+    Personal names / project codenames are NOT hardcoded here (that would leak
+    identities into a public repo). They load from ~/.hermes/memory_identity.local.yaml
+    (key: search_boost_terms). The built-in default is a neutral, generic set.
+    """
+    default = {"Memory OS", "patch", "install"}
+    try:
+        import os
+        import yaml
+        from pathlib import Path
+        p = os.environ.get("MEMORY_GRAPH_IDENTITY_CONFIG") or (Path.home() / ".hermes" / "memory_identity.local.yaml")
+        data = yaml.safe_load(Path(p).read_text()) if Path(p).exists() else None
+        if isinstance(data, dict) and isinstance(data.get("search_boost_terms"), list):
+            return set(default) | {str(t) for t in data["search_boost_terms"]}
+    except Exception:
+        pass
+    return set(default)
+
+
+_BOOST_TERMS = _load_boost_terms()
+
+
 if TYPE_CHECKING:
     from collections.abc import Callable, AsyncIterator
     from sqlalchemy.ext.asyncio import AsyncSession as _AsyncSession
@@ -283,7 +308,7 @@ class SearchIndexer:
                     weight += 2
             if key in {"dse", "ict", "m1", "m2", "memory", "os", "focuspomo", "hermes", "graph", "raw", "material", "ai", "studio"}:
                 weight += 4
-            if raw in {"user-a", "物理", "经济", "选修", "数字替身", "外置大脑", "Memory OS", "FocusPomo", "番茄", "四端", "patch", "install", "蒸馏"}:
+            if raw in _BOOST_TERMS:
                 weight += 5
             seen.add(key)
             weighted.append((key, weight))
@@ -429,6 +454,7 @@ class SearchIndexer:
                         "priority": mapping["priority"],
                         "disclosure": mapping["disclosure"],
                         "score": float(mapping.get("score", 0)),
+                        "namespace_rank": int(mapping.get("namespace_rank", 2)),
                     })
                 else:
                     # ORM object (ILIKE path)
@@ -441,6 +467,10 @@ class SearchIndexer:
                         "snippet": self._format_search_snippet(row.content, query),
                         "priority": row.priority,
                         "disclosure": row.disclosure,
+                        "namespace_rank": (
+                            0 if (namespace and row.namespace == namespace)
+                            else (1 if not row.namespace else 2)
+                        ),
                     })
 
             weighted_terms = self._query_rank_terms(query)
@@ -467,6 +497,12 @@ class SearchIndexer:
                 long_hit_count = sum(1 for t in terms if len(t) >= 4 and t in hay)
                 exact_phrase = 1 if query.strip().lower() in hay else 0
                 return (
+                    # Namespace tier FIRST: the caller's private memories are the
+                    # user's canonical truth and must outrank shared/public nodes,
+                    # however keyword-rich those are. The SQL already orders by
+                    # namespace_rank; this rerank previously discarded that and let
+                    # long shared notes bury private facts (eval cases 2/3).
+                    int(item.get("namespace_rank", 2)),
                     -exact_phrase,
                     -high_signal_hits,
                     -weighted_hit_score,

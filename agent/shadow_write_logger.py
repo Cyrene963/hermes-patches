@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 
@@ -10,6 +11,25 @@ logger = logging.getLogger(__name__)
 
 _SHADOW_LOG_DIR = os.path.expanduser("~/.hermes/logs/shadow_writes")
 os.makedirs(_SHADOW_LOG_DIR, exist_ok=True)
+
+# Secrets must never be persisted to shadow logs (an audit found 19 leaked keys).
+_SECRET_RE = re.compile(
+    r"sk-[A-Za-z0-9_-]{12,}"
+    r"|ghp_[A-Za-z0-9]{20,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
+    r"|xox[baprs]-[A-Za-z0-9-]{10,}"
+    r"|AKIA[0-9A-Z]{16}"
+    r"|AIza[0-9A-Za-z_-]{20,}"
+    r"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}"  # JWT
+)
+
+
+def _redact(text: str) -> str:
+    """Mask secret-shaped substrings before anything is written to disk."""
+    if not text:
+        return text
+    return _SECRET_RE.sub("«REDACTED-SECRET»", text)
+
 
 
 def log_shadow_write(
@@ -27,8 +47,8 @@ def log_shadow_write(
         "conversation_id": conversation_id,
         "user_id": user_id,
         "namespace": namespace,
-        "user_message": user_message[:200],
-        "assistant_message": assistant_message[:200],
+        "user_message": _redact(user_message[:200]),
+        "assistant_message": _redact(assistant_message[:200]),
         "candidate_writes": [],
         "would_write": False,
         "would_review": False,
@@ -45,7 +65,7 @@ def log_shadow_write(
             "target_path": c.get("target_path", ""),
             "subject": c.get("subject", ""),
             "predicate": c.get("predicate", ""),
-            "object": c.get("object_value", "")[:100],
+            "object": _redact(c.get("object_value", "")[:100]),
             "requires_review": c.get("requires_review", False),
             "reason": c.get("reason", ""),
             "dedup_key": c.get("dedup_key", ""),

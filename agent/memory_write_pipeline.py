@@ -712,6 +712,26 @@ class MemoryWritePipeline:
             deduped.append(candidate)
         candidates = deduped
 
+        # Hygiene gate: drop candidates whose object is a raw truncated copy of the
+        # user message, a reply-quote, a question, secret-bearing, or too short.
+        # A shadow-log audit found 84.2% of candidates were raw_truncated_copy and
+        # 2% leaked secrets — these must never reach review/write. Fail-open on any
+        # internal error so this never blocks legitimate extraction.
+        try:
+            from agent.memory_write_earn import hygiene_flags
+            _kept = []
+            for c in candidates:
+                _flags = hygiene_flags(str(getattr(c, 'object_value', '') or ''), user_msg)
+                _hard = {'contains_secret', 'raw_truncated_copy', 'is_question', 'too_short'}
+                if _flags and (_hard & set(_flags)):
+                    logger.debug('Hygiene gate dropped candidate %s: %s',
+                                 getattr(c, 'subject', '?'), ','.join(_flags))
+                    continue
+                _kept.append(c)
+            candidates = _kept
+        except Exception as exc:
+            logger.debug('Hygiene gate skipped (fail-open): %s', exc)
+
         return {
             'candidates': candidates,
             'importance': importance,
