@@ -441,17 +441,27 @@ class MemoryWritePipeline:
                 for p in _auto_patterns
             ) else 'user_direct'
             _auto_target_path = '用户档案/偏好' if _auto_type == 'preference' else '用户档案/程序性记忆'
+            # Distill the atomic FACT from the raw message (was: store the raw message,
+            # which made 68% of candidates "raw truncated copies"). Keep the raw text as
+            # evidence. If distillation can't produce a confident fact, force review.
+            try:
+                from agent.memory_distiller import distill_fact
+                _distilled, _distill_ok = distill_fact(user_msg)
+            except Exception:
+                _distilled, _distill_ok = user_msg.strip()[:1000], False
+            _object_value = _distilled if (_distill_ok and _distilled) else user_msg.strip()[:1000]
             # Only require review for corrections and credential-related procedural_memory,
             # not all procedural_memory (preference never needs review).
             # Fixed 2026-06-08: Was setting requires_review=True for ALL procedural_memory.
             _requires_review = (
                 _auto_source == 'user_correction' or
+                (not _distill_ok) or
                 (_auto_type == 'procedural_memory' and any('credential' in p.lower() or 'secret' in p.lower() for p in _auto_patterns))
             )
             candidates.append(CandidateFact(
                 subject='auto_store_heuristic',
                 predicate='explicit_memory_signal',
-                object_value=user_msg.strip()[:1000],
+                object_value=_object_value,
                 importance=max(0.85, min(0.98, _auto_confidence)),
                 memory_type=_auto_type,
                 target_store='memory_graph',
