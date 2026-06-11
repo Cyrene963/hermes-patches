@@ -43,14 +43,19 @@ by node-uuid identity + real prompt-carriage via the live provider's prefetch me
 | WebUI resilience | `frontend/src/App.jsx` | removed dead state; `RouteErrorBoundary` (no blank screen) | needs `npm run build` |
 
 ## 3. Hard truths (verified numbers)
-- **Write loop is inert AND dirty.** Real shadow logs (7 days, 948 candidates): only
-  **1** actual auto-write; **88.4%** of candidates carry ≥1 garbage flag; **68%** are
-  raw truncated copies of the user message; **19** leaked secrets. → Auto-write must
-  stay OFF until the hygiene gate + a labeled precision ≥0.95 (`shadow_precision_audit.py --score`).
-- **Isolation is strong.** Cross-user no-leak is enforced at the Postgres RLS layer
-  (`mg_app` non-superuser + `set_app_context`), not just app code.
-- **mg.bz9.me 403** is Cloudflare edge bot-protection, not the app/nginx (clean proxy
-  to :8233, local curl = 200). Confirm: `curl -sI https://mg.bz9.me/ | grep -i cf-ray`.
+- **Write loop is gated, and now much cleaner at the source.** Before the distiller,
+  real shadow logs showed only ~1 actual auto-write and **78.5%** of candidates carried
+  a hard-garbage flag (68% raw truncated copies, 19 leaked secrets). After the fact
+  distiller + hygiene gate + redaction: hard-garbage **~43%**, and **~56% of candidates
+  now distill to a clean atomic fact** (was ~11.6% clean). The remaining ~44% is genuine
+  multi-topic ramble that rule-based distillation correctly refuses to fabricate into a
+  fact and routes to review. Auto-write stays OFF until a labeled precision ≥0.95
+  (`shadow_precision_audit.py --score`).
+- **Rule-based distillation has plateaued (~54–56% clean).** Next ceiling-raiser is an
+  LLM distiller for the ramble tail — a deliberate opt-in (cost/latency/non-determinism),
+  not added unilaterally.
+- **Isolation is strong.** Cross-user no-leak is enforced at the Postgres RLS layer.
+- **mg.bz9.me 403** is Cloudflare edge bot-protection, not the app/nginx.
 
 ## 4. Run book
 ```bash
