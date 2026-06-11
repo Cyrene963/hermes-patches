@@ -196,7 +196,7 @@ curl -fsS http://127.0.0.1:9177/health
 
 ## 安装内容
 
-通过 overlay-first `install.sh` 安装；旧的 monolithic combined patch 已不作为发布载体。`install.sh` 会先做环境预检，然后复制运行时 overlay、清理 `.pyc`、安装/初始化配置模板、注册 toolsets、安装 guard 脚本，并可用 `HERMES_INSTALL_SYSTEMD=0` / `HERMES_INSTALL_DB=0` 在临时 clean worktree 中做无 systemd/DB 副作用 smoke：
+通过 overlay-first `install.sh` 安装；旧的 monolithic combined patch 已不作为发布载体。`install.sh` 会先做环境预检，然后复制运行时 overlay、清理 `.pyc`、安装/初始化配置模板、注册 toolsets、安装 guard 脚本，并可用 `HERMES_INSTALL_SYSTEMD=0` / `HERMES_INSTALL_DB=0` / `HERMES_INSTALL_DEPS=0` / `HERMES_INSTALL_GIT_HOOKS=0` / `HERMES_INSTALL_NPM_TOOLS=0` / `HERMES_INSTALL_DEPLOY_HELPERS=0` 在临时 clean worktree 中做无 systemd/DB/系统包/全局 npm/部署 helper 副作用 smoke：
 
 ### 核心架构（借鉴 Claude Code）
 - User Context / System Prompt 分离（prompt_builder.py）

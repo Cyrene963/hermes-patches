@@ -13,6 +13,9 @@ fi
 MG_BACKEND_DIR="$MG_PROJECT_DIR/backend"
 MG_PORT="${MG_PORT:-8233}"
 MG_HOST="${MG_HOST:-127.0.0.1}"
+MG_INSTALL_DEPS="${MG_INSTALL_DEPS:-1}"
+MG_INSTALL_SYSTEMD="${MG_INSTALL_SYSTEMD:-1}"
+MG_INSTALL_NGINX="${MG_INSTALL_NGINX:-1}"
 NGINX_CONF="${NGINX_CONF:-}"
 NGINX_BIN="${NGINX_BIN:-/www/server/nginx/sbin/nginx}"
 NGINX_MAIN_CONF="${NGINX_MAIN_CONF:-/www/server/nginx/conf/nginx.conf}"
@@ -37,7 +40,7 @@ fi
 
 # Runtime deps used by the standalone backend. Debian package names differ from
 # Python import names; ahocorasick comes from python3-ahocorasick.
-if command -v apt-get >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ]; then
+if [ "${MG_INSTALL_DEPS:-1}" != "0" ] && command -v apt-get >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ]; then
   missing_pkgs=()
   python3 - <<'PY' >/tmp/mg-webui-missing-mods
 import importlib.util
@@ -85,7 +88,9 @@ TimeoutStartSec=30
 WantedBy=multi-user.target
 UNIT
 
-systemctl daemon-reload
+if [ "$MG_INSTALL_SYSTEMD" = "1" ]; then
+  systemctl daemon-reload
+fi
 
 # Remove stale manually-started backend processes that can steal port 8233.
 if command -v ss >/dev/null 2>&1; then
@@ -98,15 +103,19 @@ if command -v ss >/dev/null 2>&1; then
   done
 fi
 
-systemctl enable --now memory-graph-webui.service
-systemctl restart memory-graph-webui.service
-for _ in $(seq 1 30); do
-  curl -fsS "http://$MG_HOST:$MG_PORT/health" >/dev/null 2>&1 && break
-  sleep 0.5
-done
-curl -fsS "http://$MG_HOST:$MG_PORT/health" >/dev/null
+if [ "$MG_INSTALL_SYSTEMD" = "1" ]; then
+  systemctl enable --now memory-graph-webui.service
+  systemctl restart memory-graph-webui.service
+  for _ in $(seq 1 30); do
+    curl -fsS "http://$MG_HOST:$MG_PORT/health" >/dev/null 2>&1 && break
+    sleep 0.5
+  done
+  curl -fsS "http://$MG_HOST:$MG_PORT/health" >/dev/null
+else
+  echo "⏭️ MG_INSTALL_SYSTEMD=0; skipped systemd enable/restart and live health wait"
+fi
 
-if [ -f "$NGINX_CONF" ]; then
+if [ "$MG_INSTALL_NGINX" = "1" ] && [ -f "$NGINX_CONF" ]; then
   python3 - "$NGINX_CONF" "$MG_PORT" <<'PY'
 from pathlib import Path
 import re, sys
@@ -121,6 +130,8 @@ PY
     "$NGINX_BIN" -t -c "$NGINX_MAIN_CONF"
     "$NGINX_BIN" -s reload -c "$NGINX_MAIN_CONF"
   fi
+else
+  echo "⏭️ MG_INSTALL_NGINX=0 or NGINX_CONF unset; skipped nginx rewrite/reload"
 fi
 
 echo "✅ standalone Memory Graph WebUI deployed on $MG_HOST:$MG_PORT"
