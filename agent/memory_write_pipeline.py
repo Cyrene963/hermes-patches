@@ -441,25 +441,38 @@ class MemoryWritePipeline:
                 for p in _auto_patterns
             ) else 'user_direct'
             _auto_target_path = '用户档案/偏好' if _auto_type == 'preference' else '用户档案/程序性记忆'
-            # Distill the atomic FACT from the raw message (was: store the raw message,
-            # which made 68% of candidates "raw truncated copies"). Keep the raw text as
-            # evidence. If distillation can't produce a confident fact, force review.
+            # Upstream LLM classification: decide durable + extract a CLEAN atomic fact
+            # ONCE here, so the candidate entering classify_write is high-quality (real
+            # subject + full fact → passes the content/quality filter) and the auto-write
+            # gate needs no second LLM call. Fail-closed: LLM off/unreachable → not durable
+            # → requires_review (no auto-write), falling back to the rule distiller object.
+            _llm_durable = None
+            _object_value = None
+            _subject = 'auto_store_heuristic'
             try:
-                from agent.memory_distiller import distill_fact
-                _distilled, _distill_ok = distill_fact(user_msg)
+                from agent.memory_fact_classifier import classifier_enabled, classify_fact
+                if classifier_enabled():
+                    _v = classify_fact(user_msg)
+                    _llm_durable = bool(_v.durable)
+                    if _v.durable and _v.fact:
+                        _object_value = _v.fact
+                        _subject = {'preference': '用户偏好', 'correction': '用户纠正',
+                                    'decision': '用户决定', 'profile': '用户档案'}.get(_v.kind, '用户事实')
+                        if _v.kind == 'correction':
+                            _auto_source = 'user_correction'
             except Exception:
-                _distilled, _distill_ok = user_msg.strip()[:1000], False
-            _object_value = _distilled if (_distill_ok and _distilled) else user_msg.strip()[:1000]
-            # Only require review for corrections and credential-related procedural_memory,
-            # not all procedural_memory (preference never needs review).
-            # Fixed 2026-06-08: Was setting requires_review=True for ALL procedural_memory.
-            _requires_review = (
-                _auto_source == 'user_correction' or
-                (not _distill_ok) or
-                (_auto_type == 'procedural_memory' and any('credential' in p.lower() or 'secret' in p.lower() for p in _auto_patterns))
-            )
-            candidates.append(CandidateFact(
-                subject='auto_store_heuristic',
+                _llm_durable = None
+            if _object_value is None:  # LLM unavailable/disabled → rule distiller fallback
+                try:
+                    from agent.memory_distiller import distill_fact
+                    _distilled, _distill_ok = distill_fact(user_msg)
+                except Exception:
+                    _distilled, _distill_ok = user_msg.strip()[:1000], False
+                _object_value = _distilled if (_distill_ok and _distilled) else user_msg.strip()[:1000]
+            # Auto-write only when the LLM positively confirmed durability; otherwise review.
+            _requires_review = (_llm_durable is not True)
+            _cand = CandidateFact(
+                subject=_subject,
                 predicate='explicit_memory_signal',
                 object_value=_object_value,
                 importance=max(0.85, min(0.98, _auto_confidence)),
@@ -471,7 +484,9 @@ class MemoryWritePipeline:
                 source_type=_auto_source,
                 requires_review=_requires_review,
                 reason='; '.join(_auto_patterns[:5]),
-            ))
+            )
+            _cand.llm_durable = _llm_durable
+            candidates.append(_cand)
 
         # Extract durable meta-learning / target-function signals from the user
         # message. These are not ordinary facts; they are reusable operating
@@ -905,23 +920,28 @@ class MemoryWritePipeline:
         namespace = classification.get('namespace') or candidate.namespace or ''
         if self.config.get('never_auto_write_to_core', True) and not namespace:
             return False
-        # Final precision gate: an LLM must confirm this is a durable fact (not a
-        # question / chit-chat / the assistant's own words). This is what makes
-        # auto-write safe to keep ON by default. FAIL-CLOSED: if the classifier is
-        # disabled or the LLM endpoint is unreachable, classify_fact() returns
-        # durable=False and we do NOT auto-write (the candidate goes to review).
+        # Final precision gate: an LLM must confirm this is a durable fact. The
+        # classification is normally done ONCE upstream (candidate.llm_durable); only
+        # fall back to classifying here if it wasn't. FAIL-CLOSED: disabled/unreachable
+        # classifier → not durable → no auto-write (candidate goes to review).
         if self.config.get('require_llm_classifier', True):
-            try:
-                from agent.memory_fact_classifier import classifier_enabled, classify_fact
-                if not classifier_enabled():
-                    return False
-                verdict = classify_fact(candidate.evidence_quote or candidate.object_value or '')
-                if not verdict.durable:
-                    return False
-                if verdict.fact:  # store the LLM's clean atomic fact, not the raw message
-                    candidate.object_value = verdict.fact
-            except Exception:
+            _ld = getattr(candidate, 'llm_durable', None)
+            if _ld is True:
+                pass  # already confirmed durable upstream (no second LLM call)
+            elif _ld is False:
                 return False
+            else:
+                try:
+                    from agent.memory_fact_classifier import classifier_enabled, classify_fact
+                    if not classifier_enabled():
+                        return False
+                    verdict = classify_fact(candidate.evidence_quote or candidate.object_value or '')
+                    if not verdict.durable:
+                        return False
+                    if verdict.fact:
+                        candidate.object_value = verdict.fact
+                except Exception:
+                    return False
         return True
 
     def _memory_graph_title(self, candidate: CandidateFact) -> str:
