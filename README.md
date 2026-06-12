@@ -39,8 +39,9 @@ installer 先运行 `scripts/hermes-patch-env-preflight.py` 做本机预检:要�
 
 | 想了解 | 文档 |
 |---|---|
-| 能力矩阵 / 验证证据 / 距数字替身多远 | **[docs/STATUS.md](docs/STATUS.md)** |
-| Memory OS 架构 | [docs/MEMORY_ARCHITECTURE.md](docs/MEMORY_ARCHITECTURE.md) |
+| **记忆系统怎么工作的(深入浅出)** | **[docs/MEMORY_OS_EXPLAINED.md](docs/MEMORY_OS_EXPLAINED.md)** |
+| 能力矩阵 / 验证证据 / 距数字替身多远 | [docs/STATUS.md](docs/STATUS.md) |
+| Memory OS 架构(技术参考) | [docs/MEMORY_ARCHITECTURE.md](docs/MEMORY_ARCHITECTURE.md) |
 | 收敛方案 / 失败模式 / 验证 run-book | [docs/MEMORY_OS_CONVERGENCE_PLAN.md](docs/MEMORY_OS_CONVERGENCE_PLAN.md) |
 | 三套记忆系统对比 | [docs/MEMORY_SYSTEM_COMPARISON.md](docs/MEMORY_SYSTEM_COMPARISON.md) |
 | Search-as-Code / deep_research | [docs/SEARCH_AS_CODE.md](docs/SEARCH_AS_CODE.md) |
