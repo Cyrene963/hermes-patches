@@ -18,5 +18,5 @@ entity_paths:
 # assistant learns ABOUT them route to their memory (with subject_auto_route: true),
 # instead of cluttering the speaker's namespace.
 user_registry:
-  Alice: telegram:1111111111
-  Bob: telegram:2222222222
+  Alice: "telegram:<alice-chat-id>"
+  Bob: "telegram:<bob-chat-id>"
