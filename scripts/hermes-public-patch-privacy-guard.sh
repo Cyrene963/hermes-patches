@@ -32,7 +32,7 @@ xox[baprs]-[A-Za-z0-9-]{20,}
 AKIA[0-9A-Z]{16}
 AIza[0-9A-Za-z_-]{20,}
 /root/\.hermes
-~/projects
+/root/projects
 telegram:[0-9]{7,}
 PATTERNS
 
