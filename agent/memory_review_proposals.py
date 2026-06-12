@@ -148,6 +148,23 @@ def _candidate_action(raw: Mapping[str, Any]) -> str:
     return "review"
 
 
+def _candidate_readback_queries(raw: Mapping[str, Any]) -> List[str]:
+    explicit = [str(q).strip() for q in raw.get("readback_queries") or [] if str(q).strip()]
+    if explicit:
+        return explicit
+    subject = str(raw.get("subject") or "").strip()
+    predicate = str(raw.get("predicate") or "").strip()
+    content = str(raw.get("object") or raw.get("object_value") or raw.get("content") or "").strip()
+    queries: List[str] = []
+    if subject and predicate:
+        queries.append(f"{subject} {predicate}")
+    if subject and content:
+        queries.append(f"{subject} {content[:80]}")
+    if not queries and content:
+        queries.append(content[:120])
+    return queries
+
+
 def normalize_shadow_candidate(entry: Mapping[str, Any], raw: Mapping[str, Any]) -> MemoryCandidate:
     namespace = str(raw.get("namespace") or entry.get("namespace") or "")
     kind = str(raw.get("memory_type") or raw.get("kind") or "unknown")
@@ -174,7 +191,7 @@ def normalize_shadow_candidate(entry: Mapping[str, Any], raw: Mapping[str, Any])
         requires_review=bool(raw.get("requires_review")) or _candidate_action(raw) == "review",
         suggested_store=str(raw.get("target_store") or "ignore"),
         namespace_security_scope=namespace,
-        readback_queries=[str(q) for q in raw.get("readback_queries") or [] if str(q).strip()],
+        readback_queries=_candidate_readback_queries(raw),
         supersedes=[],
         conflict_with=[str(raw.get("conflict_with"))] if raw.get("conflict_with") else [],
         reason=str(raw.get("reason") or raw.get("failure_reason") or ""),
