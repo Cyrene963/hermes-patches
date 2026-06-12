@@ -9,6 +9,9 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+EVOLINK_BASE_URL = "https://api.evolink.ai/v1"
+EVOLINK_API_KEY_ENV = "EVOLINK_API_KEY"
+
 from hermes_cli import auth as auth_mod
 from agent.credential_pool import CredentialPool, PooledCredential, get_custom_provider_pool_key, load_pool
 from hermes_cli.auth import (
@@ -258,6 +261,64 @@ def _parse_api_mode(raw: Any) -> Optional[str]:
         if normalized in _VALID_API_MODES:
             return normalized
     return None
+
+
+def _config_or_env_value(name: str) -> str:
+    """Read a secret from Hermes' .env helper first, then process env."""
+    try:
+        from hermes_cli.config import get_env_value
+
+        value = get_env_value(name)
+        if value:
+            return str(value).strip()
+    except Exception:
+        pass
+    return os.getenv(name, "").strip()
+
+
+def _resolve_evolink_runtime(
+    *,
+    requested_provider: str,
+    model_cfg: Dict[str, Any],
+    explicit_api_key: Optional[str] = None,
+    explicit_base_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+    cfg_base_url = ""
+    if cfg_provider == "evolink":
+        cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+
+    base_url = (
+        str(explicit_base_url or "").strip().rstrip("/")
+        or cfg_base_url
+        or os.getenv("EVOLINK_BASE_URL", "").strip().rstrip("/")
+        or EVOLINK_BASE_URL
+    )
+
+    api_key = str(explicit_api_key or "").strip()
+    if not api_key and cfg_provider == "evolink":
+        api_key = str(model_cfg.get("api_key") or "").strip()
+        key_env = str(model_cfg.get("key_env") or model_cfg.get("api_key_env") or "").strip()
+        if not api_key and key_env:
+            api_key = _config_or_env_value(key_env)
+    if not api_key:
+        api_key = _config_or_env_value(EVOLINK_API_KEY_ENV)
+    if not api_key:
+        raise AuthError(
+            f"EvoLink requires an API key. Set {EVOLINK_API_KEY_ENV} in "
+            "~/.hermes/.env or your environment."
+        )
+
+    configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
+    source = "explicit" if explicit_api_key or explicit_base_url else "env/config"
+    return {
+        "provider": "evolink",
+        "api_mode": configured_mode or _detect_api_mode_for_url(base_url) or "chat_completions",
+        "base_url": base_url,
+        "api_key": api_key,
+        "source": source,
+        "requested_provider": requested_provider,
+    }
 
 
 def _maybe_apply_codex_app_server_runtime(
@@ -1265,6 +1326,14 @@ def resolve_runtime_provider(
             target_model=target_model,
         )
         return azure_runtime
+
+    if requested_provider == "evolink":
+        return _resolve_evolink_runtime(
+            requested_provider=requested_provider,
+            model_cfg=_get_model_config(),
+            explicit_api_key=explicit_api_key,
+            explicit_base_url=explicit_base_url,
+        )
 
     custom_runtime = _resolve_named_custom_runtime(
         requested_provider=requested_provider,

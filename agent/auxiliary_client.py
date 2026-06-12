@@ -259,6 +259,7 @@ def _get_aux_model_for_provider(provider_id: str) -> str:
 # plus providers we intentionally keep pinned here (e.g. Anthropic predates
 # profiles). New providers should set default_aux_model on their profile instead.
 _API_KEY_PROVIDER_AUX_MODELS_FALLBACK: Dict[str, str] = {
+    "evolink": "gpt-4o-mini",
     "gemini": "gemini-3-flash-preview",
     "zai": "glm-4.5-flash",
     "kimi-coding": "kimi-k2-turbo-preview",
@@ -4612,7 +4613,12 @@ def _get_cached_client(
 # to e.g. DeepSeek and producing cryptic ``unknown variant 'image_url'``
 # errors (issue #31179).
 _AUX_DIRECT_API_BASE_URLS: Dict[str, str] = {
+    "evolink": "https://api.evolink.ai/v1",
     "openai": "https://api.openai.com/v1",
+}
+
+_AUX_DIRECT_API_KEY_ENV_VARS: Dict[str, str] = {
+    "evolink": "EVOLINK_API_KEY",
 }
 
 
@@ -4658,18 +4664,27 @@ def _resolve_task_provider_model(
     # has already supplied a base_url we keep their endpoint but still rewrite
     # the provider to ``custom`` so resolution doesn't hit the
     # PROVIDER_REGISTRY-only path (which has no ``openai`` entry).
-    def _expand_direct_api_alias(prov: Optional[str], existing_base: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    def _expand_direct_api_alias(
+        prov: Optional[str],
+        existing_base: Optional[str],
+        existing_key: Optional[str],
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         if not prov:
-            return prov, existing_base
-        target_base = _AUX_DIRECT_API_BASE_URLS.get(prov.strip().lower())
+            return prov, existing_base, existing_key
+        provider_key = prov.strip().lower()
+        target_base = _AUX_DIRECT_API_BASE_URLS.get(provider_key)
         if target_base is None:
-            return prov, existing_base
-        return "custom", existing_base or target_base
+            return prov, existing_base, existing_key
+        if existing_key:
+            return "custom", existing_base or target_base, existing_key
+        env_var = _AUX_DIRECT_API_KEY_ENV_VARS.get(provider_key)
+        env_key = os.getenv(env_var, "").strip() if env_var else ""
+        return "custom", existing_base or target_base, env_key or existing_key
 
     if provider:
-        provider, base_url = _expand_direct_api_alias(provider, base_url)
+        provider, base_url, api_key = _expand_direct_api_alias(provider, base_url, api_key)
     if cfg_provider:
-        cfg_provider, cfg_base_url = _expand_direct_api_alias(cfg_provider, cfg_base_url)
+        cfg_provider, cfg_base_url, cfg_api_key = _expand_direct_api_alias(cfg_provider, cfg_base_url, cfg_api_key)
 
     if base_url:
         return "custom", resolved_model, base_url, api_key, resolved_api_mode
