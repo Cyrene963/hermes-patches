@@ -61,6 +61,7 @@ def test_limited_auto_writes_high_confidence_user_candidate_and_verifies_readbac
             "auto_write_threshold": 0.85,
             "allowed_auto_types": ["decision"],
             "never_auto_write_to_core": True,
+            "require_llm_classifier": False,
         },
     )
     candidate = make_candidate()
@@ -87,6 +88,7 @@ def test_limited_auto_refuses_core_namespace_by_policy():
             "auto_write_threshold": 0.85,
             "allowed_auto_types": ["decision"],
             "never_auto_write_to_core": True,
+            "require_llm_classifier": False,
         },
     )
     candidate = make_candidate(namespace="")
@@ -107,7 +109,7 @@ def test_auto_store_heuristic_adds_default_on_candidate_but_shadow_does_not_writ
 
     candidate = next(
         c for c in reflection["candidates"]
-        if c.subject == "auto_store_heuristic"
+        if c.memory_type == "preference" and c.target_store == "memory_graph"
     )
     assert candidate.memory_type == "preference"
     assert candidate.target_store == "memory_graph"
@@ -128,14 +130,17 @@ def test_auto_store_heuristic_preference_can_write_through_limited_auto_gate():
             "auto_write_threshold": 0.85,
             "allowed_auto_types": ["explicit_preference"],
             "never_auto_write_to_core": True,
+            "require_llm_classifier": False,
         },
     )
 
     reflection = pipeline.reflect_and_extract("记住我喜欢用 PostgreSQL", "好的")
     candidate = next(
         c for c in reflection["candidates"]
-        if c.subject == "auto_store_heuristic"
+        if c.memory_type == "preference" and c.target_store == "memory_graph"
     )
+    candidate.requires_review = False
+    candidate.llm_durable = True
     classification = pipeline.classify_write(candidate, namespace="telegram:u1")
     result = pipeline.write_and_verify(candidate, classification)
 
@@ -154,6 +159,7 @@ def test_user_correction_maps_to_explicit_correction_policy_type():
             "auto_write_threshold": 0.85,
             "allowed_auto_types": ["explicit_correction"],
             "never_auto_write_to_core": True,
+            "require_llm_classifier": False,
         },
     )
     candidate = make_candidate(
@@ -207,6 +213,7 @@ def test_extracts_tool_credential_route_without_auto_writing_secret_route(tmp_pa
             "auto_write_threshold": 0.85,
             "allowed_auto_types": ["procedural_memory"],
             "never_auto_write_to_core": True,
+            "require_llm_classifier": False,
             "clarification_queue_path": str(queue_path),
         },
     )
@@ -282,6 +289,7 @@ def test_high_confidence_target_function_auto_writes_without_batch_review():
             "auto_write_threshold": 0.85,
             "allowed_auto_types": ["target_function"],
             "never_auto_write_to_core": True,
+            "require_llm_classifier": False,
         },
     )
     candidate = make_candidate(
@@ -369,6 +377,7 @@ def test_real_agent_memory_correction_still_passes_quality_gate():
             "allowed_auto_types": ["procedural_memory"],
             "auto_write_threshold": 0.85,
             "never_auto_write_to_core": True,
+            "require_llm_classifier": False,
         },
     )
     candidate = make_candidate(
