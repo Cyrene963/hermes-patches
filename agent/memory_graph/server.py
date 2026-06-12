@@ -239,6 +239,7 @@ def create_app(graph_service=None, search_indexer=None, glossary_service=None):
             changeset_store.record_change(
                 "memories", result["uri"], result["node_uuid"],
                 after={"content": body["content"]},
+                namespace=ns,
             )
             await search_indexer.refresh_search_documents_for_node(result["node_uuid"], namespace=ns)
             return result
@@ -262,6 +263,7 @@ def create_app(graph_service=None, search_indexer=None, glossary_service=None):
                 "memories", uri, result.get("node_uuid", ""),
                 before={"content": before["content"]} if before else None,
                 after={"content": body.get("content")},
+                namespace=ns,
             )
             return result
         except (ValueError, KeyError) as e:
@@ -286,6 +288,7 @@ def create_app(graph_service=None, search_indexer=None, glossary_service=None):
                     "memories", f"{domain}://{path}", node_uuid,
                     before={"content": before["content"]} if before else None,
                     after=None,
+                    namespace=ns,
                 )
             return {"deleted": True, "node_uuid": node_uuid, "uri": f"{domain}://{path}"}
         except ValueError as e:
@@ -309,13 +312,15 @@ def create_app(graph_service=None, search_indexer=None, glossary_service=None):
     # ─── Review API ────────────────────────────────────────────────
     @app.get("/api/memory-graph/review/changes")
     async def api_review_changes(request: Request, changeset_id: str = Query("active")):
-        require_auth(request)
-        return changeset_store.get_changes(changeset_id)
+        user = require_auth(request)
+        ns = user.get("namespace", "")
+        return changeset_store.get_changes(changeset_id, namespace=ns)
 
     @app.get("/api/memory-graph/review/list")
     async def api_review_list(request: Request):
-        require_auth(request)
-        return changeset_store.list_changesets()
+        user = require_auth(request)
+        ns = user.get("namespace", "")
+        return changeset_store.list_changesets(namespace=ns)
 
     @app.post("/api/memory-graph/review/rollback")
     async def api_review_rollback(request: Request):
@@ -351,16 +356,20 @@ def create_app(graph_service=None, search_indexer=None, glossary_service=None):
 
     @app.post("/api/memory-graph/review/approve")
     async def api_review_approve(request: Request):
-        require_auth(request)
+        user = require_auth(request)
+        ns = user.get("namespace", "")
         body = await request.json()
         changeset_id = body.get("changeset_id", "active")
-        changeset_store.clear(changeset_id)
+        if not changeset_store.clear(changeset_id, namespace=ns):
+            raise HTTPException(404, f"Changeset {changeset_id} not found")
         return {"approved": True, "changeset_id": changeset_id}
 
     @app.delete("/api/memory-graph/review/clear")
     async def api_review_clear(request: Request, changeset_id: str = Query("active")):
-        require_auth(request)
-        changeset_store.clear(changeset_id)
+        user = require_auth(request)
+        ns = user.get("namespace", "")
+        if not changeset_store.clear(changeset_id, namespace=ns):
+            raise HTTPException(404, f"Changeset {changeset_id} not found")
         return {"cleared": True}
 
     # ─── Glossary API ──────────────────────────────────────────────

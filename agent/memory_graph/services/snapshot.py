@@ -26,13 +26,25 @@ class ChangesetStore:
     def _changeset_path(self, changeset_id: str) -> str:
         return os.path.join(self._base_dir, f"{changeset_id}.json")
 
-    def load(self, changeset_id: str) -> Optional[Dict[str, Any]]:
-        """Load a changeset by ID."""
+    def load(self, changeset_id: str, namespace: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Load a changeset by ID, optionally enforcing namespace.
+
+        Legacy changesets written before namespace support are treated as
+        global records and remain visible to any namespace.
+        """
         path = self._changeset_path(changeset_id)
         if not os.path.exists(path):
             return None
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return None
+        if namespace is not None:
+            record_namespace = data.get("namespace", "")
+            if record_namespace not in {"", namespace}:
+                return None
+        return data
 
     def save(self, changeset_id: str, data: Dict[str, Any]) -> str:
         """Save a changeset and return its path."""
@@ -60,10 +72,26 @@ class ChangesetStore:
         }
         return self.save(changeset_id, data)
 
-    def get_changes(self, node_uuid: Optional[str] = None,
-                     limit: int = 50) -> List[Dict[str, Any]]:
-        """Get recent changes, optionally filtered by node UUID."""
-        changes = []
+    def get_changes(self, changeset_id: str, namespace: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return the stored change record for a specific changeset ID."""
+        data = self.load(changeset_id, namespace=namespace)
+        return [data] if data else []
+
+    def clear(self, changeset_id: str, namespace: Optional[str] = None) -> bool:
+        """Delete a changeset by ID, optionally enforcing namespace."""
+        path = self._changeset_path(changeset_id)
+        data = self.load(changeset_id, namespace=namespace)
+        if not data:
+            return False
+        try:
+            os.remove(path)
+            return True
+        except FileNotFoundError:
+            return False
+
+    def list_changesets(self, limit: int = 100, namespace: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List recent changesets as dashboard-ready summaries."""
+        summaries: List[Dict[str, Any]] = []
         for fname in sorted(os.listdir(self._base_dir), reverse=True):
             if not fname.endswith(".json"):
                 continue
@@ -71,16 +99,24 @@ class ChangesetStore:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                if node_uuid and data.get("node_uuid") != node_uuid:
-                    continue
-                changes.append(data)
-                if len(changes) >= limit:
-                    break
             except (json.JSONDecodeError, IOError):
                 continue
-        return changes
+            if namespace is not None and data.get("namespace", "") not in {"", namespace}:
+                continue
+            summaries.append({
+                "id": data.get("id"),
+                "namespace": data.get("namespace", ""),
+                "created_at": data.get("timestamp"),
+                "changes": [data],
+                "action": data.get("action"),
+                "uri": data.get("uri"),
+                "node_uuid": data.get("node_uuid"),
+            })
+            if len(summaries) >= limit:
+                break
+        return summaries
 
-    def clear(self, older_than_days: int = 30) -> int:
+    def purge_older_than_days(self, older_than_days: int = 30) -> int:
         """Clear changesets older than N days."""
         cutoff = datetime.now(timezone.utc).timestamp() - (older_than_days * 86400)
         removed = 0
@@ -92,11 +128,3 @@ class ChangesetStore:
                 os.remove(path)
                 removed += 1
         return removed
-
-    def list_changesets(self, limit: int = 100) -> List[str]:
-        """List recent changeset IDs."""
-        files = sorted(
-            [f[:-5] for f in os.listdir(self._base_dir) if f.endswith(".json")],
-            reverse=True
-        )
-        return files[:limit]
