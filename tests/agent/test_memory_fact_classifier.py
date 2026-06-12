@@ -76,3 +76,32 @@ def test_code_fence_json_is_parsed():
         message=types.SimpleNamespace(content='```json\n{"durable": true, "kind": "correction", "fact": "数据库是 PostgreSQL", "confidence": 0.88}\n```'))])
     v = m.classify_fact("纠正：数据库是 PostgreSQL 不是 MySQL")
     assert v.durable is True and v.fact == "数据库是 PostgreSQL"
+
+
+# ── subject routing ──────────────────────────────────────────────────────────
+def test_parses_subject_field():
+    m, aux = _load()
+    aux.call_llm = lambda **k: __import__("types").SimpleNamespace(choices=[__import__("types").SimpleNamespace(
+        message=__import__("types").SimpleNamespace(content='{"durable":true,"kind":"preference","fact":"Steven 喝美式","subject":"Steven","confidence":0.95}'))])
+    v = m.classify_fact("Steven 喜欢喝美式咖啡")
+    assert v.durable is True and v.subject == "Steven"
+
+
+def test_resolve_subject_self_returns_speaker_ns():
+    m, _ = _load()
+    ns, other = m.resolve_subject_namespace("self", "telegram:111")
+    assert ns == "telegram:111" and other is False
+
+
+def test_resolve_subject_other_mapped(monkeypatch):
+    m, _ = _load()
+    monkeypatch.setattr(m, "load_user_registry", lambda: {"steven": "telegram:999"})
+    ns, other = m.resolve_subject_namespace("Steven", "telegram:111")
+    assert ns == "telegram:999" and other is True
+
+
+def test_resolve_subject_other_unmapped(monkeypatch):
+    m, _ = _load()
+    monkeypatch.setattr(m, "load_user_registry", lambda: {})
+    ns, other = m.resolve_subject_namespace("SomeStranger", "telegram:111")
+    assert ns is None and other is True

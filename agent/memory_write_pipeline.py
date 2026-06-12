@@ -447,6 +447,7 @@ class MemoryWritePipeline:
             # gate needs no second LLM call. Fail-closed: LLM off/unreachable → not durable
             # → requires_review (no auto-write), falling back to the rule distiller object.
             _llm_durable = None
+            _llm_subject = 'self'
             _object_value = None
             _subject = 'auto_store_heuristic'
             try:
@@ -454,6 +455,7 @@ class MemoryWritePipeline:
                 if classifier_enabled():
                     _v = classify_fact(user_msg)
                     _llm_durable = bool(_v.durable)
+                    _llm_subject = getattr(_v, 'subject', 'self') or 'self'
                     if _v.durable and _v.fact:
                         _object_value = _v.fact
                         _subject = {'preference': '用户偏好', 'correction': '用户纠正',
@@ -486,6 +488,7 @@ class MemoryWritePipeline:
                 reason='; '.join(_auto_patterns[:5]),
             )
             _cand.llm_durable = _llm_durable
+            _cand.llm_subject = _llm_subject
             candidates.append(_cand)
 
         # Extract durable meta-learning / target-function signals from the user
@@ -920,6 +923,25 @@ class MemoryWritePipeline:
         namespace = classification.get('namespace') or candidate.namespace or ''
         if self.config.get('never_auto_write_to_core', True) and not namespace:
             return False
+        # Subject routing: a fact ABOUT another person must NOT auto-write into the
+        # speaker's namespace (that is exactly the mis-filing that polluted a user's
+        # private memory with a friend's profile). Default: route such facts to
+        # review. If subject_auto_route is enabled AND the subject maps to a known
+        # user's namespace, retarget the write to that user's namespace instead.
+        _subj = getattr(candidate, 'llm_subject', 'self')
+        if _subj and str(_subj).strip().lower() not in {'self', '用户', 'me', 'owner', '本人', 'speaker'}:
+            try:
+                from agent.memory_fact_classifier import resolve_subject_namespace
+                target_ns, is_other = resolve_subject_namespace(_subj, namespace)
+            except Exception:
+                target_ns, is_other = None, True
+            if is_other:
+                if self.config.get('subject_auto_route', False) and target_ns and target_ns != namespace:
+                    candidate.namespace = target_ns
+                    classification['namespace'] = target_ns
+                    namespace = target_ns
+                else:
+                    return False  # about someone else, unmapped or routing off → review, never the speaker's ns
         # Final precision gate: an LLM must confirm this is a durable fact. The
         # classification is normally done ONCE upstream (candidate.llm_durable); only
         # fall back to classifying here if it wasn't. FAIL-CLOSED: disabled/unreachable

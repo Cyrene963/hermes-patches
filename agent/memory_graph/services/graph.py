@@ -361,8 +361,11 @@ class GraphService:
             # Resolve parent — with auto-segmentation
             if parent_path:
                 segments = [s for s in parent_path.split("/") if s]
-                if auto_create_parents and len(segments) > 1:
-                    # Walk from root, creating missing segments
+                if auto_create_parents and len(segments) >= 1:
+                    # Walk from root, creating missing segments (incl. a single
+                    # top-level parent — previously >1 only, which raised
+                    # "Parent path not found" for a missing one-segment parent and
+                    # broke cross-namespace moves/migrations).
                     parent_uuid = ROOT_NODE_UUID
                     current_path = ""
                     for seg in segments:

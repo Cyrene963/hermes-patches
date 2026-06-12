@@ -17,6 +17,13 @@ memory_write:
   require_llm_classifier: true
   llm_classifier: true
 
+  # Subject routing: a durable fact ABOUT another person is never auto-written into
+  # the speaker's namespace (prevents one user's private memory filling up with a
+  # contact's profile). false = such facts go to review. true = if the subject maps
+  # to a known user in memory_identity.local.yaml `user_registry`, auto-write into
+  # THAT user's namespace; unregistered subjects still go to review.
+  subject_auto_route: false
+
   # Importance floor (the LLM classifier is the real precision gate).
   auto_write_threshold: 0.85
 
