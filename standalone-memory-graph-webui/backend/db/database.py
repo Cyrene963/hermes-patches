@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy import text, select
 from sqlalchemy.pool import NullPool
 
-from .models import Base, Node, ROOT_NODE_UUID
+from .models import Base, Node, ROOT_NODE_UUID, SearchDocument
 
 
 DEFAULT_DB_URL = "postgresql+asyncpg://postgres:postgres@127.0.0.1/hindsight"
@@ -112,6 +112,7 @@ class DatabaseManager:
             is_initialized = await conn.run_sync(check_initialized)
             if not is_initialized:
                 await conn.run_sync(Base.metadata.create_all)
+            await self._ensure_search_vector_schema(conn)
 
         async with self.async_session() as session:
             await session.execute(
@@ -126,3 +127,33 @@ class DatabaseManager:
     async def close(self):
         """Close the database connection."""
         await self.engine.dispose()
+
+    async def _ensure_search_vector_schema(self, conn):
+        """Keep mg_search_documents.search_vector aligned with the generated-column contract."""
+        result = await conn.execute(text("""
+            SELECT data_type, udt_name, is_generated
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'mg_search_documents'
+              AND column_name = 'search_vector'
+        """))
+        row = result.first()
+        if row and row[1] == "tsvector" and row[2] == "ALWAYS":
+            await conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS ix_mg_search_vector_gin
+                ON mg_search_documents
+                USING gin(search_vector)
+            """))
+            return
+
+        expression = str(SearchDocument.__table__.c.search_vector.computed.sqltext)
+        await conn.execute(text("ALTER TABLE mg_search_documents DROP COLUMN IF EXISTS search_vector"))
+        await conn.execute(text(f"""
+            ALTER TABLE mg_search_documents
+            ADD COLUMN search_vector TSVECTOR GENERATED ALWAYS AS ({expression}) STORED
+        """))
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_mg_search_vector_gin
+            ON mg_search_documents
+            USING gin(search_vector)
+        """))

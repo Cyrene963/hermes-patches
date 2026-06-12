@@ -22,7 +22,10 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     UniqueConstraint,
+    Index,
+    Computed,
 )
+from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
@@ -199,6 +202,18 @@ class SearchDocument(Base):
     search_terms = Column(Text, nullable=False, default="")
     priority = Column(Integer, nullable=False, default=0)
     updated_at = Column(DateTime(timezone=True), default=_utcnow)
+    search_vector = Column(
+        TSVECTOR,
+        Computed(
+            "to_tsvector('simple', coalesce(path, '') || ' ' || coalesce(uri, '') || ' ' || coalesce(content, '') || ' ' || coalesce(disclosure, '') || ' ' || coalesce(search_terms, ''))",
+            persisted=True,
+        ),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_mg_search_vector_gin", search_vector, postgresql_using="gin"),
+    )
 
 
 class MemoryAccessLog(Base):

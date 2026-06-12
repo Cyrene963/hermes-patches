@@ -66,10 +66,19 @@ CREATE TABLE IF NOT EXISTS mg_search_documents (
     search_terms TEXT DEFAULT '',
     priority INTEGER DEFAULT 0,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    search_vector TEXT,
+    search_vector TSVECTOR GENERATED ALWAYS AS (
+        to_tsvector('simple',
+            coalesce(path, '') || ' ' ||
+            coalesce(uri, '') || ' ' ||
+            coalesce(content, '') || ' ' ||
+            coalesce(disclosure, '') || ' ' ||
+            coalesce(search_terms, '')
+        )
+    ) STORED,
     PRIMARY KEY (namespace, domain, path)
 );
 CREATE INDEX IF NOT EXISTS ix_mg_search_node ON mg_search_documents(node_uuid);
+CREATE INDEX IF NOT EXISTS ix_mg_search_vector_gin ON mg_search_documents USING gin(search_vector);
 
 CREATE TABLE IF NOT EXISTS mg_access_logs (
     id SERIAL PRIMARY KEY,
