@@ -119,11 +119,19 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None, user_i
         )  # fetch extra so we can skip current
 
         current_root = _resolve_to_parent(db, current_session_id) if current_session_id else None
+        current_tip = None
+        if current_root:
+            try:
+                current_tip = db.get_compression_tip(current_root)
+            except Exception as e:
+                logging.debug("Failed to resolve compression tip for %s: %s", current_root, e, exc_info=True)
+                current_tip = None
+        blocked_ids = {sid for sid in (current_session_id, current_root, current_tip) if sid}
 
         results = []
         for s in sessions:
             sid = s.get("id", "")
-            if current_root and (sid == current_root or sid == current_session_id):
+            if sid in blocked_ids:
                 continue
             # Skip child / delegation sessions
             if s.get("parent_session_id"):
@@ -203,6 +211,11 @@ def _scroll(
         session_meta = {}
     if not session_meta:
         return tool_error(f"session_id not found: {session_id}", success=False)
+
+    if user_id and str(session_meta.get("user_id") or "") != str(user_id):
+        return tool_error("scroll rejected: session belongs to a different user scope", success=False)
+    if source and str(session_meta.get("source") or "") != str(source):
+        return tool_error("scroll rejected: session belongs to a different source scope", success=False)
 
     # Fetch the window
     try:
@@ -425,6 +438,8 @@ def session_search(
             around_message_id=around_message_id,
             window=window,
             current_session_id=current_session_id,
+            user_id=user_id,
+            source=source,
         )
 
     # Limit clamp [1, 10]
