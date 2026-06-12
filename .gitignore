@@ -9,3 +9,4 @@ memory_identity.local.yaml
 # Local eval / audit artifacts
 shadow_audit/
 memory_os_eval_*.json
+privacy-extra-patterns.local

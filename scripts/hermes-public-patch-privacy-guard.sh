@@ -34,11 +34,15 @@ AIza[0-9A-Za-z_-]{20,}
 /root/\.hermes
 ~/projects
 telegram:[0-9]{7,}
-user-a
-user-b
-focus-app
-focus-app
 PATTERNS
+
+# Deployment-specific personal-name patterns are kept OUT of this public file
+# (so the guard itself contains no real names). They load from a gitignored local
+# extras file — default path below, or override via HERMES_PRIVACY_EXTRA_PATTERNS_FILE.
+_DEFAULT_EXTRA="${HERMES_PRIVACY_EXTRA_PATTERNS_FILE:-$HOME/.hermes/privacy-extra-patterns.local}"
+if [ -f "$_DEFAULT_EXTRA" ]; then
+  cat "$_DEFAULT_EXTRA" >>"$PATTERN_FILE"
+fi
 
 if [ -n "${HERMES_PRIVACY_EXTRA_PATTERNS_FILE:-}" ] && [ -f "$HERMES_PRIVACY_EXTRA_PATTERNS_FILE" ]; then
   cat "$HERMES_PRIVACY_EXTRA_PATTERNS_FILE" >>"$PATTERN_FILE"
