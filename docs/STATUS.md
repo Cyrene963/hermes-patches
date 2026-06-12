@@ -12,7 +12,8 @@ For the design rationale and the convergence plan, see
 | Cognitive step | Status | Reproducible evidence |
 |---|---|---|
 | Recall, top-1 semantically correct | ✅ verified | `tests/memory_os/semantic_recall_eval.py` → 11 PASS / 0 FAIL / 1 SKIP; top-1 asserted by node identity + real prompt-carriage |
-| Namespace isolation (no cross-user leak) | ✅ DB-enforced | Postgres RLS (`mg_app` non-superuser + `set_app_context`); eval case 6 |
+| Namespace isolation — READ (no cross-user leak) | ✅ DB-enforced (hard) | Postgres RLS (`mg_app` non-superuser + `set_app_context`); a query scoped to ns X returns only X + shared(''), never another user's ns; eval case 6 |
+| Namespace attribution — WRITE (subject routing) | ✅ verified (best-effort) | A durable fact ABOUT another person is never auto-written into the speaker's ns; routed to a registered user's ns (`user_registry`) or to review. Semantic (depends on the LLM classifier tagging subject); covers the auto-write loop |
 | Pre-action gate (anti-recurrence) | ✅ live | `tool_executor` checks args before dispatch; `MEDIA:` / `linux.do` blocked, `.json` allowed |
 | Write hygiene + secret redaction | ✅ verified | hygiene gate drops truncated-copy / question / secret candidates; shadow logs redact secrets before disk |
 | Fact distillation (store the fact, not the raw message) | ✅ verified | 7-day real shadow logs: hard-garbage 78.5% → 43%; ~56% distill to a clean atomic fact |
@@ -20,6 +21,20 @@ For the design rationale and the convergence plan, see
 | **Autonomous write (the learning loop)** | ⏸ on by default, LLM-gated, fail-closed | LLM classifies the full user message (precision **1.000** / 0 false positives on a 20-case mixed set; 0/16 on real messages) → readback → private namespace. End-to-end verified: a durable preference is written + retrievable; junk is ignored. Fires only when the LLM endpoint is reachable (fail-closed otherwise) |
 
 ## Verification evidence (dogfood)
+
+> **Multi-user isolation model (read honestly).** Two distinct layers:
+> 1. **Read = hard.** Postgres RLS guarantees one user cannot read another's private
+>    namespace. This was never broken.
+> 2. **Write attribution = best-effort.** Historically the system filed every fact under
+>    the *speaker's* namespace with no notion of *whose* fact it is — so facts a user
+>    mentioned *about a contact* accumulated in the speaker's own memory (a real,
+>    generic mis-attribution defect, not a read leak). Now the LLM classifier tags the
+>    *subject*; a fact about another person is never auto-written to the speaker's ns —
+>    it routes to a registered user's ns (`user_registry`) or to review. This is a
+>    semantic mitigation (depends on classifier accuracy) covering the auto-write loop;
+>    it is not a cryptographic guarantee, and it does not constrain deliberate agent
+>    tool-writes. Read-isolation remains the hard guarantee.
+
 
 | Surface | Evidence label | Basis |
 |---|---|---|
