@@ -266,22 +266,55 @@ def make_review_proposal(entry: Mapping[str, Any], raw: Mapping[str, Any], opera
     return ReviewProposal(proposal_id=proposal_id, candidate=candidate, decision=decision, changeset=changeset, readback=readback)
 
 
-def iter_shadow_entries(paths: Iterable[Path]) -> Iterable[Dict[str, Any]]:
-    for path in paths:
-        if not path.exists():
-            continue
-        with path.open("r", encoding="utf-8") as handle:
-            for line_no, line in enumerate(handle, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                    entry.setdefault("_shadow_file", str(path))
-                    entry.setdefault("_line", line_no)
-                    yield entry
-                except json.JSONDecodeError:
-                    yield {"_shadow_file": str(path), "_line": line_no, "parse_error": True, "raw": line[:200]}
+def make_live_review_proposal(
+    entry: Mapping[str, Any],
+    raw: Mapping[str, Any],
+    *,
+    operator: str = "memory-os-review",
+) -> ReviewProposal:
+    """Normalize a live write result into the same review-proposal shape."""
+
+    proposal = make_review_proposal(entry, raw, operator=operator)
+    if not raw.get("actually_written"):
+        return proposal
+    live_decision = MemoryWriteDecision(
+        action="auto_write",
+        reason=str(raw.get("failure_reason") or raw.get("reason") or "candidate written and verified"),
+        requires_review=bool(raw.get("requires_review") or proposal.candidate.requires_review),
+        target_store=proposal.decision.target_store,
+        risk_level=proposal.decision.risk_level,
+    )
+    live_changeset = MemoryChangeSet(
+        changeset_id=proposal.changeset.changeset_id,
+        operator=operator,
+        namespace=proposal.changeset.namespace,
+        operation_type="auto_write",
+        target_path_uri=proposal.changeset.target_path_uri,
+        before_snapshot=proposal.changeset.before_snapshot,
+        after_snapshot=proposal.changeset.after_snapshot,
+        diff=proposal.changeset.diff,
+        evidence_id=proposal.changeset.evidence_id,
+        evidence_quote=proposal.changeset.evidence_quote,
+        reason=live_decision.reason,
+        review_status="written",
+        rollback_method="delete or supersede written memory by changeset id",
+    )
+    live_readback = ReadbackResult(
+        queries=proposal.readback.queries,
+        ok=bool(raw.get("readback_ok")),
+        top_uri=str(raw.get("top_uri") or raw.get("uri") or proposal.readback.top_uri),
+        top_score=raw.get("top_score", proposal.readback.top_score),
+        reason=str(raw.get("failure_reason") or proposal.readback.reason),
+    )
+    return ReviewProposal(
+        proposal_id=proposal.proposal_id,
+        candidate=proposal.candidate,
+        decision=live_decision,
+        changeset=live_changeset,
+        readback=live_readback,
+        status="written",
+        created_at=proposal.created_at,
+    )
 
 
 def build_shadow_report(entries: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
