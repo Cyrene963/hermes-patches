@@ -29,7 +29,7 @@ verified. Live Telegram E2E pending a gateway restart.
 ---
 diff --git a/gateway/group_mode.py b/gateway/group_mode.py
 new file mode 100644
-index 000000000..f9ee1995b
+index 0000000..9f399e8
 --- /dev/null
 +++ b/gateway/group_mode.py
 @@ -0,0 +1,107 @@
@@ -115,8 +115,8 @@ index 000000000..f9ee1995b
 +    platform: str,
 +    chat_id: str,
 +    thread_id: str | None = None,
-+    default: str = DEFAULT_GROUP_MODE,
-+) -> str:
++    default: str | None = DEFAULT_GROUP_MODE,
++) -> str | None:
 +    modes = _load_state(hermes_home)
 +    key = group_mode_key(platform, chat_id, thread_id)
 +    if key in modes:
@@ -140,8 +140,9 @@ index 000000000..f9ee1995b
 +    modes[group_mode_key(platform, chat_id, thread_id)] = normalized
 +    _write_state(hermes_home, modes)
 +    return normalized
+\ No newline at end of file
 diff --git a/gateway/platforms/telegram.py b/gateway/platforms/telegram.py
-index fb43948c2..0d169dcc4 100644
+index 3cf2419..c17a091 100644
 --- a/gateway/platforms/telegram.py
 +++ b/gateway/platforms/telegram.py
 @@ -66,6 +66,7 @@ from pathlib import Path as _Path
@@ -152,20 +153,14 @@ index fb43948c2..0d169dcc4 100644
  from gateway.platforms.base import (
      BasePlatformAdapter,
      MessageEvent,
-@@ -5363,6 +5364,25 @@ class TelegramAdapter(BasePlatformAdapter):
+@@ -5582,6 +5583,19 @@ class TelegramAdapter(BasePlatformAdapter):
              return True
  
          chat_id_str = str(getattr(getattr(message, "chat", None), "id", ""))
 +        try:
 +            from gateway.group_mode import get_group_mode
++
 +            thread_key = str(thread_id) if thread_id is not None else None
-+            # default=None so a chat with no explicit /gpmode override falls
-+            # through to the operator's configured require_mention behavior
-+            # below (backward compatible). Only an explicit /gpmode set for this
-+            # chat/topic forces a mode. ``get_hermes_home`` is the module-level
-+            # import (top of file); the original bug referenced a bare
-+            # ``_hermes_home`` that only exists in run.py, raising NameError that
-+            # the ``except`` swallowed — leaving every override permanently inert.
 +            _group_mode = get_group_mode(
 +                get_hermes_home(),
 +                platform="telegram",
@@ -176,9 +171,9 @@ index fb43948c2..0d169dcc4 100644
 +        except Exception:
 +            _group_mode = None
  
-         if self._is_personal_workspace_chat(message):
-             return self._personal_workspace_sender_authorized(message)
-@@ -5383,9 +5403,13 @@ class TelegramAdapter(BasePlatformAdapter):
+         if self._telegram_exclusive_bot_mentions() and self._explicit_bot_mentions_exclude_self(message):
+             return False
+@@ -5599,9 +5613,13 @@ class TelegramAdapter(BasePlatformAdapter):
  
          if guest_mention:
              return True
@@ -195,10 +190,10 @@ index fb43948c2..0d169dcc4 100644
          if self._is_reply_to_bot(message):
              return True
 diff --git a/gateway/run.py b/gateway/run.py
-index 8bf024b98..5e7358ace 100644
+index e2a1b88..2b5e562 100644
 --- a/gateway/run.py
 +++ b/gateway/run.py
-@@ -7768,6 +7768,9 @@ class GatewayRunner:
+@@ -6716,6 +6716,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
              if _cmd_def_inner and _cmd_def_inner.name == "restart":
                  return await self._handle_restart_command(event)
  
@@ -208,7 +203,7 @@ index 8bf024b98..5e7358ace 100644
              # /stop must hard-kill the session when an agent is running.
              # A soft interrupt (agent.interrupt()) doesn't help when the agent
              # is truly hung — the executor thread is blocked and never checks
-@@ -8196,6 +8199,9 @@ class GatewayRunner:
+@@ -7147,6 +7150,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
  
          if canonical == "topic":
              return await self._handle_topic_command(event)
@@ -218,7 +213,7 @@ index 8bf024b98..5e7358ace 100644
          
          if canonical == "help":
              return await self._handle_help_command(event)
-@@ -13638,6 +13644,42 @@ class GatewayRunner:
+@@ -10548,6 +10554,43 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
              "normal Hermes chat again. Run /topic to re-enable later."
          )
  
@@ -245,6 +240,7 @@ index 8bf024b98..5e7358ace 100644
 +            "mention": "mention-only: reply only to @mention, reply-to-bot, /cmd@botname, or configured wake words; unmentioned group chatter may still be observed if enabled.",
 +            "free": "free-response: reply to every allowed group message in this chat/topic.",
 +            "auto": "smart-observe: currently uses mention-only dispatch plus observed context; full semantic auto-reply classification is not enabled yet.",
++            "config": "config default: follow the operator's configured Telegram require_mention/free_response settings.",
 +        }
 +        if requested in {None, "status"}:
 +            usage = "Usage: `/gpmode status|mention|free|auto`"
@@ -258,11 +254,11 @@ index 8bf024b98..5e7358ace 100644
 +        )
 +        return f"Group reply mode set to `{new_mode}`.\n{descriptions[new_mode]}"
 +
-     async def _handle_topic_command(self, event: MessageEvent, args: str = "") -> str:
-         """Handle /topic for Telegram DM user-managed topic sessions."""
-         source = event.source
+ 
+     def _telegram_topic_root_status_message(self, source: SessionSource) -> str:
+         lines = [
 diff --git a/hermes_cli/commands.py b/hermes_cli/commands.py
-index f970a1053..07c925fff 100644
+index 7812eba..f4960b8 100644
 --- a/hermes_cli/commands.py
 +++ b/hermes_cli/commands.py
 @@ -69,6 +69,9 @@ COMMAND_REGISTRY: list[CommandDef] = [
@@ -277,13 +273,12 @@ index f970a1053..07c925fff 100644
      CommandDef("redraw", "Force a full UI repaint (recovers from terminal drift)", "Session",
 diff --git a/tests/gateway/test_gpmode_command.py b/tests/gateway/test_gpmode_command.py
 new file mode 100644
-index 000000000..ff48255a3
+index 0000000..bfc6aa9
 --- /dev/null
 +++ b/tests/gateway/test_gpmode_command.py
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,75 @@
++import asyncio
 +from types import SimpleNamespace
-+
-+import pytest
 +
 +from gateway.config import GatewayConfig, Platform, PlatformConfig
 +from gateway.platforms.base import MessageEvent
@@ -316,8 +311,7 @@ index 000000000..ff48255a3
 +    return runner
 +
 +
-+@pytest.mark.asyncio
-+async def test_gpmode_command_is_registered():
++def test_gpmode_command_is_registered():
 +    from hermes_cli.commands import resolve_command
 +
 +    cmd = resolve_command("gpmode")
@@ -325,22 +319,20 @@ index 000000000..ff48255a3
 +    assert cmd.gateway_only is True
 +
 +
-+@pytest.mark.asyncio
-+async def test_gpmode_command_sets_and_reads_group_mode(monkeypatch, tmp_path):
++def test_gpmode_command_sets_and_reads_group_mode(monkeypatch, tmp_path):
 +    import gateway.run as run_mod
 +
 +    monkeypatch.setattr(run_mod, "_hermes_home", tmp_path)
 +    runner = _make_runner()
 +
-+    set_reply = await runner._handle_gpmode_command(_make_group_event("/gpmode free"))
-+    status_reply = await runner._handle_gpmode_command(_make_group_event("/gpmode status"))
++    set_reply = asyncio.run(runner._handle_gpmode_command(_make_group_event("/gpmode free")))
++    status_reply = asyncio.run(runner._handle_gpmode_command(_make_group_event("/gpmode status")))
 +
 +    assert "set to `free`" in set_reply
 +    assert "Group reply mode: `free`" in status_reply
 +
 +
-+@pytest.mark.asyncio
-+async def test_gpmode_command_rejects_dm(monkeypatch, tmp_path):
++def test_gpmode_command_rejects_dm(monkeypatch, tmp_path):
 +    import gateway.run as run_mod
 +
 +    monkeypatch.setattr(run_mod, "_hermes_home", tmp_path)
@@ -357,6 +349,7 @@ index 000000000..ff48255a3
 +        message_id="m2",
 +    )
 +
-+    reply = await runner._handle_gpmode_command(event)
++    reply = asyncio.run(runner._handle_gpmode_command(event))
 +
 +    assert "only applies to group" in reply
+\ No newline at end of file
