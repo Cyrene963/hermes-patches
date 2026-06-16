@@ -62,3 +62,60 @@ async def test_init_db_uses_admin_rls_context_for_root_bootstrap(monkeypatch):
     )
     assert added
     assert committed
+
+
+@pytest.mark.asyncio
+async def test_graph_create_memory_binds_explicit_namespace_to_rls(monkeypatch):
+    graph_mod = importlib.import_module("agent.memory_graph.services.graph")
+
+    events = []
+
+    class FakeContext:
+        def __enter__(self):
+            events.append(("enter_rls", "cron:service-canary"))
+
+        def __exit__(self, exc_type, exc, tb):
+            events.append(("exit_rls", "cron:service-canary"))
+
+    class FakeSession:
+        async def __aenter__(self):
+            events.append(("enter_session",))
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            events.append(("exit_session",))
+            return False
+
+        async def commit(self):
+            events.append(("commit",))
+
+    async def fake_get_next_child_number(session, parent_uuid):
+        return 1
+
+    async def fake_ensure_node(session, node_uuid):
+        return SimpleNamespace(uuid=node_uuid)
+
+    async def fake_create_edge_with_paths(session, parent_uuid, child_uuid, title, priority, disclosure, namespace, domain, parent_path):
+        return SimpleNamespace(id=1)
+
+    async def fake_insert_memory(session, node_uuid, content):
+        return SimpleNamespace(id=7)
+
+    service = graph_mod.GraphService(session_factory=lambda: FakeSession())
+    monkeypatch.setattr(service, "_namespace_session", lambda namespace: FakeContext())
+    monkeypatch.setattr(service, "_get_next_child_number", fake_get_next_child_number)
+    monkeypatch.setattr(service, "_ensure_node", fake_ensure_node)
+    monkeypatch.setattr(service, "_create_edge_with_paths", fake_create_edge_with_paths)
+    monkeypatch.setattr(service, "_insert_memory", fake_insert_memory)
+
+    result = await service.create_memory(
+        "",
+        "content",
+        title="leaf",
+        namespace="cron:service-canary",
+        domain="core",
+    )
+
+    assert result["uri"] == "core://leaf"
+    assert events[:2] == [("enter_rls", "cron:service-canary"), ("enter_session",)]
+    assert events[-2:] == [("exit_session",), ("exit_rls", "cron:service-canary")]

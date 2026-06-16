@@ -20,7 +20,7 @@ from ..db.models import (
     ROOT_NODE_UUID, Node, Memory, Edge, Path, GlossaryKeyword,
     MemoryAccessLog, SearchDocument, serialize_row, escape_like_literal,
 )
-from ..db import get_session
+from ..db import get_session, rls_context
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,10 @@ class GraphService:
 
     def __init__(self, session_factory=None):
         self._session_factory = session_factory or get_session
+
+    def _namespace_session(self, namespace: str):
+        """Bind explicit service namespace to the DB RLS context."""
+        return rls_context(namespace or "", False)
 
     # =====================================================================
     # Row-Level Primitives (Layer 0)
@@ -354,82 +358,83 @@ class GraphService:
         If auto_create_parents=True and parent_path contains multiple segments
         (e.g. "a/b/c"), missing intermediate nodes are created automatically.
         """
-        async with self._session_factory() as session:
-            # Strip domain prefix if parent_path includes it (e.g. "core://项目" → "项目")
-            if "://" in parent_path:
-                parent_path = parent_path.split("://", 1)[1]
-            # Resolve parent — with auto-segmentation
-            if parent_path:
-                segments = [s for s in parent_path.split("/") if s]
-                if auto_create_parents and len(segments) >= 1:
-                    # Walk from root, creating missing segments (incl. a single
-                    # top-level parent — previously >1 only, which raised
-                    # "Parent path not found" for a missing one-segment parent and
-                    # broke cross-namespace moves/migrations).
-                    parent_uuid = ROOT_NODE_UUID
-                    current_path = ""
-                    for seg in segments:
-                        next_path = f"{current_path}/{seg}" if current_path else seg
-                        resolved = await self._resolve_path(session, namespace, domain, next_path)
-                        if resolved:
-                            parent_uuid = resolved["node_uuid"]
-                        else:
-                            # Create intermediate node.  Under RLS, mg_memories
-                            # visibility is inherited from mg_paths, so create
-                            # the edge/path before inserting the node memory.
-                            mid_uuid = str(uuid_lib.uuid4())
-                            await self._ensure_node(session, mid_uuid)
-                            edge, _ = await self._get_or_create_edge(
-                                session, parent_uuid, mid_uuid, seg, priority=0
-                            )
-                            await self._insert_path(session, namespace, domain, next_path, edge.id, mid_uuid)
-                            await self._insert_memory(session, mid_uuid, f"[auto-created: {next_path}]")
-                            parent_uuid = mid_uuid
-                        current_path = next_path
+        with self._namespace_session(namespace):
+            async with self._session_factory() as session:
+                # Strip domain prefix if parent_path includes it (e.g. "core://项目" → "项目")
+                if "://" in parent_path:
+                    parent_path = parent_path.split("://", 1)[1]
+                # Resolve parent — with auto-segmentation
+                if parent_path:
+                    segments = [s for s in parent_path.split("/") if s]
+                    if auto_create_parents and len(segments) >= 1:
+                        # Walk from root, creating missing segments (incl. a single
+                        # top-level parent — previously >1 only, which raised
+                        # "Parent path not found" for a missing one-segment parent and
+                        # broke cross-namespace moves/migrations).
+                        parent_uuid = ROOT_NODE_UUID
+                        current_path = ""
+                        for seg in segments:
+                            next_path = f"{current_path}/{seg}" if current_path else seg
+                            resolved = await self._resolve_path(session, namespace, domain, next_path)
+                            if resolved:
+                                parent_uuid = resolved["node_uuid"]
+                            else:
+                                # Create intermediate node.  Under RLS, mg_memories
+                                # visibility is inherited from mg_paths, so create
+                                # the edge/path before inserting the node memory.
+                                mid_uuid = str(uuid_lib.uuid4())
+                                await self._ensure_node(session, mid_uuid)
+                                edge, _ = await self._get_or_create_edge(
+                                    session, parent_uuid, mid_uuid, seg, priority=0
+                                )
+                                await self._insert_path(session, namespace, domain, next_path, edge.id, mid_uuid)
+                                await self._insert_memory(session, mid_uuid, f"[auto-created: {next_path}]")
+                                parent_uuid = mid_uuid
+                            current_path = next_path
+                    else:
+                        parent_resolved = await self._resolve_path(session, namespace, domain, parent_path)
+                        if not parent_resolved:
+                            raise ValueError(f"Parent path not found: {domain}://{parent_path}")
+                        parent_uuid = parent_resolved["node_uuid"]
                 else:
-                    parent_resolved = await self._resolve_path(session, namespace, domain, parent_path)
-                    if not parent_resolved:
-                        raise ValueError(f"Parent path not found: {domain}://{parent_path}")
-                    parent_uuid = parent_resolved["node_uuid"]
-            else:
-                parent_uuid = ROOT_NODE_UUID
+                    parent_uuid = ROOT_NODE_UUID
 
-            # Generate title if not provided
-            if not title:
-                num = await self._get_next_child_number(session, parent_uuid)
-                title = f"node-{num}"
+                # Generate title if not provided
+                if not title:
+                    num = await self._get_next_child_number(session, parent_uuid)
+                    title = f"node-{num}"
 
-            # Create node, path, then memory.  mg_memories RLS derives access
-            # from mg_paths; inserting memory before the path exists is rejected
-            # for least-privileged mg_app sessions.
-            child_uuid = str(uuid_lib.uuid4())
-            await self._ensure_node(session, child_uuid)
+                # Create node, path, then memory.  mg_memories RLS derives access
+                # from mg_paths; inserting memory before the path exists is rejected
+                # for least-privileged mg_app sessions.
+                child_uuid = str(uuid_lib.uuid4())
+                await self._ensure_node(session, child_uuid)
 
-            # Create edge + paths
-            edge = await self._create_edge_with_paths(
-                session, parent_uuid, child_uuid, title, priority,
-                disclosure, namespace, domain, parent_path
-            )
-            memory = await self._insert_memory(session, child_uuid, content)
-
-            await session.commit()
-            try:
-                from .search import SearchIndexer
-                await SearchIndexer(self._session_factory).refresh_search_documents_for_node(
-                    child_uuid, namespace=namespace
+                # Create edge + paths
+                edge = await self._create_edge_with_paths(
+                    session, parent_uuid, child_uuid, title, priority,
+                    disclosure, namespace, domain, parent_path
                 )
-            except Exception as exc:
-                logger.warning("Failed to refresh search documents for created memory %s: %s", child_uuid, exc)
+                memory = await self._insert_memory(session, child_uuid, content)
 
-            return {
-                "node_uuid": child_uuid,
-                "memory_id": memory.id,
-                "domain": domain,
-                "path": f"{parent_path}/{title}" if parent_path else title,
-                "uri": f"{domain}://{parent_path}/{title}" if parent_path else f"{domain}://{title}",
-                "name": title,
-                "priority": priority,
-            }
+                await session.commit()
+                try:
+                    from .search import SearchIndexer
+                    await SearchIndexer(self._session_factory).refresh_search_documents_for_node(
+                        child_uuid, namespace=namespace
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to refresh search documents for created memory %s: %s", child_uuid, exc)
+
+                return {
+                    "node_uuid": child_uuid,
+                    "memory_id": memory.id,
+                    "domain": domain,
+                    "path": f"{parent_path}/{title}" if parent_path else title,
+                    "uri": f"{domain}://{parent_path}/{title}" if parent_path else f"{domain}://{title}",
+                    "name": title,
+                    "priority": priority,
+                }
 
     async def update_memory(self, path: str, content: str,
                               domain: str = "core", namespace: str = "",
