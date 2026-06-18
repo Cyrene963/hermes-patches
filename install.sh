@@ -141,11 +141,13 @@ for targeted_patch in "$PATCHES_DIR"/patches/*.patch; do
     fi
 done
 
-# Verified individual patches are optional feature extensions. The core public
-# install is provided by maintained overlays plus targeted patches above. Enable
-# all optional extensions with HERMES_APPLY_INDIVIDUAL_PATCHES=1 or select a
-# comma/space-separated allowlist with HERMES_INDIVIDUAL_PATCH_ALLOWLIST="0007 0010".
-if [ "${HERMES_APPLY_INDIVIDUAL_PATCHES:-0}" = "1" ] || [ -n "${HERMES_INDIVIDUAL_PATCH_ALLOWLIST:-}" ]; then
+# Verified individual patches are installed by default as part of the public
+# patch collection. If a patch is already applied or does not fit the current
+# upstream checkout, the installer reports it and continues. Operators can set
+# HERMES_APPLY_INDIVIDUAL_PATCHES=0 to disable all individual patches, or use a
+# comma/space-separated HERMES_INDIVIDUAL_PATCH_ALLOWLIST="0007 0010" to install
+# only selected ones.
+if [ "${HERMES_APPLY_INDIVIDUAL_PATCHES:-1}" != "0" ] || [ -n "${HERMES_INDIVIDUAL_PATCH_ALLOWLIST:-}" ]; then
     for individual_patch in "$PATCHES_DIR"/individual/*.patch; do
         [ -e "$individual_patch" ] || continue
         patch_name="$(basename "$individual_patch")"
@@ -166,7 +168,7 @@ if [ "${HERMES_APPLY_INDIVIDUAL_PATCHES:-0}" = "1" ] || [ -n "${HERMES_INDIVIDUA
         fi
     done
 else
-    echo "   ℹ️ optional individual feature patches 未启用；核心补丁已通过 overlay/targeted 路径安装（如需实验功能可设置 HERMES_APPLY_INDIVIDUAL_PATCHES=1）"
+    echo "   ℹ️ individual feature patches disabled by HERMES_APPLY_INDIVIDUAL_PATCHES=0"
 fi
 
 # 2. Copy verified Memory OS modules / surgically rebased core hooks.
