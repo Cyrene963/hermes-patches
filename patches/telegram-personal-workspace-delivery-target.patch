@@ -1,0 +1,236 @@
+diff --git a/gateway/platforms/telegram.py b/gateway/platforms/telegram.py
+index fb43948c2..c27e1aca1 100644
+--- a/gateway/platforms/telegram.py
++++ b/gateway/platforms/telegram.py
+@@ -6210,6 +6414,8 @@ class TelegramAdapter(BasePlatformAdapter):
+             ),
+             thread_id=thread_id_str,
+             chat_topic=chat_topic,
++            chat_id_alt=(str(chat.id) if chat_type == "personal_group" else None),
++            parent_chat_id=(str(chat.id) if chat_type == "personal_group" else None),
+             message_id=str(message.message_id),
+         )
+         
+diff --git a/gateway/run.py b/gateway/run.py
+index 8bf024b98..fdf18ae35 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -3420,8 +3420,9 @@ class GatewayRunner:
+             else:
+                 message = f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
+ 
++            delivery_chat_id = self._delivery_chat_id_for_source(event.source)
+             await adapter._send_with_retry(
+-                chat_id=event.source.chat_id,
++                chat_id=delivery_chat_id,
+                 content=message,
+                 reply_to=(
+                     reply_anchor
+@@ -3620,9 +3621,10 @@ class GatewayRunner:
+ 
+         reply_anchor = self._reply_anchor_for_event(event)
+         thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
++        delivery_chat_id = self._delivery_chat_id_for_source(event.source)
+         try:
+             await adapter._send_with_retry(
+-                chat_id=event.source.chat_id,
++                chat_id=delivery_chat_id,
+                 content=message,
+                 reply_to=(
+                     reply_anchor
+@@ -9514,8 +9523,9 @@ class GatewayRunner:
+             # Stop persistent typing indicator now that the agent is done
+             try:
+                 _typing_adapter = self.adapters.get(source.platform)
++                _delivery_chat_id = self._delivery_chat_id_for_source(source)
+                 if _typing_adapter and hasattr(_typing_adapter, "stop_typing"):
+-                    await _typing_adapter.stop_typing(source.chat_id)
++                    await _typing_adapter.stop_typing(_delivery_chat_id)
+             except Exception:
+                 pass
+ 
+@@ -9877,9 +9887,10 @@ class GatewayRunner:
+                 if _footer_line:
+                     try:
+                         _foot_adapter = self.adapters.get(source.platform)
++                        _final_delivery_chat_id = self._delivery_chat_id_for_source(source)
+                         if _foot_adapter:
+                             await _foot_adapter.send(
+-                                source.chat_id,
++                                _final_delivery_chat_id,
+                                 _footer_line,
+                                 metadata=self._thread_metadata_for_source(source, self._reply_anchor_for_event(event)),
+                             )
+@@ -9893,8 +9904,9 @@ class GatewayRunner:
+             # Stop typing indicator on error too
+             try:
+                 _err_adapter = self.adapters.get(source.platform)
++                _err_delivery_chat_id = self._delivery_chat_id_for_source(source)
+                 if _err_adapter and hasattr(_err_adapter, "stop_typing"):
+-                    await _err_adapter.stop_typing(source.chat_id)
++                    await _err_adapter.stop_typing(_err_delivery_chat_id)
+             except Exception:
+                 pass
+             logger.exception("Agent error in session %s", session_key)
+@@ -12433,6 +12445,7 @@ class GatewayRunner:
+             local_files = BasePlatformAdapter.filter_local_delivery_paths(local_files)
+ 
+             _thread_meta = self._thread_metadata_for_source(event.source, self._reply_anchor_for_event(event))
++            _delivery_chat_id = self._delivery_chat_id_for_source(event.source)
+ 
+             _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'}
+             _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+@@ -12464,7 +12477,7 @@ class GatewayRunner:
+                 try:
+                     images = [(f"file://{_quote(p)}", "") for p in image_paths]
+                     await adapter.send_multiple_images(
+-                        chat_id=event.source.chat_id,
++                        chat_id=_delivery_chat_id,
+                         images=images,
+                         metadata=_thread_meta,
+                     )
+@@ -12476,19 +12489,19 @@ class GatewayRunner:
+                     ext = Path(media_path).suffix.lower()
+                     if should_send_media_as_audio(event.source.platform, ext, is_voice=is_voice):
+                         await adapter.send_voice(
+-                            chat_id=event.source.chat_id,
++                            chat_id=_delivery_chat_id,
+                             audio_path=media_path,
+                             metadata=_thread_meta,
+                         )
+                     elif ext in _VIDEO_EXTS:
+                         await adapter.send_video(
+-                            chat_id=event.source.chat_id,
++                            chat_id=_delivery_chat_id,
+                             video_path=media_path,
+                             metadata=_thread_meta,
+                         )
+                     else:
+                         await adapter.send_document(
+-                            chat_id=event.source.chat_id,
++                            chat_id=_delivery_chat_id,
+                             file_path=media_path,
+                             metadata=_thread_meta,
+                         )
+@@ -12500,13 +12513,13 @@ class GatewayRunner:
+                     ext = Path(file_path).suffix.lower()
+                     if ext in _VIDEO_EXTS:
+                         await adapter.send_video(
+-                            chat_id=event.source.chat_id,
++                            chat_id=_delivery_chat_id,
+                             video_path=file_path,
+                             metadata=_thread_meta,
+                         )
+                     else:
+                         await adapter.send_document(
+-                            chat_id=event.source.chat_id,
++                            chat_id=_delivery_chat_id,
+                             file_path=file_path,
+                             metadata=_thread_meta,
+                         )
+@@ -16824,6 +16881,7 @@ class GatewayRunner:
+         )
+ 
+         _thread_metadata: Optional[Dict[str, Any]] = self._thread_metadata_for_source(source, event_message_id)
++        _delivery_chat_id = self._delivery_chat_id_for_source(source)
+ 
+         if _streaming_enabled:
+             try:
+@@ -16856,7 +16914,7 @@ class GatewayRunner:
+                     )
+                     _stream_consumer = GatewayStreamConsumer(
+                         adapter=_adapter,
+-                        chat_id=source.chat_id,
++                        chat_id=_delivery_chat_id,
+                         config=_consumer_cfg,
+                         metadata=_thread_metadata,
+                         initial_reply_to_id=event_message_id,
+@@ -17315,6 +17373,7 @@ class GatewayRunner:
+             if _progress_thread_id == source.thread_id
+             else {"thread_id": _progress_thread_id}
+         ) if _progress_thread_id else None
++        _progress_delivery_chat_id = self._delivery_chat_id_for_source(source)
+         _progress_reply_to = (
+             event_message_id
+             if source.platform in (Platform.FEISHU, Platform.MATTERMOST) and source.thread_id and event_message_id
+@@ -17380,7 +17439,7 @@ class GatewayRunner:
+ 
+             async def _edit_progress_message(message_id: str, content: str):
+                 kwargs = {
+-                    "chat_id": source.chat_id,
++                    "chat_id": _progress_delivery_chat_id,
+                     "message_id": message_id,
+                     "content": content,
+                 }
+@@ -17416,7 +17475,7 @@ class GatewayRunner:
+ 
+             async def _send_progress_text(text: str):
+                 result = await adapter.send(
+-                    chat_id=source.chat_id,
++                    chat_id=_progress_delivery_chat_id,
+                     content=text,
+                     reply_to=_progress_reply_to,
+                     metadata=_progress_metadata,
+@@ -17516,7 +17575,7 @@ class GatewayRunner:
+                         _last_edit_ts = time.monotonic()
+                         await asyncio.sleep(0.3)
+                         if _run_still_current():
+-                            await adapter.send_typing(source.chat_id, metadata=_progress_metadata)
++                            await adapter.send_typing(_progress_delivery_chat_id, metadata=_progress_metadata)
+                         continue
+ 
+                     # Throttle edits: batch rapid tool updates into fewer
+@@ -17563,7 +17622,7 @@ class GatewayRunner:
+                             else:
+                                 can_edit = False
+                             _flood_result = await adapter.send(
+-                                chat_id=source.chat_id,
++                                chat_id=_progress_delivery_chat_id,
+                                 content=msg,
+                                 reply_to=_progress_reply_to,
+                                 metadata=_progress_metadata,
+@@ -17579,7 +17638,7 @@ class GatewayRunner:
+                             # First tool: send all accumulated text as new message
+                             full_text = "\n".join(progress_lines)
+                             result = await adapter.send(
+-                                chat_id=source.chat_id,
++                                chat_id=_progress_delivery_chat_id,
+                                 content=full_text,
+                                 reply_to=_progress_reply_to,
+                                 metadata=_progress_metadata,
+@@ -17587,7 +17646,7 @@ class GatewayRunner:
+                         else:
+                             # Editing unsupported: send just this line
+                             result = await adapter.send(
+-                                chat_id=source.chat_id,
++                                chat_id=_progress_delivery_chat_id,
+                                 content=msg,
+                                 reply_to=_progress_reply_to,
+                                 metadata=_progress_metadata,
+@@ -17602,7 +17661,7 @@ class GatewayRunner:
+                     # Restore typing indicator
+                     await asyncio.sleep(0.3)
+                     if _run_still_current():
+-                        await adapter.send_typing(source.chat_id, metadata=_progress_metadata)
++                        await adapter.send_typing(_progress_delivery_chat_id, metadata=_progress_metadata)
+ 
+                 except queue.Empty:
+                     await asyncio.sleep(0.3)
+@@ -17688,7 +17747,7 @@ class GatewayRunner:
+ 
+         # Bridge sync status_callback → async adapter.send for context pressure
+         _status_adapter = self.adapters.get(source.platform)
+-        _status_chat_id = source.chat_id
++        _status_chat_id = self._delivery_chat_id_for_source(source)
+         if source.platform == Platform.FEISHU and source.thread_id and event_message_id:
+             # Feishu topics only keep messages inside the topic when they are
+             # sent via the reply API with reply_in_thread=true. Status/interim,
+@@ -17859,7 +17918,7 @@ class GatewayRunner:
+                         )
+                         _stream_consumer = GatewayStreamConsumer(
+                             adapter=_adapter,
+-                            chat_id=source.chat_id,
++                            chat_id=_status_chat_id,
+                             config=_consumer_cfg,
+                             metadata=_status_thread_metadata,
+                             on_new_message=(

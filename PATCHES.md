@@ -14,10 +14,10 @@ Evidence labels used here match the README:
 The installer is overlay-first with targeted patch support:
 
 1. Run `scripts/hermes-patch-env-preflight.py` against the target Hermes checkout/profile.
-2. Optionally apply a legacy combined patch only when `HERMES_APPLY_COMBINED_PATCH=1` and `git apply --check` passes.
-3. Apply every `patches/*.patch` with `git apply --check` first; incompatible or already-applied patches are skipped.
-4. Optionally apply `individual/*.patch` only when `HERMES_APPLY_INDIVIDUAL_PATCHES=1` or `HERMES_INDIVIDUAL_PATCH_ALLOWLIST` names a patch/id. These are documented feature patches, not default install claims.
-5. Copy maintained overlays from `agent/`, `tools/`, `cron/`, `hermes_cli/`, `standalone-memory-graph-webui/`, config templates, scripts, and systemd units.
+2. Install through the default maintained path: apply every `patches/*.patch` with `git apply --check` first, then copy maintained overlays from `agent/`, `tools/`, `cron/`, `hermes_cli/`, `standalone-memory-graph-webui/`, config templates, scripts, and systemd units.
+3. Keep the legacy `combined-final-v*.patch` as a maintainer/debug path only; set `HERMES_APPLY_COMBINED_PATCH=1` when explicitly testing it.
+4. Keep `individual/*.patch` as optional feature extensions; enable all with `HERMES_APPLY_INDIVIDUAL_PATCHES=1` or select patches with `HERMES_INDIVIDUAL_PATCH_ALLOWLIST`.
+5. Stale gateway full-file overlays remain opt-in via `HERMES_APPLY_STALE_GATEWAY_OVERLAYS=1` because they can overwrite newer upstream gateway behavior.
 6. Remove stale `.pyc` files, install scripts/config defaults, and run guard/smoke checks where available.
 
 Rollback baseline: if the target checkout was clean before install, run `cd ~/.hermes/hermes-agent && git reset --hard ORIG_HEAD` or reset to the desired upstream commit, then restart long-running gateway/services only if they loaded patched Python code.

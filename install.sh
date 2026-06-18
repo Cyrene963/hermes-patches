@@ -37,23 +37,23 @@ case "$HERMES_DIR" in
     "$HOME/.hermes/tasks"/*|/tmp/*|/var/tmp/*)
         if [ -z "${HERMES_INSTALL_SYSTEMD+x}" ]; then
             HERMES_INSTALL_SYSTEMD=0
-            echo "   ⏭️ detected temporary/smoke checkout; skipping systemd installation (set HERMES_INSTALL_SYSTEMD=1 to override)"
+            echo "   ℹ️ safe smoke mode: systemd installation disabled for temporary checkout (set HERMES_INSTALL_SYSTEMD=1 to override)"
         fi
         if [ -z "${HERMES_INSTALL_DB+x}" ]; then
             HERMES_INSTALL_DB=0
-            echo "   ⏭️ detected temporary/smoke checkout; skipping live DB role initialization (set HERMES_INSTALL_DB=1 to override)"
+            echo "   ℹ️ safe smoke mode: live DB role initialization disabled for temporary checkout (set HERMES_INSTALL_DB=1 to override)"
         fi
         if [ -z "${HERMES_INSTALL_DEPS+x}" ]; then
             HERMES_INSTALL_DEPS=0
-            echo "   ⏭️ detected temporary/smoke checkout; skipping system package installation (set HERMES_INSTALL_DEPS=1 to override)"
+            echo "   ℹ️ safe smoke mode: system package installation disabled for temporary checkout (set HERMES_INSTALL_DEPS=1 to override)"
         fi
         if [ -z "${HERMES_INSTALL_GIT_HOOKS+x}" ]; then
             HERMES_INSTALL_GIT_HOOKS=0
-            echo "   ⏭️ detected temporary/smoke checkout; skipping patch-repo git hook installation (set HERMES_INSTALL_GIT_HOOKS=1 to override)"
+            echo "   ℹ️ safe smoke mode: patch-repo git hook installation disabled for temporary checkout (set HERMES_INSTALL_GIT_HOOKS=1 to override)"
         fi
         if [ -z "${HERMES_INSTALL_NPM_TOOLS+x}" ]; then
             HERMES_INSTALL_NPM_TOOLS=0
-            echo "   ⏭️ detected temporary/smoke checkout; skipping global npm tool installation (set HERMES_INSTALL_NPM_TOOLS=1 to override)"
+            echo "   ℹ️ safe smoke mode: global npm tool installation disabled for temporary checkout (set HERMES_INSTALL_NPM_TOOLS=1 to override)"
         fi
         ;;
 esac
@@ -111,19 +111,21 @@ fi
 
 
 # Overlay copies below are authoritative because upstream moves quickly and large
-# git patches are brittle after `hermes update`.
+# git patches are brittle after `hermes update`. The public installer therefore
+# installs the maintained overlay path by default. The legacy combined patch is
+# retained only as a maintainer/debug path.
 PATCH_FILE="${HERMES_COMBINED_PATCH_FILE:-$PATCHES_DIR/combined-final-v18.patch}"
 if [ "${HERMES_APPLY_COMBINED_PATCH:-0}" = "1" ] && [ -s "$PATCH_FILE" ]; then
-    echo "📦 尝试应用 $(basename "$PATCH_FILE")..."
+    echo "📦 维护者模式：尝试应用 legacy combined patch $(basename "$PATCH_FILE")..."
     cd "$HERMES_DIR"
     if git apply --check "$PATCH_FILE" 2>/dev/null; then
         git apply "$PATCH_FILE"
-        echo "   ✅ combined patch 已应用"
+        echo "   ✅ legacy combined patch 已应用"
     else
-        echo "   ⏭️ combined patch 不兼容，使用 overlay 文件复制"
+        echo "   ⚠️ legacy combined patch 不兼容；继续使用默认 overlay 安装路径"
     fi
 else
-    echo "   ⏭️ combined patch 默认跳过；使用 overlay 文件复制（设置 HERMES_APPLY_COMBINED_PATCH=1 可启用）"
+    echo "📦 默认安装模式：使用维护版 overlay + targeted patches（legacy combined patch 不需要应用）"
 fi
 
 # Apply targeted local hotfix patches that are safer than whole-file public overlays.
@@ -139,11 +141,10 @@ for targeted_patch in "$PATCHES_DIR"/patches/*.patch; do
     fi
 done
 
-# Apply opt-in verified individual patches. These are maintained as public
-# feature patches but are not always safe as default overlays because some touch
-# high-drift gateway/tool surfaces. Operators can enable all with
-# HERMES_APPLY_INDIVIDUAL_PATCHES=1 or select a comma/space-separated allowlist
-# with HERMES_INDIVIDUAL_PATCH_ALLOWLIST="0007 0010".
+# Verified individual patches are optional feature extensions. The core public
+# install is provided by maintained overlays plus targeted patches above. Enable
+# all optional extensions with HERMES_APPLY_INDIVIDUAL_PATCHES=1 or select a
+# comma/space-separated allowlist with HERMES_INDIVIDUAL_PATCH_ALLOWLIST="0007 0010".
 if [ "${HERMES_APPLY_INDIVIDUAL_PATCHES:-0}" = "1" ] || [ -n "${HERMES_INDIVIDUAL_PATCH_ALLOWLIST:-}" ]; then
     for individual_patch in "$PATCHES_DIR"/individual/*.patch; do
         [ -e "$individual_patch" ] || continue
@@ -165,7 +166,7 @@ if [ "${HERMES_APPLY_INDIVIDUAL_PATCHES:-0}" = "1" ] || [ -n "${HERMES_INDIVIDUA
         fi
     done
 else
-    echo "   ⏭️ individual patches 默认跳过（设置 HERMES_APPLY_INDIVIDUAL_PATCHES=1 或 HERMES_INDIVIDUAL_PATCH_ALLOWLIST 可启用）"
+    echo "   ℹ️ optional individual feature patches 未启用；核心补丁已通过 overlay/targeted 路径安装（如需实验功能可设置 HERMES_APPLY_INDIVIDUAL_PATCHES=1）"
 fi
 
 # 2. Copy verified Memory OS modules / surgically rebased core hooks.
@@ -246,7 +247,7 @@ if [ "${HERMES_APPLY_STALE_GATEWAY_OVERLAYS:-0}" = "1" ]; then
         echo "   ⚠️ stale opt-in gateway/platforms/telegram.py 已复制"
     fi
 else
-    echo "   ⏭️ stale gateway overlays skipped (set HERMES_APPLY_STALE_GATEWAY_OVERLAYS=1 to force)"
+    echo "   ℹ️ stale gateway full-file overlays 未启用；避免覆盖新版 gateway，核心 gateway 修复走 targeted/maintained overlay 路径"
 fi
 if [ -f "$PATCHES_DIR/plugins/image_gen/openai/__init__.py" ]; then
     mkdir -p "$HERMES_DIR/plugins/image_gen/openai"
@@ -271,7 +272,7 @@ if [ -d "$PATCHES_DIR/plugins/memory/memory_tencentdb" ]; then
         cp -R "$PATCHES_DIR/plugins/memory/memory_tencentdb" "$HERMES_DIR/plugins/memory/"
         echo "   ✅ memory_tencentdb provider 已复制"
     else
-        echo "   ⏭️ memory_tencentdb provider skipped (HERMES_INSTALL_MEMORY_TENCENTDB=0)"
+        echo "   ℹ️ memory_tencentdb provider not installed because HERMES_INSTALL_MEMORY_TENCENTDB=0"
     fi
 fi
 
@@ -304,7 +305,7 @@ if [ "${HERMES_BUILD_WEB:-0}" = "1" ] && [ -f "$HERMES_DIR/web/package.json" ] &
     (cd "$HERMES_DIR/web" && npm run build)
     echo "   ✅ Hermes dashboard web_dist 已重建"
 else
-    echo "   ⏭️ Hermes dashboard web build 默认跳过；使用 overlay web_dist（设置 HERMES_BUILD_WEB=1 可重建）"
+    echo "   ℹ️ Hermes dashboard 使用已验证 web_dist bundle；源码重建未运行（设置 HERMES_BUILD_WEB=1 可从源码重建）"
 fi
 
 # 3b. Copy patched Hindsight provider and site-package hotfixes
@@ -531,7 +532,7 @@ if [ "${HERMES_INSTALL_MAINTAINER_SCRIPTS:-0}" = "1" ]; then
         fi
     done
 else
-    echo "   ⏭️ maintainer scripts skipped (set HERMES_INSTALL_MAINTAINER_SCRIPTS=1 to install)"
+    echo "   ℹ️ optional maintainer-only scripts not installed (set HERMES_INSTALL_MAINTAINER_SCRIPTS=1 to install)"
 fi
 if [ -f "$PATCHES_DIR/scripts/hermes-ast-grep-audit.sh" ]; then
     mkdir -p "$PROFILE_DIR/scripts"
@@ -548,7 +549,7 @@ if [ -f "$PATCHES_DIR/scripts/hermes-public-patch-privacy-guard.sh" ]; then
         chmod +x "$PATCHES_DIR/.git/hooks/pre-push"
         echo "   ✅ patch repo pre-push privacy guard 已安装"
     else
-        echo "   ⏭️ patch repo pre-push privacy guard hook skipped (set HERMES_INSTALL_GIT_HOOKS=1 to install)"
+        echo "   ℹ️ optional patch repo pre-push hook not installed (set HERMES_INSTALL_GIT_HOOKS=1 to install)"
     fi
     echo "   ✅ hermes-public-patch-privacy-guard.sh 已安装"
 fi
@@ -564,7 +565,7 @@ if [ "${HERMES_INSTALL_NPM_TOOLS:-1}" != "0" ] && ! command -v ast-grep >/dev/nu
         echo "   ⚠️ npm 不存在，跳过 ast-grep 安装；可手动安装 @ast-grep/cli"
     fi
 elif [ "${HERMES_INSTALL_NPM_TOOLS:-1}" = "0" ]; then
-    echo "   ⏭️ ast-grep global install skipped (set HERMES_INSTALL_NPM_TOOLS=1 to install)"
+    echo "   ℹ️ optional ast-grep global install disabled (set HERMES_INSTALL_NPM_TOOLS=1 to install)"
 fi
 if [ -f "$PATCHES_DIR/scripts/hermes_deep_research_orchestrator.py" ]; then
     mkdir -p "$PROFILE_DIR/scripts"
@@ -594,7 +595,7 @@ if [ -f "$PATCHES_DIR/scripts/deploy-standalone-memory-graph-webui.sh" ]; then
             PATCHES_DIR="$PROFILE_DIR" "$PROFILE_DIR/scripts/deploy-standalone-memory-graph-webui.sh" || echo "   ⚠️ standalone Memory Graph WebUI 部署失败，请手动运行 $PROFILE_DIR/scripts/deploy-standalone-memory-graph-webui.sh"
         fi
     else
-        echo "   ⏭️ deploy helpers skipped (set HERMES_INSTALL_DEPLOY_HELPERS=1 to install)"
+        echo "   ℹ️ optional deploy helpers not installed (set HERMES_INSTALL_DEPLOY_HELPERS=1 to install)"
     fi
 fi
 
