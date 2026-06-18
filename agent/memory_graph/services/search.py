@@ -262,15 +262,6 @@ class SearchIndexer:
     # Public search API (PostgreSQL tsvector + ILIKE fallback)
     # -----------------------------------------------------------------
 
-    # Columns that form the tsvector search text
-    _SEARCH_TEXT_EXPR = (
-        "coalesce(sd.path, '') || ' ' || "
-        "coalesce(sd.uri, '') || ' ' || "
-        "coalesce(sd.content, '') || ' ' || "
-        "coalesce(sd.disclosure, '') || ' ' || "
-        "coalesce(sd.search_terms, '')"
-    )
-
     @staticmethod
     def _query_rank_terms(query: str) -> List[tuple[str, int]]:
         """Return weighted high-signal query terms for semantic reranking."""
@@ -372,7 +363,6 @@ class SearchIndexer:
                 rows = result.scalars().all()
             else:
                 # tsvector full-text search with broad OR ranking
-                search_text = self._SEARCH_TEXT_EXPR
                 domain_clause = ""
                 params: dict = {"namespace": namespace, "ts_query": or_ts_query, "raw_query": query, "candidate_limit": limit * 5}
                 if domain is not None:
@@ -391,7 +381,7 @@ class SearchIndexer:
                             sd.content,
                             sd.disclosure,
                             ts_rank_cd(
-                                to_tsvector('simple', {search_text}),
+                                sd.search_vector,
                                 to_tsquery('simple', :ts_query)
                             ) AS score,
                             CASE
@@ -401,7 +391,7 @@ class SearchIndexer:
                             END AS namespace_rank
                         FROM {SearchDocument.__tablename__} AS sd
                         WHERE (sd.namespace = :namespace OR sd.namespace = '' OR sd.namespace IS NULL)
-                          AND to_tsvector('simple', {search_text})
+                          AND sd.search_vector
                               @@ to_tsquery('simple', :ts_query)
                           {domain_clause}
                         ORDER BY

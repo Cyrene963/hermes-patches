@@ -80,6 +80,8 @@ def test_search_indexer_or_query_allows_partial_memory_matches():
     asyncio.run(indexer.search("alpha beta gamma", namespace="telegram:u1", limit=3))
 
     sql, params = factory.session.statements[0]
+    assert "sd.search_vector" in sql
+    assert "to_tsvector('simple'" not in sql
     assert "to_tsquery('simple', :ts_query)" in sql
     assert "sd.namespace = :namespace OR sd.namespace = ''" in sql
     assert "raw_query" in sql
@@ -95,6 +97,9 @@ def _load_memory_graph_plugin():
         _ORIGINAL_HOME / ".hermes" / "patches" / "plugins" / "memory-graph" / "__init__.py",
     ]
     plugin_path = next((p for p in candidates if p.exists()), candidates[0])
+    if not plugin_path.exists():
+        import pytest
+        pytest.skip(f"memory graph plugin not installed at {plugin_path}")
     spec = importlib.util.spec_from_file_location("memory_graph_plugin_under_test", plugin_path)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)

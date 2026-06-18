@@ -220,15 +220,6 @@ class SearchIndexer:
     # Public search API (PostgreSQL tsvector + ILIKE fallback)
     # -----------------------------------------------------------------
 
-    # Columns that form the tsvector search text
-    _SEARCH_TEXT_EXPR = (
-        "coalesce(sd.path, '') || ' ' || "
-        "coalesce(sd.uri, '') || ' ' || "
-        "coalesce(sd.content, '') || ' ' || "
-        "coalesce(sd.disclosure, '') || ' ' || "
-        "coalesce(sd.search_terms, '')"
-    )
-
     async def search(
         self, query: str, limit: int = 10, domain: Optional[str] = None, namespace: str = ""
     ) -> List[Dict[str, Any]]:
@@ -276,7 +267,6 @@ class SearchIndexer:
                 rows = result.all()
             else:
                 # tsvector full-text search with ranking
-                search_text = self._SEARCH_TEXT_EXPR
                 domain_clause = ""
                 params: dict = {"namespace": namespace, "ts_query": normalized, "candidate_limit": limit * 5}
                 # Extract first meaningful token for entity matching
@@ -301,13 +291,13 @@ class SearchIndexer:
                             sd.disclosure,
                             COALESCE(m.security_level, 'public') AS security_level,
                             ts_rank_cd(
-                                to_tsvector('simple', {search_text}),
+                                sd.search_vector,
                                 plainto_tsquery('simple', :ts_query)
                             ) AS score
                         FROM {SearchDocument.__tablename__} AS sd
                         LEFT JOIN {Memory.__tablename__} AS m ON m.id = sd.memory_id
                         WHERE sd.namespace = :namespace
-                          AND to_tsvector('simple', {search_text})
+                          AND sd.search_vector
                               @@ plainto_tsquery('simple', :ts_query)
                           {domain_clause}
                         ORDER BY

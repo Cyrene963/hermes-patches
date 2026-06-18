@@ -126,6 +126,39 @@ async def _apply_rls_context(session: AsyncSession) -> None:
     })
 
 
+async def _ensure_search_vector_schema(conn) -> None:
+    """Keep mg_search_documents.search_vector aligned with the generated-column contract."""
+    from .models import SearchDocument
+
+    result = await conn.execute(text("""
+        SELECT data_type, udt_name, is_generated
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'mg_search_documents'
+          AND column_name = 'search_vector'
+    """))
+    row = result.first()
+    if row and row[1] == "tsvector" and row[2] == "ALWAYS":
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_mg_search_vector_gin
+            ON mg_search_documents
+            USING gin(search_vector)
+        """))
+        return
+
+    expression = str(SearchDocument.__table__.c.search_vector.computed.sqltext)
+    await conn.execute(text("ALTER TABLE mg_search_documents DROP COLUMN IF EXISTS search_vector"))
+    await conn.execute(text(f"""
+        ALTER TABLE mg_search_documents
+        ADD COLUMN search_vector TSVECTOR GENERATED ALWAYS AS ({expression}) STORED
+    """))
+    await conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_mg_search_vector_gin
+        ON mg_search_documents
+        USING gin(search_vector)
+    """))
+
+
 class _ContextSession:
     """Async context manager that applies RLS context before exposing a session."""
 
@@ -158,6 +191,7 @@ async def init_db(db_url: str = None) -> None:
     async with _engine.begin() as conn:
         from .models import Base as ModelBase
         await conn.run_sync(ModelBase.metadata.create_all)
+        await _ensure_search_vector_schema(conn)
 
     # Ensure root node exists. This bootstrap row is global metadata rather than
     # tenant memory, so use an admin RLS context for the check/insert only. Normal

@@ -16,8 +16,9 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     Boolean, Column, DateTime, ForeignKey, Integer, String, Text,
-    UniqueConstraint, Index, func,
+    UniqueConstraint, Index, func, Computed,
 )
+from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -155,7 +156,18 @@ class SearchDocument(Base):
     search_terms = Column(Text, nullable=False, default="")
     priority = Column(Integer, nullable=False, default=0)
     updated_at = Column(DateTime(timezone=True), default=utcnow)
-    search_vector = Column(Text, nullable=True)  # reserved for pg_tsvector
+    search_vector = Column(
+        TSVECTOR,
+        Computed(
+            "to_tsvector('simple', coalesce(path, '') || ' ' || coalesce(uri, '') || ' ' || coalesce(content, '') || ' ' || coalesce(disclosure, '') || ' ' || coalesce(search_terms, ''))",
+            persisted=True,
+        ),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_mg_search_vector_gin", search_vector, postgresql_using="gin"),
+    )
 
 
 class Snapshot(Base):
