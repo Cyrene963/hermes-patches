@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-EVOLINK_BASE_URL = "https://api.evolink.ai/v1"
+EVOLINK_BASE_URL = "https://direct.evolink.ai/v1"
 EVOLINK_API_KEY_ENV = "EVOLINK_API_KEY"
 
 from hermes_cli import auth as auth_mod

@@ -259,7 +259,7 @@ def _get_aux_model_for_provider(provider_id: str) -> str:
 # plus providers we intentionally keep pinned here (e.g. Anthropic predates
 # profiles). New providers should set default_aux_model on their profile instead.
 _API_KEY_PROVIDER_AUX_MODELS_FALLBACK: Dict[str, str] = {
-    "evolink": "gpt-4o-mini",
+    "evolink": "gpt-5.2",
     "gemini": "gemini-3-flash-preview",
     "zai": "glm-4.5-flash",
     "kimi-coding": "kimi-k2-turbo-preview",
@@ -4613,7 +4613,7 @@ def _get_cached_client(
 # to e.g. DeepSeek and producing cryptic ``unknown variant 'image_url'``
 # errors (issue #31179).
 _AUX_DIRECT_API_BASE_URLS: Dict[str, str] = {
-    "evolink": "https://api.evolink.ai/v1",
+    "evolink": "https://direct.evolink.ai/v1",
     "openai": "https://api.openai.com/v1",
 }
 
