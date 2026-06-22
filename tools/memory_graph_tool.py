@@ -139,6 +139,22 @@ def _resolve_namespace_arg(args) -> str:
     return _get_namespace() if explicit is sentinel else (explicit or "")
 
 
+def _require_write_namespace(args) -> str:
+    """Resolve a namespace for writes and refuse anonymous fallbacks.
+
+    Memory Graph write operations must never proceed without a concrete
+    namespace, because the DB RLS layer will otherwise accept the root UUID
+    path and surface opaque insert failures when the current tenant is not set.
+    """
+    namespace = _resolve_namespace_arg(args)
+    if namespace:
+        return namespace
+    raise RuntimeError(
+        "Memory Graph write operations require an explicit namespace; set "
+        "MEMORY_GRAPH_NAMESPACE or pass namespace=..."
+    )
+
+
 def _with_rls_namespace(namespace: str):
     from agent.memory_graph.db import rls_context
     return rls_context(namespace)
@@ -185,7 +201,7 @@ def _create(args, **kw):
     from agent.memory_graph.services.graph import GraphService
     parent_uri = args.get("parent_uri", "")
     domain, parent_path = _parse_uri(parent_uri, args.get("domain", "core"))
-    ns = _resolve_namespace_arg(args)
+    ns = _require_write_namespace(args)
     content = args["content"]
 
     # Zero-default: user data MUST have namespace. Validate the namespace that
@@ -213,7 +229,7 @@ def _update(args, **kw):
     from agent.memory_graph.services.graph import GraphService
     uri = args.get("uri", "")
     domain, path = _parse_uri(uri, args.get("domain", "core"))
-    ns = _resolve_namespace_arg(args)
+    ns = _require_write_namespace(args)
     with _with_rls_namespace(ns):
         result = _run(GraphService().update_memory(
             path, args["content"], domain=domain, namespace=ns,
@@ -228,7 +244,7 @@ def _delete(args, **kw):
     from agent.memory_graph.services.graph import GraphService
     uri = args.get("uri", "")
     domain, path = _parse_uri(uri, args.get("domain", "core"))
-    ns = _resolve_namespace_arg(args)
+    ns = _require_write_namespace(args)
     with _with_rls_namespace(ns):
         node = _run(GraphService().get_memory_by_path(path, domain=domain, namespace=ns))
         node_uuid = (node or {}).get("node_uuid", "")
@@ -292,7 +308,7 @@ def _alias(args, **kw):
     alias_uri = args.get("alias_uri", "")
     domain, path = _parse_uri(uri, args.get("domain", "core"))
     alias_domain, alias_path = _parse_uri(alias_uri, domain)
-    ns = _resolve_namespace_arg(args)
+    ns = _require_write_namespace(args)
     with _with_rls_namespace(ns):
         result = _run(GraphService().add_alias(path, alias_path, domain=domain, alias_domain=alias_domain, namespace=ns))
     _refresh_search_index(result.get("node_uuid", ""), ns)
@@ -305,7 +321,7 @@ def _glossary_add(args, **kw):
     from agent.memory_graph.services.glossary import GlossaryService
     node_uri = args.get("node_uri", "")
     domain, path = _parse_uri(node_uri, args.get("domain", "core"))
-    ns = _resolve_namespace_arg(args)
+    ns = _require_write_namespace(args)
     with _with_rls_namespace(ns):
         node = _run(GraphService().get_memory_by_path(path, domain=domain, namespace=ns))
     if not node:

@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 
 def test_refresh_search_index_calls_ensure_db_before_indexer(monkeypatch):
     import tools.memory_graph_tool as mg
@@ -139,14 +141,13 @@ def test_create_user_private_path_still_rejects_missing_namespace(monkeypatch):
 
     request_context.reset_context()
 
-    out = json.loads(mg._create({
-        "parent_uri": "core://用户档案",
-        "content": "private learning memory",
-        "domain": "core",
-        "title": "test",
-    }))
-
-    assert "no namespace set" in out["error"]
+    with pytest.raises(RuntimeError, match="explicit namespace"):
+        mg._create({
+            "parent_uri": "core://用户档案",
+            "content": "private learning memory",
+            "domain": "core",
+            "title": "test",
+        })
 
 
 def test_search_logs_access_for_returned_nodes(monkeypatch):
