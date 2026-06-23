@@ -12,10 +12,6 @@ async def test_init_db_uses_admin_rls_context_for_root_bootstrap(monkeypatch):
     added = []
     committed = []
 
-    class FakeScalar:
-        def scalar_one_or_none(self):
-            return None
-
     class FakeSession:
         async def __aenter__(self):
             return self
@@ -25,7 +21,6 @@ async def test_init_db_uses_admin_rls_context_for_root_bootstrap(monkeypatch):
 
         async def execute(self, statement, params=None):
             executed.append((str(statement), params))
-            return FakeScalar()
 
         def add(self, obj):
             added.append(obj)
@@ -60,8 +55,8 @@ async def test_init_db_uses_admin_rls_context_for_root_bootstrap(monkeypatch):
         "set_app_context" in statement and params == {"namespace": "", "is_admin": True}
         for statement, params in executed
     )
-    assert added
-    assert committed
+    assert added == []
+    assert committed == []
 
 
 @pytest.mark.asyncio

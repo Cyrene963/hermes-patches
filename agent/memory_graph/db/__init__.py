@@ -159,21 +159,13 @@ async def init_db(db_url: str = None) -> None:
         from .models import Base as ModelBase
         await conn.run_sync(ModelBase.metadata.create_all)
 
-    # Ensure root node exists. This bootstrap row is global metadata rather than
-    # tenant memory, so use an admin RLS context for the check/insert only. Normal
-    # tool sessions still get their request-scoped context via get_session().
+    # The zero UUID is a sentinel root identifier used by queries and tool logic.
+    # Do not materialize it as a real row in mg_nodes under RLS-protected storage.
     async with _session_factory() as session:
-        from .models import ROOT_NODE_UUID, Node
-        from sqlalchemy import select
         await session.execute(text("SELECT set_app_context(:namespace, :is_admin)"), {
             "namespace": "",
             "is_admin": True,
         })
-        result = await session.execute(select(Node).where(Node.uuid == ROOT_NODE_UUID))
-        if result.scalar_one_or_none() is None:
-            session.add(Node(uuid=ROOT_NODE_UUID))
-            await session.commit()
-            logger.info("Created root node %s", ROOT_NODE_UUID)
 
     logger.info("Memory Graph DB initialized: %s", url.split("@")[-1] if "@" in url else url)
 
