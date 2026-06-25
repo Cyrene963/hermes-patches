@@ -161,11 +161,8 @@ async def init_db(db_url: str = None) -> None:
 
     # The zero UUID is a sentinel root identifier used by queries and tool logic.
     # Do not materialize it as a real row in mg_nodes under RLS-protected storage.
-    async with _session_factory() as session:
-        await session.execute(text("SELECT set_app_context(:namespace, :is_admin)"), {
-            "namespace": "",
-            "is_admin": True,
-        })
+    # Keep initialization fully side-effect free: table creation only. The root
+    # UUID is resolved logically by services and must never be inserted here.
 
     logger.info("Memory Graph DB initialized: %s", url.split("@")[-1] if "@" in url else url)
 

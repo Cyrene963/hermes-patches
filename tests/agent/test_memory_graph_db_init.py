@@ -5,7 +5,7 @@ import pytest
 
 
 @pytest.mark.asyncio
-async def test_init_db_uses_admin_rls_context_for_root_bootstrap(monkeypatch):
+async def test_init_db_does_not_materialize_root_sentinel(monkeypatch):
     db = importlib.import_module("agent.memory_graph.db")
 
     executed = []
@@ -51,10 +51,7 @@ async def test_init_db_uses_admin_rls_context_for_root_bootstrap(monkeypatch):
 
     await db.init_db()
 
-    assert any(
-        "set_app_context" in statement and params == {"namespace": "", "is_admin": True}
-        for statement, params in executed
-    )
+    assert not any("set_app_context" in statement for statement, _params in executed)
     assert added == []
     assert committed == []
 
