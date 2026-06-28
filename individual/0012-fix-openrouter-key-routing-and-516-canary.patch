@@ -1,0 +1,519 @@
+From: Hermes Patches <patches@local>
+Subject: [PATCH] fix(runtime): separate OpenRouter key routing and retry 516 anomalies
+
+OpenRouter requests must use OPENROUTER_API_KEY, not a generic
+OPENAI_API_KEY. This prevents auto/runtime paths from sending a custom
+OpenAI-compatible key to https://openrouter.ai/api/v1 and receiving a
+misleading 401.
+
+Also adds the chat-completions 516 anomaly guard and route-targeted live
+canary. The guard treats a known-bad reasoning-only 200 response with
+reasoning_tokens=516, no visible content, and no tool calls as a synthetic
+retryable 502 so the existing retry/fallback path handles it.
+
+Verification:
+- python -m pytest -q -o addopts='' tests/hermes_cli/test_openrouter_key_routing.py tests/run_agent/test_chat_completions_516_anomaly_live.py
+- python -m pytest -q -o addopts='' tests/run_agent/test_516_anomaly_guard.py tests/hermes_cli/test_runtime_provider_resolution.py
+- python -m pytest -q -o addopts='' tests/run_agent/test_516_anomaly_guard.py tests/hermes_cli/test_openrouter_key_routing.py tests/hermes_cli/test_runtime_provider_resolution.py tests/run_agent/test_chat_completions_516_anomaly_live.py
+
+diff --git a/agent/transports/chat_completions.py b/agent/transports/chat_completions.py
+index 0c17e309a..69099c1e4 100644
+--- a/agent/transports/chat_completions.py
++++ b/agent/transports/chat_completions.py
+@@ -19,6 +19,32 @@ from agent.transports.base import ProviderTransport
+ from agent.transports.types import NormalizedResponse, ToolCall, Usage
+ 
+ 
++class ChatCompletionsAnomalyError(Exception):
++    """Synthetic provider error for structurally bad chat-completions responses."""
++
++    def __init__(
++        self,
++        message: str,
++        *,
++        code: str = "chat_completions_anomaly",
++        status_code: int = 502,
++        details: Dict[str, Any] | None = None,
++    ) -> None:
++        super().__init__(message)
++        self.message = message
++        self.code = code
++        self.status_code = status_code
++        self.details = details or {}
++        self.body: Dict[str, Any] = {
++            "error": {
++                "message": message,
++                "code": code,
++                "type": "error",
++                "details": self.details,
++            }
++        }
++
++
+ def _build_gemini_thinking_config(model: str, reasoning_config: dict | None) -> dict | None:
+     """Translate Hermes/OpenRouter-style reasoning config to Gemini thinkingConfig."""
+     if reasoning_config is None or not isinstance(reasoning_config, dict):
+@@ -115,6 +141,25 @@ def _model_consumes_thought_signature(model: Any) -> bool:
+     return "gemini" in m or "gemma" in m
+ 
+ 
++def _extract_reasoning_tokens_from_usage(usage: Any) -> int:
++    """Read reasoning token usage across common OpenAI-compatible shapes."""
++    if usage is None:
++        return 0
++    output_details = getattr(usage, "output_tokens_details", None)
++    if output_details is not None:
++        try:
++            return int(getattr(output_details, "reasoning_tokens", 0) or 0)
++        except (TypeError, ValueError):
++            return 0
++    completion_details = getattr(usage, "completion_tokens_details", None)
++    if completion_details is not None:
++        try:
++            return int(getattr(completion_details, "reasoning_tokens", 0) or 0)
++        except (TypeError, ValueError):
++            return 0
++    return 0
++
++
+ class ChatCompletionsTransport(ProviderTransport):
+     """Transport for api_mode='chat_completions'.
+ 
+@@ -683,6 +728,56 @@ class ChatCompletionsTransport(ProviderTransport):
+             return False
+         return True
+ 
++    def detect_retryable_anomaly(self, response: Any) -> ChatCompletionsAnomalyError | None:
++        """Detect 200-level responses that are known-bad and should retry."""
++        if not self.validate_response(response):
++            return None
++        try:
++            choice = response.choices[0]
++            msg = choice.message
++        except Exception:
++            return None
++
++        finish_reason = getattr(choice, "finish_reason", None) or "stop"
++        if finish_reason != "stop":
++            return None
++        if getattr(msg, "tool_calls", None):
++            return None
++
++        content = getattr(msg, "content", None)
++        if isinstance(content, str) and content.strip():
++            return None
++        if content not in (None, ""):
++            return None
++
++        reasoning = getattr(msg, "reasoning", None)
++        reasoning_content = getattr(msg, "reasoning_content", None)
++        if reasoning_content is None and hasattr(msg, "model_extra"):
++            model_extra = getattr(msg, "model_extra", None) or {}
++            if isinstance(model_extra, dict):
++                reasoning_content = model_extra.get("reasoning_content")
++
++        if not reasoning and not reasoning_content:
++            return None
++
++        reasoning_tokens = _extract_reasoning_tokens_from_usage(
++            getattr(response, "usage", None)
++        )
++        if reasoning_tokens != 516:
++            return None
++
++        return ChatCompletionsAnomalyError(
++            "OpenAI-compatible route returned a known-bad reasoning-only response "
++            "(reasoning_tokens=516, no visible content, no tool calls). Retrying.",
++            code="reasoning_tokens_516_anomaly",
++            status_code=502,
++            details={
++                "reasoning_tokens": reasoning_tokens,
++                "finish_reason": finish_reason,
++                "has_reasoning": True,
++            },
++        )
++
+     def extract_cache_stats(self, response: Any) -> dict[str, int] | None:
+         """Extract OpenRouter/OpenAI cache stats from prompt_tokens_details."""
+         usage = getattr(response, "usage", None)
+diff --git a/hermes_cli/auth.py b/hermes_cli/auth.py
+index 021905c3e..b6fc148d8 100644
+--- a/hermes_cli/auth.py
++++ b/hermes_cli/auth.py
+@@ -1473,7 +1473,7 @@ def resolve_provider(
+     Priority (when requested="auto" or None):
+     1. active_provider in auth.json with valid credentials
+     2. Explicit CLI api_key/base_url -> "openrouter"
+-    3. OPENAI_API_KEY or OPENROUTER_API_KEY env vars -> "openrouter"
++    3. OPENROUTER_API_KEY env var -> "openrouter"
+     4. Provider-specific API keys (GLM, Kimi, MiniMax) -> that provider
+     5. Fallback: "openrouter"
+     """
+@@ -1558,7 +1558,7 @@ def resolve_provider(
+     except Exception as e:
+         logger.debug("Could not detect active auth provider: %s", e)
+ 
+-    if has_usable_secret(os.getenv("OPENAI_API_KEY")) or has_usable_secret(os.getenv("OPENROUTER_API_KEY")):
++    if has_usable_secret(os.getenv("OPENROUTER_API_KEY")):
+         return "openrouter"
+ 
+     # Auto-detect API-key providers by checking their env vars
+diff --git a/hermes_cli/runtime_provider.py b/hermes_cli/runtime_provider.py
+index 9d8a0230d..55e029d43 100644
+--- a/hermes_cli/runtime_provider.py
++++ b/hermes_cli/runtime_provider.py
+@@ -824,7 +824,6 @@ def _resolve_openrouter_runtime(
+         api_key_candidates = [
+             explicit_api_key,
+             os.getenv("OPENROUTER_API_KEY"),
+-            os.getenv("OPENAI_API_KEY"),
+         ]
+     else:
+         # Custom endpoint: use api_key from config when using config base_url (#1760).
+diff --git a/tests/hermes_cli/test_runtime_provider_resolution.py b/tests/hermes_cli/test_runtime_provider_resolution.py
+index 2f89be933..314e10aa8 100644
+--- a/tests/hermes_cli/test_runtime_provider_resolution.py
++++ b/tests/hermes_cli/test_runtime_provider_resolution.py
+@@ -481,18 +481,18 @@ def test_openrouter_key_takes_priority_over_openai_key(monkeypatch):
+     assert resolved["api_key"] == "sk-or-should-win"
+ 
+ 
+-def test_openai_key_used_when_no_openrouter_key(monkeypatch):
+-    """OPENAI_API_KEY is used as fallback when OPENROUTER_API_KEY is not set."""
++def test_openai_key_not_used_when_no_openrouter_key(monkeypatch):
++    """OPENAI_API_KEY must not be sent to the OpenRouter endpoint."""
+     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openrouter")
+     monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+     monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-fallback")
++    monkeypatch.setenv("OPENAI_API_KEY", "sk-ope...back")
+     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+ 
+     resolved = rp.resolve_runtime_provider(requested="openrouter")
+ 
+-    assert resolved["api_key"] == "sk-openai-fallback"
++    assert resolved["api_key"] == ""
+ 
+ 
+ def test_custom_endpoint_prefers_openai_key(monkeypatch):
+diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
+index c6bfbd603..43c09a0f7 100644
+--- a/agent/conversation_loop.py
++++ b/agent/conversation_loop.py
+@@ -1423,6 +1423,10 @@ def run_conversation(
+                             error_details.append("response.choices is None")
+                         else:
+                             error_details.append("response.choices is empty")
++                    else:
++                        _anomaly_error = getattr(_ctv, "detect_retryable_anomaly", lambda _r: None)(response)
++                        if _anomaly_error is not None:
++                            raise _anomaly_error
+ 
+                 if response_invalid:
+                     # Stop spinner silently — retry status is now buffered
+diff --git a/tests/hermes_cli/test_openrouter_key_routing.py b/tests/hermes_cli/test_openrouter_key_routing.py
+new file mode 100644
+index 000000000..51ecc2f02
+--- /dev/null
++++ b/tests/hermes_cli/test_openrouter_key_routing.py
+@@ -0,0 +1,73 @@
++import os
++import sys
++import types
++from unittest.mock import patch
++
++import pytest
++
++from hermes_cli.auth import AuthError, resolve_provider
++from hermes_cli import runtime_provider as rp
++
++
++def _clear_provider_env(monkeypatch):
++    for key in list(os.environ):
++        if key.endswith(("_API_KEY", "_TOKEN", "_SECRET", "_KEY")):
++            monkeypatch.delenv(key, raising=False)
++    for key in (
++        "OPENAI_BASE_URL",
++        "OPENROUTER_BASE_URL",
++        "CUSTOM_BASE_URL",
++        "HERMES_INFERENCE_PROVIDER",
++        "AWS_ACCESS_KEY_ID",
++        "AWS_SECRET_ACCESS_KEY",
++        "AWS_SESSION_TOKEN",
++        "AWS_PROFILE",
++        "AWS_DEFAULT_PROFILE",
++        "AWS_WEB_IDENTITY_TOKEN_FILE",
++        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
++        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
++        "AWS_BEARER_TOKEN_BEDROCK",
++    ):
++        monkeypatch.delenv(key, raising=False)
++
++
++def _disable_bedrock_autodetect(monkeypatch):
++    monkeypatch.setitem(
++        sys.modules,
++        "agent.bedrock_adapter",
++        types.SimpleNamespace(has_aws_credentials=lambda: False),
++    )
++
++
++def test_auto_provider_does_not_treat_openai_key_as_openrouter(monkeypatch):
++    _clear_provider_env(monkeypatch)
++    _disable_bedrock_autodetect(monkeypatch)
++    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-test")
++
++    with patch("hermes_cli.auth._load_auth_store", return_value={}), \
++         patch("hermes_cli.auth.PROVIDER_REGISTRY", {}), \
++         pytest.raises(AuthError) as excinfo:
++        resolve_provider("auto")
++
++    assert excinfo.value.code == "no_provider_configured"
++
++
++def test_auto_provider_uses_openrouter_key_for_openrouter(monkeypatch):
++    _clear_provider_env(monkeypatch)
++    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
++
++    with patch("hermes_cli.auth._load_auth_store", return_value={}):
++        assert resolve_provider("auto") == "openrouter"
++
++
++def test_openrouter_runtime_does_not_use_openai_key(monkeypatch):
++    _clear_provider_env(monkeypatch)
++    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-test")
++    monkeypatch.setattr(rp, "_get_model_config", lambda: {"provider": "openrouter"})
++    monkeypatch.setattr(rp, "load_pool", lambda provider: None)
++
++    resolved = rp.resolve_runtime_provider(requested="openrouter")
++
++    assert resolved["provider"] == "openrouter"
++    assert resolved["base_url"] == rp.OPENROUTER_BASE_URL
++    assert resolved["api_key"] == ""
+diff --git a/tests/run_agent/test_516_anomaly_guard.py b/tests/run_agent/test_516_anomaly_guard.py
+new file mode 100644
+index 000000000..c518d900f
+--- /dev/null
++++ b/tests/run_agent/test_516_anomaly_guard.py
+@@ -0,0 +1,16 @@
++"""Regression tests for the chat-completions 516 anomaly guard hook."""
++
++import inspect
++
++from agent import conversation_loop
++from agent.transports.chat_completions import ChatCompletionsTransport
++
++
++def test_transport_exposes_516_anomaly_detector():
++    assert hasattr(ChatCompletionsTransport, "detect_retryable_anomaly")
++
++
++def test_conversation_loop_calls_and_raises_anomaly_guard():
++    src = inspect.getsource(conversation_loop)
++    assert "detect_retryable_anomaly" in src
++    assert "raise _anomaly_error" in src
+\ No newline at end of file
+diff --git a/tests/run_agent/test_chat_completions_516_anomaly_live.py b/tests/run_agent/test_chat_completions_516_anomaly_live.py
+new file mode 100644
+index 000000000..62e9c3fbc
+--- /dev/null
++++ b/tests/run_agent/test_chat_completions_516_anomaly_live.py
+@@ -0,0 +1,196 @@
++"""Live canary for the chat-completions 516 anomaly guard.
++
++Opt-in only:
++    HERMES_LIVE_TESTS=1 pytest -q -o addopts='' \
++        tests/run_agent/test_chat_completions_516_anomaly_live.py
++
++Optional targeting:
++    HERMES_LIVE_TESTS=1 HERMES_516_CANARY_PROVIDER='custom:my-route' \
++        HERMES_516_CANARY_MODEL='provider/model-name' pytest -q -o addopts='' \
++        tests/run_agent/test_chat_completions_516_anomaly_live.py
++
++This test does not force a provider to emit the anomaly. It proves the live
++route is reachable, captures the raw response shape from the CURRENT runtime
++provider, and asserts that Hermes' transport-level detector agrees with the
++observed payload. If a real route returns the known bad
++``reasoning_tokens == 516`` reasoning-only packet, this test will fail loudly
++unless the detector fires.
++"""
++
++from __future__ import annotations
++
++import json
++import os
++from pathlib import Path
++from typing import Any
++
++import pytest
++
++from hermes_cli.env_loader import load_hermes_dotenv
++from hermes_cli.runtime_provider import resolve_runtime_provider
++
++
++load_hermes_dotenv(hermes_home=str(Path.home() / ".hermes"))
++
++LIVE = os.environ.get("HERMES_LIVE_TESTS") == "1"
++LIVE_PROVIDER = os.environ.get("HERMES_516_CANARY_PROVIDER", "").strip() or None
++LIVE_MODEL = os.environ.get("HERMES_516_CANARY_MODEL", "").strip() or None
++try:
++    LIVE_RUNTIME_SNAPSHOT = resolve_runtime_provider(
++        requested=LIVE_PROVIDER,
++        target_model=LIVE_MODEL,
++    )
++    LIVE_RUNTIME_ERROR = ""
++except Exception as exc:  # pragma: no cover - live-env dependent
++    LIVE_RUNTIME_SNAPSHOT = None
++    LIVE_RUNTIME_ERROR = f"{type(exc).__name__}: {exc}"
++
++
++def _looks_credential_like(value: str) -> bool:
++    lowered = (value or "").lower()
++    return lowered.startswith(("sk-", "sk-or-", "sess-", "tok-"))
++
++
++def _redact(value: Any) -> Any:
++    if isinstance(value, dict):
++        return {k: _redact(v) for k, v in value.items()}
++    if isinstance(value, list):
++        return [_redact(v) for v in value]
++    if isinstance(value, str):
++        return "***REDACTED***" if _looks_credential_like(value) else value
++    return value
++
++
++def _jsonable(value: Any) -> Any:
++    if hasattr(value, "model_dump"):
++        return value.model_dump(mode="json")
++    if hasattr(value, "dict"):
++        try:
++            return value.dict()
++        except Exception:
++            pass
++    if isinstance(value, dict):
++        return {k: _jsonable(v) for k, v in value.items()}
++    if isinstance(value, list):
++        return [_jsonable(v) for v in value]
++    if hasattr(value, "__dict__"):
++        return {k: _jsonable(v) for k, v in vars(value).items() if not k.startswith("_")}
++    return value
++
++
++def _message_reasoning_content(message: Any) -> Any:
++    direct = getattr(message, "reasoning_content", None)
++    if direct is not None:
++        return direct
++    model_extra = getattr(message, "model_extra", None) or {}
++    if isinstance(model_extra, dict):
++        return model_extra.get("reasoning_content")
++    return None
++
++
++def _extract_reasoning_tokens(usage: Any) -> int:
++    if usage is None:
++        return 0
++    output_details = getattr(usage, "output_tokens_details", None)
++    if output_details is not None:
++        return int(getattr(output_details, "reasoning_tokens", 0) or 0)
++    completion_details = getattr(usage, "completion_tokens_details", None)
++    if completion_details is not None:
++        return int(getattr(completion_details, "reasoning_tokens", 0) or 0)
++    return 0
++
++
++def _print_trace(label: str, payload: Any) -> None:
++    print(f"\n--- {label} ---")
++    print(json.dumps(_redact(_jsonable(payload)), ensure_ascii=False, indent=2, sort_keys=True))
++
++
++def _resolve_live_runtime() -> dict[str, Any]:
++    if LIVE_RUNTIME_SNAPSHOT is None:
++        pytest.skip(f"runtime provider unavailable for live test: {LIVE_RUNTIME_ERROR}")
++    runtime = dict(LIVE_RUNTIME_SNAPSHOT)
++    if runtime.get("api_mode") != "chat_completions":
++        pytest.skip(
++            f"current runtime api_mode is {runtime.get('api_mode')!r}, not chat_completions"
++        )
++    if not runtime.get("api_key"):
++        pytest.skip("current runtime provider has no usable api_key")
++    if not runtime.get("base_url"):
++        pytest.skip("current runtime provider has no base_url")
++    if not runtime.get("model"):
++        pytest.skip("current runtime provider has no model")
++    return runtime
++
++
++pytestmark = [
++    pytest.mark.skipif(not LIVE, reason="live-only — set HERMES_LIVE_TESTS=1"),
++]
++
++
++def test_live_chat_completions_route_reports_516_anomaly_consistently():
++    from openai import OpenAI
++
++    from agent.transports.chat_completions import (
++        ChatCompletionsAnomalyError,
++        ChatCompletionsTransport,
++    )
++
++    runtime = _resolve_live_runtime()
++    client = OpenAI(api_key=runtime["api_key"], base_url=runtime["base_url"])
++    transport = ChatCompletionsTransport()
++
++    request = {
++        "model": runtime["model"],
++        "messages": [
++            {
++                "role": "user",
++                "content": (
++                    "Respond with a single short sentence about the number 516. "
++                    "Do not call tools."
++                ),
++            }
++        ],
++        "max_tokens": 128,
++        "timeout": 90,
++    }
++    _print_trace("runtime", {
++        "provider": runtime.get("provider"),
++        "model": runtime.get("model"),
++        "base_url": runtime.get("base_url"),
++        "api_mode": runtime.get("api_mode"),
++    })
++    _print_trace("request", request)
++
++    response = client.chat.completions.create(**request)
++    _print_trace("raw response", response)
++
++    choice = response.choices[0]
++    message = choice.message
++    reasoning_tokens = _extract_reasoning_tokens(getattr(response, "usage", None))
++    has_visible_content = bool(
++        isinstance(getattr(message, "content", None), str)
++        and getattr(message, "content", "").strip()
++    )
++    has_tool_calls = bool(getattr(message, "tool_calls", None))
++    has_reasoning = bool(
++        getattr(message, "reasoning", None) or _message_reasoning_content(message)
++    )
++
++    anomaly = transport.detect_retryable_anomaly(response)
++    summary = {
++        "finish_reason": getattr(choice, "finish_reason", None),
++        "reasoning_tokens": reasoning_tokens,
++        "has_visible_content": has_visible_content,
++        "has_tool_calls": has_tool_calls,
++        "has_reasoning": has_reasoning,
++        "detector_fired": anomaly is not None,
++        "detector_type": type(anomaly).__name__ if anomaly else None,
++    }
++    _print_trace("summary", summary)
++
++    if reasoning_tokens == 516 and not has_visible_content and not has_tool_calls and has_reasoning:
++        assert isinstance(anomaly, ChatCompletionsAnomalyError)
++        assert anomaly.status_code == 502
++        assert anomaly.code == "reasoning_tokens_516_anomaly"
++    else:
++        assert anomaly is None
+\ No newline at end of file
