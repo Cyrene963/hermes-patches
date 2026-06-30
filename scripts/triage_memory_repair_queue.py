@@ -29,6 +29,11 @@ NOISE_PATTERNS = [
     r"^\{\s*\"(?:status|error|id)\"",
 ]
 TEST_NAMESPACES = {"telegram:u1", "test", "telegram:test-user"}
+SYNTHETIC_TEST_VALUE_HASHES = {
+    # Neutral fixture from memory_write_pipeline tests; empty namespace is expected
+    # to be rejected and should not keep production repair gates degraded.
+    "852039388a32dc8c22759514b3e8227b14e13a9fc91b27737a232efeff99335f",
+}
 
 
 def now() -> str:
@@ -44,6 +49,8 @@ def is_noise(row: dict) -> str:
     namespace = str(row.get("namespace") or "")
     if namespace in TEST_NAMESPACES:
         return "test_namespace"
+    if not namespace and str(row.get("value_sha256") or "") in SYNTHETIC_TEST_VALUE_HASHES:
+        return "synthetic_test_fixture_empty_namespace"
     if namespace.startswith("telegram:-") and row.get("subject") == "auto_store_heuristic":
         return "group_auto_store_heuristic_not_private_memory"
     for pattern in NOISE_PATTERNS:
