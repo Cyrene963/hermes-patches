@@ -1147,6 +1147,7 @@ class MemoryWritePipeline:
             item = {
                 'schema_version': 2,
                 'timestamp': datetime.now(timezone.utc).isoformat(),
+                'status': 'pending',
                 'namespace': classification.get('namespace') or candidate.namespace or '',
                 'subject': candidate.subject,
                 'predicate': candidate.predicate,

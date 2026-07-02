@@ -48,6 +48,12 @@ _HERMES_CORE_TOOLS = [
     "text_to_speech",
     # Planning & memory
     "todo", "memory",
+    # Memory Graph (URI-tree structured memory)
+    "memory_graph_read", "memory_graph_create", "memory_graph_update",
+    "memory_graph_delete", "memory_graph_list", "memory_graph_search",
+    "memory_graph_alias", "memory_graph_glossary_add", "memory_graph_glossary_scan",
+    "memory_graph_recall", "memory_graph_orphans", "memory_graph_random",
+    "memory_graph_diagnostics", "memory_graph_purge",
     # Session history search
     "session_search",
     # Memory Graph (Memory OS)
@@ -63,7 +69,7 @@ _HERMES_CORE_TOOLS = [
     # Cronjob management
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
-    "send_message",
+    "send_message", "telegram_send_sticker",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
     # Kanban multi-agent coordination — only in schema when the agent is
@@ -192,8 +198,8 @@ TOOLSETS = {
     },
     
     "messaging": {
-        "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",
-        "tools": ["send_message"],
+        "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.; Telegram stickers",
+        "tools": ["send_message", "telegram_send_sticker"],
         "includes": []
     },
 

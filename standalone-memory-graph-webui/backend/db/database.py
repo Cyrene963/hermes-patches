@@ -118,10 +118,6 @@ class DatabaseManager:
                 text("SELECT set_app_context(:namespace, :is_admin)"),
                 {"namespace": "", "is_admin": True},
             )
-            result = await session.execute(select(Node).where(Node.uuid == ROOT_NODE_UUID))
-            if result.scalar_one_or_none() is None:
-                session.add(Node(uuid=ROOT_NODE_UUID))
-                await session.commit()
 
     async def close(self):
         """Close the database connection."""

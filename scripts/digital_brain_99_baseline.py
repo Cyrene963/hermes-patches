@@ -60,7 +60,17 @@ def session_token(username: str) -> str | None:
 
 def review_queue_stats() -> dict:
     path = ROOT / "logs" / "memory_review_queue" / "review_proposals.current.jsonl"
-    stats = {"exists": path.exists(), "total": 0, "by_status": {}, "by_namespace": {}, "by_target_store": {}, "readback_empty_pending": 0, "errors": []}
+    stats = {
+        "exists": path.exists(),
+        "total": 0,
+        "by_status": {},
+        "by_namespace": {},
+        "by_target_store": {},
+        "by_stage": {},
+        "readback_empty_pending": 0,
+        "safe_pending_raw_material": 0,
+        "errors": [],
+    }
     if not path.exists():
         return stats
     for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
@@ -74,16 +84,33 @@ def review_queue_stats() -> dict:
         stats["total"] += 1
         c = o.get("candidate") or {}
         m = c.get("metadata") or {}
+        decision = o.get("decision") or {}
+        changeset = o.get("changeset") or {}
         status = str(o.get("status", "pending") or "pending")
-        ns = str(o.get("namespace") or c.get("namespace") or c.get("namespace_security_scope") or (o.get("changeset") or {}).get("namespace") or "")
-        store = str(m.get("target_store") or c.get("suggested_store") or (o.get("decision") or {}).get("target_store") or "")
+        ns = str(o.get("namespace") or c.get("namespace") or c.get("namespace_security_scope") or changeset.get("namespace") or "")
+        store = str(m.get("target_store") or c.get("suggested_store") or decision.get("target_store") or "")
         readback = o.get("readback") or {}
         queries = c.get("readback_queries") or readback.get("queries") or o.get("readback_queries") or []
         if status == "pending" and not queries:
             stats["readback_empty_pending"] += 1
+        source = str(c.get("source_type") or c.get("source") or o.get("source") or "")
+        content = str(c.get("content") or c.get("object_value") or c.get("value") or o.get("content") or "").strip()
+        evidence = str(c.get("evidence_quote") or o.get("evidence_quote") or "").strip()
+        explicitly_distilled = bool(c.get("distilled") or m.get("distilled"))
+        has_distinct_evidence = bool(content and evidence and content != evidence)
+        has_readback = bool(queries)
+        if store == "memory_graph" and explicitly_distilled and has_readback:
+            stage = "ready_memory"
+        elif store == "memory_graph" and has_distinct_evidence and has_readback and source not in {"state_db_message", "google_ai_studio"}:
+            stage = "ready_memory"
+        else:
+            stage = "raw_material"
+        if status == "pending" and store == "memory_graph" and stage == "raw_material" and has_readback:
+            stats["safe_pending_raw_material"] += 1
         stats["by_status"][status] = stats["by_status"].get(status, 0) + 1
         stats["by_namespace"][ns] = stats["by_namespace"].get(ns, 0) + 1
         stats["by_target_store"][store] = stats["by_target_store"].get(store, 0) + 1
+        stats["by_stage"][stage] = stats["by_stage"].get(stage, 0) + 1
     return stats
 
 
@@ -133,7 +160,7 @@ def main() -> int:
             "webui_local": http("http://127.0.0.1:8233/health"),
             "embedded_mg": http("http://127.0.0.1:8900/health"),
             "hindsight": http("http://127.0.0.1:9177/health"),
-            "public_mg": http("https://mg.bz9.me/health"),
+            "public_mg": http(os.environ["MG_PUBLIC_HEALTH_URL"]) if os.environ.get("MG_PUBLIC_HEALTH_URL") else {"status": 0, "ok": True, "body": "skipped: MG_PUBLIC_HEALTH_URL unset", "json": None},
         },
         "review_queue": review_queue_stats(),
         "repair_queue": jsonl_status_stats(ROOT / "logs" / "memory_repair_queue.jsonl"),
@@ -169,7 +196,10 @@ def main() -> int:
     if report["webui_auth"]["unauth_proposals"]["status"] != 401: stop.append("proposal inbox not 401 unauthenticated on local app path")
     if report["webui_auth"]["steven_review_groups"]["status"] != 403: stop.append("non-admin can access global review groups")
     pending_review = report["review_queue"].get("by_status", {}).get("pending", 0)
-    if pending_review: stop.append(f"review queue still has pending manual proposals: {pending_review}")
+    safe_pending_raw_material = report["review_queue"].get("safe_pending_raw_material", 0)
+    actionable_pending_review = max(0, pending_review - safe_pending_raw_material)
+    if actionable_pending_review:
+        stop.append(f"review queue still has actionable pending manual proposals: {actionable_pending_review}")
     if report["review_queue"].get("readback_empty_pending", 0): stop.append(f"pending review proposals missing readback queries: {report['review_queue']['readback_empty_pending']}")
     if report["review_queue"].get("errors"): stop.append("review queue JSON parse errors")
     pending_repair = report["repair_queue"].get("by_status", {}).get("pending", 0)

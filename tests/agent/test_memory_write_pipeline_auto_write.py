@@ -2,6 +2,8 @@
 
 from typing import Any
 
+import pytest
+
 from agent.memory_clarification_queue import build_clarification_context_block
 from agent.memory_write_pipeline import CandidateFact, MemoryWritePipeline
 
@@ -19,6 +21,16 @@ class FakeGraphClient:
             "uri": "core://auto-test",
             "node_uuid": "node-auto-test",
         }
+
+
+@pytest.fixture
+def shadow_repair_queue_path(tmp_path):
+    return tmp_path / "repair_queue.jsonl"
+
+
+@pytest.fixture
+def shadow_pipeline_config(shadow_repair_queue_path):
+    return {"mode": "shadow", "repair_queue_path": str(shadow_repair_queue_path)}
 
 
 def make_candidate(**overrides):
@@ -39,9 +51,9 @@ def make_candidate(**overrides):
     return CandidateFact(**data)
 
 
-def test_default_shadow_mode_never_writes_even_high_confidence():
+def test_default_shadow_mode_never_writes_even_high_confidence(shadow_pipeline_config):
     graph = FakeGraphClient()
-    pipeline = MemoryWritePipeline(graph_client=graph, config={"mode": "shadow"})
+    pipeline = MemoryWritePipeline(graph_client=graph, config=shadow_pipeline_config)
     candidate = make_candidate()
     classification = pipeline.classify_write(candidate, namespace="telegram:u1")
 
@@ -101,9 +113,9 @@ def test_limited_auto_refuses_core_namespace_by_policy():
     assert graph.calls == []
 
 
-def test_auto_store_heuristic_adds_default_on_candidate_but_shadow_does_not_write():
+def test_auto_store_heuristic_adds_default_on_candidate_but_shadow_does_not_write(shadow_pipeline_config):
     graph = FakeGraphClient()
-    pipeline = MemoryWritePipeline(graph_client=graph, config={"mode": "shadow"})
+    pipeline = MemoryWritePipeline(graph_client=graph, config=shadow_pipeline_config)
 
     reflection = pipeline.reflect_and_extract("记住我喜欢用 PostgreSQL", "好的")
 
@@ -177,8 +189,8 @@ def test_user_correction_maps_to_explicit_correction_policy_type():
     assert len(graph.calls) == 1
 
 
-def test_extracts_digital_stand_in_correction_as_procedural_memory_candidate():
-    pipeline = MemoryWritePipeline(config={"mode": "shadow"})
+def test_extracts_digital_stand_in_correction_as_procedural_memory_candidate(shadow_pipeline_config):
+    pipeline = MemoryWritePipeline(config=shadow_pipeline_config)
     reflection = pipeline.reflect_and_extract(
         "你又没主动存，太气人了。以后我纠正你错误时要先调查根因，再抽象通用防复发机制。",
         "",
@@ -192,8 +204,8 @@ def test_extracts_digital_stand_in_correction_as_procedural_memory_candidate():
     assert "程序性记忆" in c.target_path
 
 
-def test_extracts_creative_target_function_from_writing_taste():
-    pipeline = MemoryWritePipeline(config={"mode": "shadow"})
+def test_extracts_creative_target_function_from_writing_taste(shadow_pipeline_config):
+    pipeline = MemoryWritePipeline(config=shadow_pipeline_config)
     reflection = pipeline.reflect_and_extract(
         "我觉得低频心跳的小说写作应该避免 AI 味，要有普通生活细节的重量和漫画质感。",
         "",
@@ -233,8 +245,8 @@ def test_extracts_tool_credential_route_without_auto_writing_secret_route(tmp_pa
     assert graph.calls == []
 
 
-def test_extracts_exam_context_for_future_recall():
-    pipeline = MemoryWritePipeline(config={"mode": "shadow"})
+def test_extracts_exam_context_for_future_recall(shadow_pipeline_config):
+    pipeline = MemoryWritePipeline(config=shadow_pipeline_config)
     reflection = pipeline.reflect_and_extract(
         "我下周要考试，这是时间表和考试范围，帮我按 DSE 科目安排复习。",
         "",
@@ -245,7 +257,7 @@ def test_extracts_exam_context_for_future_recall():
 
 
 
-def test_model_semantic_classifier_is_config_gated_shadow_only():
+def test_model_semantic_classifier_is_config_gated_shadow_only(shadow_pipeline_config):
     def model(_prompt):
         return {
             'memory_kind': 'creative_preference',
@@ -260,7 +272,7 @@ def test_model_semantic_classifier_is_config_gated_shadow_only():
             'reject_gate': 'Reject generic prose.',
             'reason': 'explicit preference',
         }
-    pipeline = MemoryWritePipeline(config={"mode":"shadow", "semantic_classifier":{"model_enabled": True, "model_callable": model}})
+    pipeline = MemoryWritePipeline(config={**shadow_pipeline_config, "semantic_classifier":{"model_enabled": True, "model_callable": model}})
     reflection = pipeline.reflect_and_extract('Any multilingual phrasing should use the model path.', '')
     assert any(c.subject == 'creative_target_function' for c in reflection['candidates'])
     c = next(c for c in reflection['candidates'] if c.subject == 'creative_target_function')

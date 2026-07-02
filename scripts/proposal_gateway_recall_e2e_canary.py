@@ -29,8 +29,27 @@ QUEUE = ROOT / ".hermes" / "logs" / "memory_review_queue" / "review_proposals.cu
 OUT_DIR = ROOT / ".hermes" / "tasks" / "digital-brain-99-baselines"
 API_BASE = "http://127.0.0.1:8233"
 GATEWAY_URL = "http://127.0.0.1:8642/v1/chat/completions"
-NAMESPACE = os.environ.get("MEMORY_OS_E2E_NAMESPACE", "test-namespace")
-SESSION_KEY = os.environ.get("MEMORY_OS_E2E_SESSION_KEY", "agent:main:test:dm:test-user")
+def _default_namespace() -> str:
+    """Use the same namespace the API gateway assigns for this host by default.
+
+    A cross-namespace default makes the canary fail when isolation is working,
+    which is the opposite of what this end-to-end recall check is meant to test.
+    """
+    try:
+        cfg = yaml.safe_load((ROOT / ".hermes" / "config.yaml").read_text(encoding="utf-8")) or {}
+        user_id = str(cfg.get("default_terminal_user") or "").strip()
+        if user_id:
+            return f"telegram:{user_id}"
+    except Exception:
+        pass
+    raise RuntimeError(
+        "Cannot determine E2E namespace; set MEMORY_OS_E2E_NAMESPACE or "
+        "configure default_terminal_user"
+    )
+
+
+NAMESPACE = os.environ.get("MEMORY_OS_E2E_NAMESPACE") or _default_namespace()
+SESSION_KEY = os.environ.get("MEMORY_OS_E2E_SESSION_KEY") or f"agent:api_server:{NAMESPACE}:dm:memory-os-e2e"
 
 
 def _run(cmd: list[str], *, cwd: str | None = None, timeout: int = 180) -> str:
@@ -120,10 +139,13 @@ def _approve(proposal_id: str) -> dict:
         raise RuntimeError(f"approve HTTP {exc.code}: {body[:2000]}") from exc
 
 
-def _gateway_chat(prompt: str, expected_code: str, session_id: str) -> dict:
+def _gateway_chat(prompt: str, expected_code: str, session_id: str, namespace: str) -> dict:
     payload = {
         "model": "hermes-agent",
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [
+            {"role": "system", "content": f"Use only memory for namespace {namespace}. Return one exact GW-ANCHOR-* token or UNKNOWN."},
+            {"role": "user", "content": prompt},
+        ],
         "temperature": 0,
         "stream": False,
     }
@@ -198,6 +220,7 @@ def main() -> int:
     probes = []
     cleanup = None
     status = "fail"
+    exact_hits = 0
     try:
         approved = _approve(canary["proposal_id"])
         verification = approved.get("verification") or {}
@@ -209,7 +232,7 @@ def main() -> int:
             'If no such code is visible, answer UNKNOWN.'
         )
         for suffix in ('a', 'b', 'c'):
-            probe = _gateway_chat(gateway_prompt, canary["code"], f"api-approved-gateway-recall-{int(time.time())}{suffix}")
+            probe = _gateway_chat(gateway_prompt, canary["code"], f"api-approved-gateway-recall-{int(time.time())}{suffix}", NAMESPACE)
             probes.append(probe)
         exact_hits = sum(1 for p in probes if p.get("ok") is True)
         if exact_hits < 2:
