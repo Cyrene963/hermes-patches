@@ -95,6 +95,3 @@ CREATE TABLE IF NOT EXISTS mg_snapshots (
 );
 CREATE INDEX IF NOT EXISTS ix_mg_snapshots_ns ON mg_snapshots(namespace);
 CREATE INDEX IF NOT EXISTS ix_mg_snapshots_node ON mg_snapshots(node_uuid);
-
--- Ensure root node exists
-INSERT INTO mg_nodes (uuid) VALUES ('00000000-0000-0000-0000-000000000000') ON CONFLICT DO NOTHING;

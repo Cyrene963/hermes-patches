@@ -2532,7 +2532,7 @@ new file mode 100644
 index 000000000..34ab4cc1f
 --- /dev/null
 +++ b/agent/memory_graph/db/__init__.py
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,176 @@
 +"""Database session management for Memory Graph.
 +
 +Provides async SQLAlchemy session factory using PostgreSQL.
@@ -2676,15 +2676,10 @@ index 000000000..34ab4cc1f
 +        from .models import Base as ModelBase
 +        await conn.run_sync(ModelBase.metadata.create_all)
 +
-+    # Ensure root node exists
-+    async with _session_factory() as session:
-+        from .models import ROOT_NODE_UUID, Node
-+        from sqlalchemy import select
-+        result = await session.execute(select(Node).where(Node.uuid == ROOT_NODE_UUID))
-+        if result.scalar_one_or_none() is None:
-+            session.add(Node(uuid=ROOT_NODE_UUID))
-+            await session.commit()
-+            logger.info("Created root node %s", ROOT_NODE_UUID)
++    # The zero UUID is a sentinel root identifier used by queries and tool logic.
++    # Do not materialize it as a real row in mg_nodes under RLS-protected storage.
++    # Keep initialization fully side-effect free: table creation only. The root
++    # UUID is resolved logically by services and must never be inserted here.
 +
 +    logger.info("Memory Graph DB initialized: %s", url.split("@")[-1] if "@" in url else url)
 +
@@ -2718,7 +2713,7 @@ new file mode 100644
 index 000000000..12ef10430
 --- /dev/null
 +++ b/agent/memory_graph/db/init.sql
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,97 @@
 +-- Memory Graph schema initialization
 +-- Run against your PostgreSQL database (e.g., hindsight)
 +
@@ -2816,9 +2811,6 @@ index 000000000..12ef10430
 +);
 +CREATE INDEX IF NOT EXISTS ix_mg_snapshots_ns ON mg_snapshots(namespace);
 +CREATE INDEX IF NOT EXISTS ix_mg_snapshots_node ON mg_snapshots(node_uuid);
-+
-+-- Ensure root node exists
-+INSERT INTO mg_nodes (uuid) VALUES ('00000000-0000-0000-0000-000000000000') ON CONFLICT DO NOTHING;
 diff --git a/agent/memory_graph/db/models.py b/agent/memory_graph/db/models.py
 new file mode 100644
 index 000000000..6493e9965
