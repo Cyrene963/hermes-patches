@@ -238,6 +238,7 @@ class TestConfig:
         # aggregate facts that often crowd out concrete-event signal during
         # auto-recall. Users opt back in via the recall_types config key.
         assert provider._recall_types == ["observation"]
+        assert provider._tool_recall_types is None
         assert provider._bank_mission == ""
         assert provider._bank_retain_mission is None
         assert provider._retain_context == "conversation between Hermes Agent and the User"
@@ -249,6 +250,12 @@ class TestConfig:
     def test_recall_types_explicit_list_overrides_default(self, provider_with_config):
         p = provider_with_config(recall_types=["world", "experience", "observation"])
         assert p._recall_types == ["world", "experience", "observation"]
+        assert p._tool_recall_types is None
+
+    def test_tool_recall_types_explicit_list_filters_tool_recall(self, provider_with_config):
+        p = provider_with_config(tool_recall_types=["world", "experience"])
+        assert p._recall_types == ["observation"]
+        assert p._tool_recall_types == ["world", "experience"]
 
     def test_recall_types_csv_string_accepted(self, provider_with_config):
         """For parity with recall_tags, comma-separated strings work too."""
@@ -558,8 +565,14 @@ class TestToolHandlers:
         assert call_kwargs["tags"] == ["tag1"]
         assert call_kwargs["tags_match"] == "all"
 
-    def test_recall_passes_types(self, provider_with_config):
-        p = provider_with_config(recall_types=["world", "experience"])
+    def test_tool_recall_omits_types_by_default_even_when_auto_recall_filters(self, provider):
+        assert provider._recall_types == ["observation"]
+        provider.handle_tool_call("hindsight_recall", {"query": "test"})
+        call_kwargs = provider._client.arecall.call_args.kwargs
+        assert "types" not in call_kwargs
+
+    def test_recall_passes_types_when_tool_recall_types_configured(self, provider_with_config):
+        p = provider_with_config(tool_recall_types=["world", "experience"])
         p.handle_tool_call("hindsight_recall", {"query": "test"})
         call_kwargs = p._client.arecall.call_args.kwargs
         assert call_kwargs["types"] == ["world", "experience"]

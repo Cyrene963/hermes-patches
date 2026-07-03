@@ -609,6 +609,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._auto_recall = True
         self._recall_max_tokens = 4096
         self._recall_types: list[str] | None = None
+        self._tool_recall_types: list[str] | None = None
         self._recall_prompt_preamble = ""
         self._recall_max_input_chars = 800
 
@@ -1230,6 +1231,10 @@ class HindsightMemoryProvider(MemoryProvider):
         if isinstance(recall_types, str):
             recall_types = [item.strip() for item in recall_types.split(",") if item.strip()]
         self._recall_types = recall_types or ["observation"]
+        tool_recall_types = self._config.get("tool_recall_types")
+        if isinstance(tool_recall_types, str):
+            tool_recall_types = [item.strip() for item in tool_recall_types.split(",") if item.strip()]
+        self._tool_recall_types = tool_recall_types or None
         self._recall_prompt_preamble = self._config.get("recall_prompt_preamble", "")
         self._recall_max_input_chars = int(self._config.get("recall_max_input_chars", 800))
         self._retain_async = self._config.get("retain_async", True)
@@ -1812,8 +1817,8 @@ class HindsightMemoryProvider(MemoryProvider):
                 if self._recall_tags:
                     recall_kwargs["tags"] = self._recall_tags
                     recall_kwargs["tags_match"] = self._recall_tags_match
-                if self._recall_types:
-                    recall_kwargs["types"] = self._recall_types
+                if self._tool_recall_types:
+                    recall_kwargs["types"] = self._tool_recall_types
                 logger.debug("Tool hindsight_recall: bank=%s, query_len=%d, budget=%s",
                              self._bank_id, len(query), self._budget)
                 resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
