@@ -1,0 +1,29 @@
+diff --git a/tests/agent/test_memory_fact_classifier.py b/tests/agent/test_memory_fact_classifier.py
+index 0f4ac1b..9d3285a 100644
+--- a/tests/agent/test_memory_fact_classifier.py
++++ b/tests/agent/test_memory_fact_classifier.py
+@@ -6,7 +6,24 @@ import os
+ import sys
+ import types
+ 
++import pytest
++
+ _HERE = os.path.dirname(__file__)
++
++
++@pytest.fixture(autouse=True)
++def _restore_agent_modules():
++    original_agent = sys.modules.get("agent")
++    original_aux = sys.modules.get("agent.auxiliary_client")
++    yield
++    if original_agent is None:
++        sys.modules.pop("agent", None)
++    else:
++        sys.modules["agent"] = original_agent
++    if original_aux is None:
++        sys.modules.pop("agent.auxiliary_client", None)
++    else:
++        sys.modules["agent.auxiliary_client"] = original_aux
+ 
+ 
+ def _load():

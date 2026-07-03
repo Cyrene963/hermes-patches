@@ -201,6 +201,23 @@ class TestRegistryOwnedToolsets:
         assert get_toolset("test-live-toolset")["tools"] == ["test_live_toolset_tool"]
         assert resolve_toolset("test-live-toolset") == ["test_live_toolset_tool"]
 
+    def test_static_resolution_excludes_registry_membership(self, monkeypatch):
+        reg = ToolRegistry()
+        reg.register(
+            name="test_live_terminal_tool",
+            toolset="terminal",
+            schema=_make_schema("test_live_terminal_tool", "Live terminal"),
+            handler=_dummy_handler,
+        )
+
+        monkeypatch.setattr("tools.registry.registry", reg)
+
+        assert "test_live_terminal_tool" in resolve_toolset("terminal")
+        assert "test_live_terminal_tool" not in resolve_toolset(
+            "terminal",
+            include_registry=False,
+        )
+
 
 class TestToolsetConsistency:
     """Verify structural integrity of the built-in TOOLSETS dict."""

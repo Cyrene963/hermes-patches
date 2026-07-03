@@ -149,7 +149,20 @@ def _tokens(text: str) -> set[str]:
     latin = set(re.findall(r"[a-z0-9_+-]{3,}", raw))
     cjk_terms = set(re.findall(r"[\u4e00-\u9fff]{2,}", raw))
     cjk_chars = set(re.findall(r"[\u4e00-\u9fff]", raw))
-    return latin | cjk_terms | cjk_chars
+    tokens = latin | cjk_terms | cjk_chars
+    # Compact bilingual aliases for common memory-clarification queries.  This
+    # keeps candidates discoverable when the stored fact is English but the user
+    # asks with Chinese operational vocabulary, without broad fuzzy matching.
+    alias_groups = [
+        {"credential", "credentials", "凭据", "密钥", "token", "令牌", "api_key", "key"},
+        {"config", "configuration", "配置", "设置"},
+        {"claude", "claude-code", "claude_code"},
+        {"login", "logged", "logged-in", "not", "登录"},
+    ]
+    for group in alias_groups:
+        if tokens & group:
+            tokens |= group
+    return tokens
 
 
 def _load_pending(path: Path) -> list[dict[str, Any]]:

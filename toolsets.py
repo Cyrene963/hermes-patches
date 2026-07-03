@@ -628,7 +628,12 @@ def get_toolset(name: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def resolve_toolset(name: str, visited: Set[str] = None) -> List[str]:
+def resolve_toolset(
+    name: str,
+    visited: Optional[Set[str]] = None,
+    *,
+    include_registry: bool = True,
+) -> List[str]:
     """
     Recursively resolve a toolset to get all tool names.
     
@@ -638,6 +643,8 @@ def resolve_toolset(name: str, visited: Set[str] = None) -> List[str]:
     Args:
         name (str): Name of the toolset to resolve
         visited (Set[str]): Set of already visited toolsets (for cycle detection)
+        include_registry (bool): When False, resolve only static TOOLSETS
+            membership and ignore live registry/plugin additions.
         
     Returns:
         List[str]: List of all tool names in the toolset
@@ -651,7 +658,11 @@ def resolve_toolset(name: str, visited: Set[str] = None) -> List[str]:
         all_tools: Set[str] = set()
         for toolset_name in get_toolset_names():
             # Use a fresh visited set per branch to avoid cross-branch contamination
-            resolved = resolve_toolset(toolset_name, visited.copy())
+            resolved = resolve_toolset(
+                toolset_name,
+                visited.copy(),
+                include_registry=include_registry,
+            )
             all_tools.update(resolved)
         return sorted(all_tools)
 
@@ -664,12 +675,12 @@ def resolve_toolset(name: str, visited: Set[str] = None) -> List[str]:
     visited.add(name)
 
     # Get toolset definition
-    toolset = get_toolset(name)
+    toolset = get_toolset(name) if include_registry else TOOLSETS.get(name)
     if not toolset:
         # Auto-generate a toolset for plugin platforms (hermes-<name>).
         # Gives them _HERMES_CORE_TOOLS plus any tools the plugin registered
         # into a toolset matching the platform name.
-        if name.startswith("hermes-"):
+        if include_registry and name.startswith("hermes-"):
             platform_name = name[len("hermes-"):]
             try:
                 from gateway.platform_registry import platform_registry
@@ -696,7 +707,11 @@ def resolve_toolset(name: str, visited: Set[str] = None) -> List[str]:
     # sibling includes so diamond dependencies are only resolved once and
     # cycle warnings don't fire multiple times for the same cycle.
     for included_name in toolset.get("includes", []):
-        included_tools = resolve_toolset(included_name, visited)
+        included_tools = resolve_toolset(
+            included_name,
+            visited,
+            include_registry=include_registry,
+        )
         tools.update(included_tools)
     
     return sorted(tools)

@@ -177,7 +177,7 @@ fi
 # Fast-moving core ABI files are intentionally excluded from the default copy
 # path unless they are known-rebased. A stale copy can pass py_compile while
 # breaking imports/call signatures added upstream.
-for module in memory_metacognition.py memory_semantic_classifier.py memory_review_proposals.py memory_write_filters.py memory_write_pipeline.py memory_clarification_queue.py shadow_write_logger.py hindsight_access_tracker.py hindsight_reranker.py request_context.py skill_router.py prompt_builder.py conversation_loop.py tool_executor.py system_prompt.py agent_runtime_helpers.py auto_store_heuristic.py memory_auto_hooks.py; do
+for module in memory_metacognition.py memory_semantic_classifier.py memory_review_proposals.py memory_write_filters.py memory_write_pipeline.py memory_clarification_queue.py memory_distiller.py memory_fact_classifier.py memory_write_earn.py shadow_write_logger.py hindsight_access_tracker.py hindsight_reranker.py request_context.py skill_router.py prompt_builder.py conversation_loop.py tool_executor.py system_prompt.py agent_runtime_helpers.py auto_store_heuristic.py memory_auto_hooks.py; do
     if [ -f "$PATCHES_DIR/agent/$module" ]; then
         cp "$PATCHES_DIR/agent/$module" "$HERMES_DIR/agent/"
         echo "   ✅ agent/$module 已复制"
@@ -217,9 +217,10 @@ for tool_file in memory_graph_tool.py session_search_tool.py image_generation_to
         echo "   ✅ tools/$tool_file 已复制"
     fi
 done
+
+# 3. Copy tools and stable DB/session extension files
 if [ -f "$PATCHES_DIR/hermes_state.py" ]; then
-    cp "$PATCHES_DIR/hermes_state.py" "$HERMES_DIR/hermes_state.py"
-    echo "   ✅ hermes_state.py 已复制"
+    echo "   ℹ️ hermes_state.py full-file overlay skipped; session DB fixes must use targeted patches to avoid schema/API rollback"
 fi
 if [ -f "$PATCHES_DIR/toolsets.py" ]; then
     cp "$PATCHES_DIR/toolsets.py" "$HERMES_DIR/toolsets.py"
