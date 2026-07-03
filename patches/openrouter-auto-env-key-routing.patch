@@ -1,0 +1,34 @@
+diff --git a/hermes_cli/auth.py b/hermes_cli/auth.py
+index 3547bb8..b4bedbf 100644
+--- a/hermes_cli/auth.py
++++ b/hermes_cli/auth.py
+@@ -1588,7 +1588,7 @@ def resolve_provider(
+     stale logged-in OAuth provider (#29285):
+     1. Explicit CLI api_key/base_url -> "openrouter"
+     2. config.yaml `model.provider`
+-    3. OPENAI_API_KEY / OPENROUTER_API_KEY env vars -> "openrouter"
++    3. OPENROUTER_API_KEY env var -> "openrouter"
+     4. OpenRouter credential pool
+     5. Provider-specific API keys (GLM, Kimi, MiniMax, ...) -> that provider
+     6. auth.json `active_provider` (logged-in OAuth) — last-resort fallback
+@@ -1686,16 +1686,16 @@ def resolve_provider(
+     except Exception as e:
+         logger.debug("Could not read config.yaml model.provider for auto-resolution: %s", e)
+ 
+-    if has_usable_secret(os.getenv("OPENAI_API_KEY")) or has_usable_secret(os.getenv("OPENROUTER_API_KEY")):
++    if has_usable_secret(os.getenv("OPENROUTER_API_KEY")):
+         return "openrouter"
+ 
+     # Auto-detect an OpenRouter credential added via `hermes auth add openrouter`
+     # (manual pool entry, no env var). Without this, a key that only lives in
+     # the credential pool is invisible to auto-detection — the user sees
+     # `hermes auth list` showing the credential while requests go out with no
+-    # Authorization header ("HTTP 401: Missing Authentication header"). The
+-    # env-var check above only covers keys exported as OPENROUTER_API_KEY /
+-    # OPENAI_API_KEY. See issue #42130.
++    # Authorization header ("HTTP 401: Missing Authentication header").
++    # The env-var check above only covers keys exported as OPENROUTER_API_KEY.
++    # See issue #42130.
+     try:
+         from agent.credential_pool import load_pool as _load_pool
+ 

@@ -1,0 +1,249 @@
+diff --git a/hermes_cli/kanban.py b/hermes_cli/kanban.py
+index 31c4bf68a..ddcc50316 100644
+--- a/hermes_cli/kanban.py
++++ b/hermes_cli/kanban.py
+@@ -491,6 +491,19 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
+         help="Emit JSON (structured) instead of the default human table",
+     )
+ 
++    # --- workflow ---
++    p_workflow = sub.add_parser(
++        "workflow",
++        help="Show a workflow control-plane snapshot (task tree, progress, gates)",
++    )
++    p_workflow.add_argument(
++        "root_task_id",
++        nargs="?",
++        default=None,
++        help="Root task id. Omit to summarize the whole board.",
++    )
++    p_workflow.add_argument("--json", action="store_true", help="Emit JSON output")
++
+     # --- link / unlink ---
+     p_link = sub.add_parser("link", help="Add a parent->child dependency")
+     p_link.add_argument("parent_id")
+@@ -932,6 +945,7 @@ def kanban_command(args: argparse.Namespace) -> int:
+             "reassign": _cmd_reassign,
+             "diagnostics": _cmd_diagnostics,
+             "diag":     _cmd_diagnostics,
++            "workflow": _cmd_workflow,
+             "link":     _cmd_link,
+             "unlink":   _cmd_unlink,
+             "claim":    _cmd_claim,
+@@ -1796,6 +1810,39 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
+     return 0
+ 
+ 
++def _print_workflow_node(node: dict[str, Any], *, depth: int = 0) -> None:
++    indent = "  " * depth
++    icon = _STATUS_ICONS.get(node.get("status"), "?")
++    assignee = node.get("assignee") or "(unassigned)"
++    step = f" step={node['current_step_key']}" if node.get("current_step_key") else ""
++    print(f"{indent}{icon} {node['id']}  {node['status']}  {assignee}{step}  {node['title']}")
++    for child in node.get("children", []):
++        _print_workflow_node(child, depth=depth + 1)
++
++
++def _cmd_workflow(args: argparse.Namespace) -> int:
++    with kb.connect_closing() as conn:
++        snapshot = kb.workflow_snapshot(conn, getattr(args, "root_task_id", None))
++    if getattr(args, "json", False):
++        print(json.dumps(snapshot, indent=2, ensure_ascii=False))
++        return 0
++    print("Workflow control plane")
++    print(f"Tasks: {snapshot['total_tasks']}  Progress: {snapshot['progress_percent']}%")
++    status = ", ".join(
++        f"{key}={value}" for key, value in sorted(snapshot.get("by_status", {}).items())
++    ) or "none"
++    print(f"Status: {status}")
++    steps = ", ".join(
++        f"{key}={value}" for key, value in sorted(snapshot.get("by_step", {}).items())
++    )
++    if steps:
++        print(f"Steps: {steps}")
++    print()
++    for root in snapshot.get("roots", []):
++        _print_workflow_node(root)
++    return 0
++
++
+ def _cmd_link(args: argparse.Namespace) -> int:
+     with kb.connect_closing() as conn:
+         kb.link_tasks(conn, args.parent_id, args.child_id)
+diff --git a/hermes_cli/kanban_db.py b/hermes_cli/kanban_db.py
+index c8c53dba7..1e3c123c8 100644
+--- a/hermes_cli/kanban_db.py
++++ b/hermes_cli/kanban_db.py
+@@ -2500,6 +2500,125 @@ def child_ids(conn: sqlite3.Connection, task_id: str) -> list[str]:
+     return [r["child_id"] for r in rows]
+ 
+ 
++def workflow_snapshot(
++    conn: sqlite3.Connection,
++    root_task_id: Optional[str] = None,
++) -> dict[str, Any]:
++    """Return a read-only workflow control-plane snapshot for a board/tree.
++
++    The snapshot intentionally reuses the existing Kanban schema: task rows are
++    the durable state, task_links are the task tree, task_runs are execution
++    attempts, and task_events are progress/audit signals.  No new scheduler or
++    side table is required for the first workflow-control-plane surface.
++    """
++    tasks = list_tasks(conn, include_archived=True)
++    task_by_id = {task.id: task for task in tasks}
++    if root_task_id is not None and root_task_id not in task_by_id:
++        raise ValueError(f"unknown task {root_task_id}")
++
++    edge_rows = conn.execute(
++        "SELECT parent_id, child_id FROM task_links ORDER BY parent_id, child_id"
++    ).fetchall()
++    children: dict[str, list[str]] = {task.id: [] for task in tasks}
++    parents: dict[str, list[str]] = {task.id: [] for task in tasks}
++    for row in edge_rows:
++        parent = row["parent_id"]
++        child = row["child_id"]
++        if parent in task_by_id and child in task_by_id:
++            children.setdefault(parent, []).append(child)
++            parents.setdefault(child, []).append(parent)
++
++    if root_task_id is None:
++        selected_ids = set(task_by_id)
++        roots = [task.id for task in tasks if not parents.get(task.id)]
++    else:
++        selected_ids = set()
++        stack = [root_task_id]
++        while stack:
++            task_id = stack.pop()
++            if task_id in selected_ids:
++                continue
++            selected_ids.add(task_id)
++            stack.extend(reversed(children.get(task_id, [])))
++        roots = [root_task_id]
++
++    selected_tasks = [task_by_id[task_id] for task_id in selected_ids]
++    by_status = {status: 0 for status in sorted(VALID_STATUSES)}
++    by_assignee: dict[str, dict[str, int]] = {}
++    by_step: dict[str, int] = {}
++    for task in selected_tasks:
++        by_status[task.status] = by_status.get(task.status, 0) + 1
++        assignee = task.assignee or "(unassigned)"
++        by_assignee.setdefault(assignee, {})[task.status] = (
++            by_assignee.setdefault(assignee, {}).get(task.status, 0) + 1
++        )
++        if task.current_step_key:
++            by_step[task.current_step_key] = by_step.get(task.current_step_key, 0) + 1
++
++    total = len(selected_tasks)
++    done = by_status.get("done", 0) + by_status.get("archived", 0)
++    progress_percent = round((done / total) * 100, 1) if total else 0.0
++
++    run_rows = conn.execute(
++        """
++        SELECT task_id, status, outcome, COUNT(*) AS n
++          FROM task_runs
++         WHERE task_id IN ({})
++         GROUP BY task_id, status, outcome
++        """.format(",".join("?" for _ in selected_ids) or "NULL"),
++        tuple(selected_ids),
++    ).fetchall() if selected_ids else []
++    runs_by_task: dict[str, list[dict[str, Any]]] = {}
++    for row in run_rows:
++        runs_by_task.setdefault(row["task_id"], []).append({
++            "status": row["status"],
++            "outcome": row["outcome"],
++            "count": int(row["n"]),
++        })
++
++    event_rows = conn.execute(
++        """
++        SELECT task_id, kind, COUNT(*) AS n, MAX(created_at) AS latest_at
++          FROM task_events
++         WHERE task_id IN ({})
++         GROUP BY task_id, kind
++        """.format(",".join("?" for _ in selected_ids) or "NULL"),
++        tuple(selected_ids),
++    ).fetchall() if selected_ids else []
++    events_by_task: dict[str, list[dict[str, Any]]] = {}
++    for row in event_rows:
++        events_by_task.setdefault(row["task_id"], []).append({
++            "kind": row["kind"],
++            "count": int(row["n"]),
++            "latest_at": row["latest_at"],
++        })
++
++    def node(task_id: str) -> dict[str, Any]:
++        task = task_by_id[task_id]
++        return {
++            "id": task.id,
++            "title": task.title,
++            "status": task.status,
++            "assignee": task.assignee,
++            "priority": task.priority,
++            "workflow_template_id": task.workflow_template_id,
++            "current_step_key": task.current_step_key,
++            "children": [node(child) for child in children.get(task_id, []) if child in selected_ids],
++            "runs": runs_by_task.get(task_id, []),
++            "events": events_by_task.get(task_id, []),
++        }
++
++    return {
++        "root_task_id": root_task_id,
++        "total_tasks": total,
++        "progress_percent": progress_percent,
++        "by_status": {k: v for k, v in by_status.items() if v},
++        "by_assignee": by_assignee,
++        "by_step": by_step,
++        "roots": [node(root) for root in roots if root in selected_ids],
++    }
++
++
+ def parent_results(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, Optional[str]]]:
+     """Return ``(parent_id, result)`` for every done parent of ``task_id``."""
+     rows = conn.execute(
+diff --git a/tests/hermes_cli/test_kanban_core_functionality.py b/tests/hermes_cli/test_kanban_core_functionality.py
+index 5d3cac126..364eea696 100644
+--- a/tests/hermes_cli/test_kanban_core_functionality.py
++++ b/tests/hermes_cli/test_kanban_core_functionality.py
+@@ -517,6 +517,42 @@ def test_task_age_helper(kanban_home):
+         conn.close()
+ 
+ 
++def test_workflow_snapshot_builds_task_tree_and_progress(kanban_home):
++    conn = kb.connect()
++    try:
++        root = kb.create_task(conn, title="ship workflow", assignee="lead")
++        child_a = kb.create_task(conn, title="research", assignee="worker-a", parents=[root])
++        child_b = kb.create_task(conn, title="verify", assignee="worker-b", parents=[root])
++        kb.complete_task(conn, root, result="root ready")
++        kb.complete_task(conn, child_a, result="researched")
++        snapshot = kb.workflow_snapshot(conn, root)
++    finally:
++        conn.close()
++
++    assert snapshot["root_task_id"] == root
++    assert snapshot["total_tasks"] == 3
++    assert snapshot["by_status"]["done"] == 2
++    assert snapshot["by_status"]["ready"] == 1
++    assert snapshot["progress_percent"] == 66.7
++    assert snapshot["roots"][0]["id"] == root
++    assert {child["id"] for child in snapshot["roots"][0]["children"]} == {child_a, child_b}
++
++
++def test_cli_workflow_json(kanban_home):
++    conn = kb.connect()
++    try:
++        root = kb.create_task(conn, title="root", assignee="lead")
++        child = kb.create_task(conn, title="child", assignee="worker", parents=[root])
++    finally:
++        conn.close()
++
++    out = run_slash(f"workflow {root} --json")
++    data = json.loads(out)
++    assert data["root_task_id"] == root
++    assert data["total_tasks"] == 2
++    assert data["roots"][0]["children"][0]["id"] == child
++
++
+ # ---------------------------------------------------------------------------
+ # Notify subscriptions
+ # ---------------------------------------------------------------------------

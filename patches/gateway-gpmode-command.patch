@@ -1,0 +1,279 @@
+diff --git a/gateway/group_mode.py b/gateway/group_mode.py
+new file mode 100644
+index 0000000..f9ee199
+--- /dev/null
++++ b/gateway/group_mode.py
+@@ -0,0 +1,107 @@
++"""Persistent per-chat group reply mode for messaging gateways."""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++from typing import Any
++
++VALID_GROUP_MODES = frozenset({"mention", "free", "auto"})
++DEFAULT_GROUP_MODE = "config"
++
++
++def _state_path(hermes_home: Path) -> Path:
++    return Path(hermes_home) / "gateway_group_modes.json"
++
++
++def normalize_group_mode(value: Any) -> str | None:
++    text = str(value or "").strip().lower().replace("_", "-")
++    aliases = {
++        "status": "status",
++        "show": "status",
++        "strict": "mention",
++        "mentions": "mention",
++        "mention-only": "mention",
++        "at": "mention",
++        "@": "mention",
++        "on-mention": "mention",
++        "free-response": "free",
++        "free-response-chats": "free",
++        "always": "free",
++        "all": "free",
++        "open": "free",
++        "smart": "auto",
++        "auto-reply": "auto",
++        "autonomous": "auto",
++    }
++    text = aliases.get(text, text)
++    if text in VALID_GROUP_MODES or text == "status":
++        return text
++    return None
++
++
++def group_mode_key(platform: str, chat_id: str, thread_id: str | None = None) -> str:
++    base = f"{str(platform or '').strip().lower()}:{str(chat_id or '').strip()}"
++    thread = str(thread_id or "").strip()
++    if thread:
++        return f"{base}:{thread}"
++    return base
++
++
++def _load_state(hermes_home: Path) -> dict[str, str]:
++    path = _state_path(hermes_home)
++    try:
++        raw = json.loads(path.read_text())
++    except FileNotFoundError:
++        return {}
++    except Exception:
++        return {}
++    if not isinstance(raw, dict):
++        return {}
++    modes: dict[str, str] = {}
++    for key, value in raw.items():
++        mode = normalize_group_mode(value)
++        if mode in VALID_GROUP_MODES:
++            modes[str(key)] = mode
++    return modes
++
++
++def _write_state(hermes_home: Path, modes: dict[str, str]) -> None:
++    path = _state_path(hermes_home)
++    path.parent.mkdir(parents=True, exist_ok=True)
++    tmp = path.with_suffix(path.suffix + ".tmp")
++    tmp.write_text(json.dumps(modes, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
++    tmp.replace(path)
++
++
++def get_group_mode(
++    hermes_home: Path,
++    *,
++    platform: str,
++    chat_id: str,
++    thread_id: str | None = None,
++    default: str = DEFAULT_GROUP_MODE,
++) -> str:
++    modes = _load_state(hermes_home)
++    key = group_mode_key(platform, chat_id, thread_id)
++    if key in modes:
++        return modes[key]
++    chat_key = group_mode_key(platform, chat_id)
++    return modes.get(chat_key, default)
++
++
++def set_group_mode(
++    hermes_home: Path,
++    *,
++    platform: str,
++    chat_id: str,
++    mode: str,
++    thread_id: str | None = None,
++) -> str:
++    normalized = normalize_group_mode(mode)
++    if normalized not in VALID_GROUP_MODES:
++        raise ValueError(f"Invalid group mode: {mode!r}")
++    modes = _load_state(hermes_home)
++    modes[group_mode_key(platform, chat_id, thread_id)] = normalized
++    _write_state(hermes_home, modes)
++    return normalized
+diff --git a/gateway/run.py b/gateway/run.py
+index 646a485..7b60d02 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -8929,6 +8929,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+             if _cmd_def_inner and _cmd_def_inner.name == "restart":
+                 return await self._handle_restart_command(event)
+ 
++            if _cmd_def_inner and _cmd_def_inner.name == "gpmode":
++                return await self._handle_gpmode_command(event)
++
+             # /stop must hard-kill the session when an agent is running.
+             # A soft interrupt (agent.interrupt()) doesn't help when the agent
+             # is truly hung — the executor thread is blocked and never checks
+@@ -9387,6 +9390,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+ 
+         if canonical == "topic":
+             return await self._handle_topic_command(event)
++
++        if canonical == "gpmode":
++            return await self._handle_gpmode_command(event)
+         
+         if canonical == "help":
+             return await self._handle_help_command(event)
+@@ -13661,6 +13667,42 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+         # Text fallback — return the prompt message as the direct reply.
+         return message
+ 
++    async def _handle_gpmode_command(self, event: MessageEvent) -> str:
++        """Handle /gpmode for per-group reply-mode switching."""
++        source = event.source
++        if source.chat_type == "dm":
++            return "`/gpmode` only applies to group/channel/thread chats. DMs always behave like private Hermes sessions."
++        if source.platform != Platform.TELEGRAM:
++            return "`/gpmode` is currently implemented for Telegram groups/topics."
++
++        from gateway.group_mode import get_group_mode, normalize_group_mode, set_group_mode
++
++        raw_args = event.get_command_args().strip()
++        requested = normalize_group_mode(raw_args or "status")
++        thread_id = str(source.thread_id) if source.thread_id else None
++        current = get_group_mode(
++            _hermes_home,
++            platform=source.platform.value,
++            chat_id=str(source.chat_id),
++            thread_id=thread_id,
++        )
++        descriptions = {
++            "mention": "mention-only: reply only to explicit Telegram triggers such as @mention, reply-to-bot, or /cmd@botname; unmentioned group chatter may still be observed if enabled.",
++            "free": "free-response: reply to every allowed group message in this chat/topic.",
++            "auto": "semantic-auto: explicit Telegram triggers always work; otherwise a lightweight semantic classifier decides whether the current message is asking the assistant to respond.",
++        }
++        if requested in {None, "status"}:
++            usage = "Usage: `/gpmode status|mention|free|auto`"
++            return f"Group reply mode: `{current}`\n{descriptions.get(current, '')}\n{usage}"
++        new_mode = set_group_mode(
++            _hermes_home,
++            platform=source.platform.value,
++            chat_id=str(source.chat_id),
++            thread_id=thread_id,
++            mode=requested,
++        )
++        return f"Group reply mode set to `{new_mode}`.\n{descriptions[new_mode]}"
++
+     def _read_user_config(self) -> Dict[str, Any]:
+         """Read the user's raw config.yaml (cached) for gate lookups.
+ 
+diff --git a/hermes_cli/commands.py b/hermes_cli/commands.py
+index 7a8775d..edafb57 100644
+--- a/hermes_cli/commands.py
++++ b/hermes_cli/commands.py
+@@ -69,6 +69,9 @@ COMMAND_REGISTRY: list[CommandDef] = [
+                aliases=("reset",), args_hint="[name]"),
+     CommandDef("topic", "Enable or inspect Telegram DM topic sessions", "Session",
+                gateway_only=True, args_hint="[off|help|session-id]"),
++    CommandDef("gpmode", "Set group reply mode: mention-only, free-response, or smart observe", "Session",
++               gateway_only=True, args_hint="[status|mention|free|auto]",
++               subcommands=("status", "mention", "free", "auto")),
+     CommandDef("clear", "Clear screen and start a new session", "Session",
+                cli_only=True),
+     CommandDef("redraw", "Force a full UI repaint (recovers from terminal drift)", "Session",
+diff --git a/tests/gateway/test_gpmode_command.py b/tests/gateway/test_gpmode_command.py
+new file mode 100644
+index 0000000..ff48255
+--- /dev/null
++++ b/tests/gateway/test_gpmode_command.py
+@@ -0,0 +1,79 @@
++from types import SimpleNamespace
++
++import pytest
++
++from gateway.config import GatewayConfig, Platform, PlatformConfig
++from gateway.platforms.base import MessageEvent
++from gateway.session import SessionSource
++
++
++def _make_group_event(text: str = "/gpmode") -> MessageEvent:
++    return MessageEvent(
++        text=text,
++        source=SessionSource(
++            platform=Platform.TELEGRAM,
++            chat_id="-100",
++            chat_name="Test Group",
++            chat_type="group",
++            user_id="111",
++            user_name="Alice",
++        ),
++        message_id="m1",
++    )
++
++
++def _make_runner():
++    from gateway.run import GatewayRunner
++
++    runner = object.__new__(GatewayRunner)
++    runner.config = GatewayConfig(
++        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="***")}
++    )
++    runner.hooks = SimpleNamespace(loaded_hooks=False)
++    return runner
++
++
++@pytest.mark.asyncio
++async def test_gpmode_command_is_registered():
++    from hermes_cli.commands import resolve_command
++
++    cmd = resolve_command("gpmode")
++    assert cmd is not None
++    assert cmd.gateway_only is True
++
++
++@pytest.mark.asyncio
++async def test_gpmode_command_sets_and_reads_group_mode(monkeypatch, tmp_path):
++    import gateway.run as run_mod
++
++    monkeypatch.setattr(run_mod, "_hermes_home", tmp_path)
++    runner = _make_runner()
++
++    set_reply = await runner._handle_gpmode_command(_make_group_event("/gpmode free"))
++    status_reply = await runner._handle_gpmode_command(_make_group_event("/gpmode status"))
++
++    assert "set to `free`" in set_reply
++    assert "Group reply mode: `free`" in status_reply
++
++
++@pytest.mark.asyncio
++async def test_gpmode_command_rejects_dm(monkeypatch, tmp_path):
++    import gateway.run as run_mod
++
++    monkeypatch.setattr(run_mod, "_hermes_home", tmp_path)
++    runner = _make_runner()
++    event = MessageEvent(
++        text="/gpmode free",
++        source=SessionSource(
++            platform=Platform.TELEGRAM,
++            chat_id="111",
++            chat_type="dm",
++            user_id="111",
++            user_name="Alice",
++        ),
++        message_id="m2",
++    )
++
++    reply = await runner._handle_gpmode_command(event)
++
++    assert "only applies to group" in reply

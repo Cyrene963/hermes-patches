@@ -84,7 +84,7 @@ def test_current_user_message_gets_recalled_memory_context_without_persisting_so
     )
 
     content = api_msg["content"]
-    assert content.startswith("## Recalled Memory Context")
+    assert content.startswith("<memory-context>")
     assert content.rstrip().endswith("What are the student's DSE electives?")
     assert "## Memory Graph Anchors" in content
     assert "student-dse-electives" in content
@@ -170,7 +170,7 @@ def test_run_conversation_final_response_is_anchor_driven():
     request_user_messages = [m for m in captured["messages"] if m.get("role") == "user"]
     assert len(request_user_messages) == 1
     request_content = request_user_messages[0]["content"]
-    assert request_content.startswith("## Recalled Memory Context")
+    assert request_content.startswith("<memory-context>")
     assert request_content.rstrip().endswith("What are the student's DSE electives?")
     assert "## Memory Graph Anchors" in request_content
     assert "Physics, Economics, ICT" in request_content
@@ -213,7 +213,7 @@ def test_run_conversation_without_memory_graph_anchor_returns_sentinel():
     request_user_messages = [m for m in captured["messages"] if m.get("role") == "user"]
     assert len(request_user_messages) == 1
     request_content = request_user_messages[0]["content"]
-    assert request_content.startswith("## Recalled Memory Context")
+    assert request_content.startswith("<memory-context>")
     assert request_content.rstrip().endswith("What are the student's DSE electives?")
     assert "## Hindsight Recall" in request_content
     assert "## Memory Graph Anchors" not in request_content

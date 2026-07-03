@@ -385,6 +385,8 @@ def run_conversation(
     task_id: str = None,
     stream_callback: Optional[callable] = None,
     persist_user_message: Optional[str] = None,
+    persist_user_timestamp: Optional[float] = None,
+    moa_config: Optional[dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Run a complete conversation with tool calling until completion.

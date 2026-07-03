@@ -174,7 +174,10 @@ fi
 # 2. Copy verified Memory OS modules / surgically rebased core hooks.
 # Avoid broad stale full-file overlays (agent_init, auxiliary_client, dashboard,
 # gateway, etc.) unless they have been surgically rebased onto this upstream.
-for module in memory_metacognition.py memory_semantic_classifier.py memory_review_proposals.py memory_write_filters.py memory_write_pipeline.py memory_clarification_queue.py memory_manager.py shadow_write_logger.py hindsight_access_tracker.py hindsight_reranker.py request_context.py skill_router.py prompt_builder.py agent_runtime_helpers.py conversation_loop.py tool_executor.py system_prompt.py agent_init.py auxiliary_client.py auto_store_heuristic.py memory_auto_hooks.py; do
+# Fast-moving core ABI files are intentionally excluded from the default copy
+# path unless they are known-rebased. A stale copy can pass py_compile while
+# breaking imports/call signatures added upstream.
+for module in memory_metacognition.py memory_semantic_classifier.py memory_review_proposals.py memory_write_filters.py memory_write_pipeline.py memory_clarification_queue.py shadow_write_logger.py hindsight_access_tracker.py hindsight_reranker.py request_context.py skill_router.py prompt_builder.py conversation_loop.py tool_executor.py system_prompt.py agent_runtime_helpers.py auto_store_heuristic.py memory_auto_hooks.py; do
     if [ -f "$PATCHES_DIR/agent/$module" ]; then
         cp "$PATCHES_DIR/agent/$module" "$HERMES_DIR/agent/"
         echo "   ✅ agent/$module 已复制"

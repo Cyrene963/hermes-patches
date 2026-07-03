@@ -1,0 +1,196 @@
+diff --git a/agent/transports/chat_completions.py b/agent/transports/chat_completions.py
+index 0c17e309a..69099c1e4 100644
+--- a/agent/transports/chat_completions.py
++++ b/agent/transports/chat_completions.py
+@@ -19,6 +19,32 @@ from agent.transports.base import ProviderTransport
+ from agent.transports.types import NormalizedResponse, ToolCall, Usage
+ 
+ 
++class ChatCompletionsAnomalyError(Exception):
++    """Synthetic provider error for structurally bad chat-completions responses."""
++
++    def __init__(
++        self,
++        message: str,
++        *,
++        code: str = "chat_completions_anomaly",
++        status_code: int = 502,
++        details: Dict[str, Any] | None = None,
++    ) -> None:
++        super().__init__(message)
++        self.message = message
++        self.code = code
++        self.status_code = status_code
++        self.details = details or {}
++        self.body: Dict[str, Any] = {
++            "error": {
++                "message": message,
++                "code": code,
++                "type": "error",
++                "details": self.details,
++            }
++        }
++
++
+ def _build_gemini_thinking_config(model: str, reasoning_config: dict | None) -> dict | None:
+     """Translate Hermes/OpenRouter-style reasoning config to Gemini thinkingConfig."""
+     if reasoning_config is None or not isinstance(reasoning_config, dict):
+@@ -115,6 +141,25 @@ def _model_consumes_thought_signature(model: Any) -> bool:
+     return "gemini" in m or "gemma" in m
+ 
+ 
++def _extract_reasoning_tokens_from_usage(usage: Any) -> int:
++    """Read reasoning token usage across common OpenAI-compatible shapes."""
++    if usage is None:
++        return 0
++    output_details = getattr(usage, "output_tokens_details", None)
++    if output_details is not None:
++        try:
++            return int(getattr(output_details, "reasoning_tokens", 0) or 0)
++        except (TypeError, ValueError):
++            return 0
++    completion_details = getattr(usage, "completion_tokens_details", None)
++    if completion_details is not None:
++        try:
++            return int(getattr(completion_details, "reasoning_tokens", 0) or 0)
++        except (TypeError, ValueError):
++            return 0
++    return 0
++
++
+ class ChatCompletionsTransport(ProviderTransport):
+     """Transport for api_mode='chat_completions'.
+ 
+@@ -683,6 +728,56 @@ class ChatCompletionsTransport(ProviderTransport):
+             return False
+         return True
+ 
++    def detect_retryable_anomaly(self, response: Any) -> ChatCompletionsAnomalyError | None:
++        """Detect 200-level responses that are known-bad and should retry."""
++        if not self.validate_response(response):
++            return None
++        try:
++            choice = response.choices[0]
++            msg = choice.message
++        except Exception:
++            return None
++
++        finish_reason = getattr(choice, "finish_reason", None) or "stop"
++        if finish_reason != "stop":
++            return None
++        if getattr(msg, "tool_calls", None):
++            return None
++
++        content = getattr(msg, "content", None)
++        if isinstance(content, str) and content.strip():
++            return None
++        if content not in (None, ""):
++            return None
++
++        reasoning = getattr(msg, "reasoning", None)
++        reasoning_content = getattr(msg, "reasoning_content", None)
++        if reasoning_content is None and hasattr(msg, "model_extra"):
++            model_extra = getattr(msg, "model_extra", None) or {}
++            if isinstance(model_extra, dict):
++                reasoning_content = model_extra.get("reasoning_content")
++
++        if not reasoning and not reasoning_content:
++            return None
++
++        reasoning_tokens = _extract_reasoning_tokens_from_usage(
++            getattr(response, "usage", None)
++        )
++        if reasoning_tokens != 516:
++            return None
++
++        return ChatCompletionsAnomalyError(
++            "OpenAI-compatible route returned a known-bad reasoning-only response "
++            "(reasoning_tokens=516, no visible content, no tool calls). Retrying.",
++            code="reasoning_tokens_516_anomaly",
++            status_code=502,
++            details={
++                "reasoning_tokens": reasoning_tokens,
++                "finish_reason": finish_reason,
++                "has_reasoning": True,
++            },
++        )
++
+     def extract_cache_stats(self, response: Any) -> dict[str, int] | None:
+         """Extract OpenRouter/OpenAI cache stats from prompt_tokens_details."""
+         usage = getattr(response, "usage", None)
+diff --git a/tests/agent/transports/test_chat_completions.py b/tests/agent/transports/test_chat_completions.py
+index 0b54fe470..c25ed57b4 100644
+--- a/tests/agent/transports/test_chat_completions.py
++++ b/tests/agent/transports/test_chat_completions.py
+@@ -4,6 +4,7 @@ import pytest
+ from types import SimpleNamespace
+ 
+ from agent.transports import get_transport
++from agent.transports.chat_completions import ChatCompletionsAnomalyError
+ from agent.transports.types import NormalizedResponse
+ 
+ 
+@@ -733,6 +734,63 @@ class TestChatCompletionsValidate:
+         r = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="hi"))])
+         assert transport.validate_response(r) is True
+ 
++    def test_detects_reasoning_516_anomaly(self, transport):
++        usage = SimpleNamespace(
++            output_tokens_details=SimpleNamespace(reasoning_tokens=516)
++        )
++        response = SimpleNamespace(
++            choices=[SimpleNamespace(
++                message=SimpleNamespace(
++                    content=None,
++                    tool_calls=None,
++                    reasoning="hidden reasoning",
++                    reasoning_content=None,
++                ),
++                finish_reason="stop",
++            )],
++            usage=usage,
++        )
++        anomaly = transport.detect_retryable_anomaly(response)
++        assert isinstance(anomaly, ChatCompletionsAnomalyError)
++        assert anomaly.status_code == 502
++        assert anomaly.code == "reasoning_tokens_516_anomaly"
++
++    def test_ignores_516_when_visible_content_exists(self, transport):
++        usage = SimpleNamespace(
++            output_tokens_details=SimpleNamespace(reasoning_tokens=516)
++        )
++        response = SimpleNamespace(
++            choices=[SimpleNamespace(
++                message=SimpleNamespace(
++                    content="actual answer",
++                    tool_calls=None,
++                    reasoning="hidden reasoning",
++                    reasoning_content=None,
++                ),
++                finish_reason="stop",
++            )],
++            usage=usage,
++        )
++        assert transport.detect_retryable_anomaly(response) is None
++
++    def test_ignores_non_516_reasoning_only_response(self, transport):
++        usage = SimpleNamespace(
++            output_tokens_details=SimpleNamespace(reasoning_tokens=400)
++        )
++        response = SimpleNamespace(
++            choices=[SimpleNamespace(
++                message=SimpleNamespace(
++                    content=None,
++                    tool_calls=None,
++                    reasoning="hidden reasoning",
++                    reasoning_content=None,
++                ),
++                finish_reason="stop",
++            )],
++            usage=usage,
++        )
++        assert transport.detect_retryable_anomaly(response) is None
++
+ 
+ class TestChatCompletionsNormalize:
+ 
