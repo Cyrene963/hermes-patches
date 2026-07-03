@@ -209,7 +209,7 @@ if [ -d "$PATCHES_DIR/cron" ]; then
     done
 fi
 
-for tool_file in memory_graph_tool.py session_search_tool.py image_generation_tool.py cronjob_tools.py deep_research_tool.py web_tools.py thread_context.py managed_tool_gateway.py; do
+for tool_file in memory_graph_tool.py session_search_tool.py image_generation_tool.py cronjob_tools.py deep_research_tool.py web_tools.py thread_context.py managed_tool_gateway.py telegram_sticker_tool.py; do
     if [ -f "$PATCHES_DIR/tools/$tool_file" ]; then
         cp "$PATCHES_DIR/tools/$tool_file" "$HERMES_DIR/tools/"
         echo "   ✅ tools/$tool_file 已复制"
@@ -222,6 +222,11 @@ fi
 if [ -f "$PATCHES_DIR/toolsets.py" ]; then
     cp "$PATCHES_DIR/toolsets.py" "$HERMES_DIR/toolsets.py"
     echo "   ✅ toolsets.py 已复制"
+fi
+if [ -f "$PATCHES_DIR/gateway/telegram_sticker_library.py" ]; then
+    mkdir -p "$HERMES_DIR/gateway"
+    cp "$PATCHES_DIR/gateway/telegram_sticker_library.py" "$HERMES_DIR/gateway/telegram_sticker_library.py"
+    echo "   ✅ gateway/telegram_sticker_library.py 已复制"
 fi
 
 # Gateway full-file overlays are stale against latest upstream f019a9c49+ and
