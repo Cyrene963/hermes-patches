@@ -181,14 +181,13 @@ for module in memory_metacognition.py memory_semantic_classifier.py memory_revie
     fi
 done
 
-# 2a. Copy surgically rebased Hermes CLI runtime helpers.
-for cli_file in runtime_provider.py; do
-    if [ -f "$PATCHES_DIR/hermes_cli/$cli_file" ]; then
-        mkdir -p "$HERMES_DIR/hermes_cli"
-        cp "$PATCHES_DIR/hermes_cli/$cli_file" "$HERMES_DIR/hermes_cli/"
-        echo "   ✅ hermes_cli/$cli_file 已复制"
-    fi
-done
+# 2a. Runtime-provider changes must be targeted patches, not a full-file overlay.
+# This file changes frequently upstream (custom provider headers, Bedrock,
+# Anthropic URL safety, provider-specific API modes). A stale full-file copy
+# silently rolls back upstream fixes, so install.sh intentionally skips copying
+# hermes_cli/runtime_provider.py here. Keep runtime-provider fixes in
+# individual/*.patch or patches/*.patch where git apply can fail closed.
+echo "   ℹ️ hermes_cli/runtime_provider.py full-file overlay skipped; runtime-provider fixes use targeted patches"
 
 # 2b. Copy Memory Graph package (keeps DB/RLS hardening in sync with patch repo)
 if [ -d "$PATCHES_DIR/agent/memory_graph" ]; then
