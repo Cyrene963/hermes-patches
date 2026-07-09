@@ -678,6 +678,85 @@ class TestPrefetch:
         assert result.startswith("Custom header:")
         assert "- memory line" in result
 
+    def test_aistudio_prefetch_includes_only_owner_user_turns(self, provider_with_config, tmp_path):
+        import sqlite3
+
+        db = tmp_path / "turns.sqlite3"
+        conn = sqlite3.connect(db)
+        conn.executescript("""
+            CREATE TABLE turns (
+                id INTEGER PRIMARY KEY, conversation_id TEXT, conversation_name TEXT,
+                turn_index INTEGER, role TEXT, text TEXT, create_time TEXT,
+                modified_time TEXT, archive_path TEXT, web_view_link TEXT,
+                model TEXT, thinking_like INTEGER
+            );
+            CREATE VIRTUAL TABLE turns_fts USING fts5(
+                conversation_name, text, content='turns', content_rowid='id'
+            );
+        """)
+        conn.execute("INSERT INTO turns VALUES(1,'c','外置大脑',2,'user','我认为外置大脑必须主动召回','2026-01-01','','/private/a','','',0)")
+        conn.execute("INSERT INTO turns VALUES(2,'c','外置大脑',3,'model','模型说用户喜欢被附和','2026-01-01','','/private/a','','',0)")
+        conn.execute("INSERT INTO turns_fts(rowid,conversation_name,text) SELECT id,conversation_name,text FROM turns")
+        conn.commit()
+        conn.close()
+
+        p = provider_with_config(
+            memory_graph_prefetch=False,
+            aistudio_prefetch=True,
+            aistudio_owner_user_id="owner",
+            aistudio_turn_db=str(db),
+        )
+        p._user_id = "owner"
+        text = p._aistudio_prefetch_text("外置大脑主动召回")
+        assert "AI Studio User-History Evidence" in text
+        assert "我认为外置大脑必须主动召回" in text
+        assert "模型说用户喜欢被附和" not in text
+        assert "/private/a" not in text
+
+    def test_aistudio_prefetch_rejects_non_owner(self, provider_with_config, tmp_path):
+        db = tmp_path / "turns.sqlite3"
+        db.write_bytes(b"not opened for non-owner")
+        p = provider_with_config(
+            memory_graph_prefetch=False,
+            aistudio_prefetch=True,
+            aistudio_owner_user_id="owner",
+            aistudio_turn_db=str(db),
+        )
+        p._user_id = "other-user"
+        assert p._aistudio_prefetch_text("外置大脑") == ""
+
+    def test_prefetch_keeps_aistudio_evidence_when_hindsight_fails(self, provider_with_config, tmp_path):
+        import sqlite3
+
+        db = tmp_path / "turns.sqlite3"
+        conn = sqlite3.connect(db)
+        conn.executescript("""
+            CREATE TABLE turns (
+                id INTEGER PRIMARY KEY, conversation_id TEXT, conversation_name TEXT,
+                turn_index INTEGER, role TEXT, text TEXT, create_time TEXT,
+                modified_time TEXT, archive_path TEXT, web_view_link TEXT,
+                model TEXT, thinking_like INTEGER
+            );
+            CREATE VIRTUAL TABLE turns_fts USING fts5(
+                conversation_name, text, content='turns', content_rowid='id'
+            );
+            INSERT INTO turns VALUES(1,'c','AI Studio记忆',0,'user','我想让AI Studio历史进入主动召回','2026-01-01','','','','',0);
+            INSERT INTO turns_fts(rowid,conversation_name,text) SELECT id,conversation_name,text FROM turns;
+        """)
+        conn.commit()
+        conn.close()
+        p = provider_with_config(
+            memory_graph_prefetch=False,
+            aistudio_prefetch=True,
+            aistudio_owner_user_id="owner",
+            aistudio_turn_db=str(db),
+        )
+        p._user_id = "owner"
+        p._client.arecall.side_effect = RuntimeError("hindsight unavailable")
+        text = p.prefetch("AI Studio 主动召回")
+        assert "AI Studio User-History Evidence" in text
+        assert "我想让AI Studio历史进入主动召回" in text
+
     def test_prefetch_prepends_memory_graph_anchors(self, provider, monkeypatch):
         def fake_search(payload):
             assert payload["query"] == "first turn query"

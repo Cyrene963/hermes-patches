@@ -526,6 +526,12 @@ if [ -f "$PATCHES_DIR/scripts/hermes-patch-chain-guard.sh" ]; then
     chmod +x "$PROFILE_DIR/scripts/hermes-patch-chain-guard.sh"
     echo "   ✅ hermes-patch-chain-guard.sh 已安装"
 fi
+if [ -f "$PATCHES_DIR/scripts/aistudio_turn_index.py" ]; then
+    mkdir -p "$PROFILE_DIR/scripts"
+    cp "$PATCHES_DIR/scripts/aistudio_turn_index.py" "$PROFILE_DIR/scripts/aistudio_turn_index.py"
+    chmod +x "$PROFILE_DIR/scripts/aistudio_turn_index.py"
+    echo "   ✅ AI Studio private turn-index helper 已安装（opt-in prefetch 仍需 profile config）"
+fi
 if [ -f "$PATCHES_DIR/scripts/memory_os_shadow_namespace_watchdog.py" ]; then
     mkdir -p "$PROFILE_DIR/scripts"
     cp "$PATCHES_DIR/scripts/memory_os_shadow_namespace_watchdog.py" "$PROFILE_DIR/scripts/memory_os_shadow_namespace_watchdog.py"

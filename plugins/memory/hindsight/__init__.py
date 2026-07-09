@@ -1420,11 +1420,85 @@ class HindsightMemoryProvider(MemoryProvider):
             logger.debug("Memory Graph prefetch anchors failed: %s", exc, exc_info=True)
         return ""
 
+    def _aistudio_prefetch_text(self, query: str) -> str:
+        """Recall private AI Studio USER turns as evidence, never model output as fact."""
+        if not self._config.get("aistudio_prefetch", False):
+            return ""
+        owner_id = str(self._config.get("aistudio_owner_user_id") or "").strip()
+        if not owner_id or str(self._user_id or "").strip() != owner_id:
+            return ""
+        from pathlib import Path
+        db_path = Path(str(self._config.get("aistudio_turn_db") or ""))
+        if not db_path.is_file():
+            return ""
+        raw_query = " ".join(str(query or "").split()).strip()
+        if len(raw_query) < 2:
+            return ""
+        limit = max(0, min(5, int(self._config.get("aistudio_prefetch_limit", 3))))
+        max_chars = max(120, min(800, int(self._config.get("aistudio_prefetch_excerpt_chars", 420))))
+        if limit <= 0:
+            return ""
+        try:
+            import sqlite3
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            terms = [part for part in re.findall(r"[A-Za-z0-9_+-]{2,}|[\u3400-\u9fff]{2,}", raw_query) if part]
+            expanded_terms = list(terms)
+            for term in terms:
+                if re.fullmatch(r"[\u3400-\u9fff]+", term) and len(term) > 6:
+                    expanded_terms.extend(term[i : i + 4] for i in range(0, len(term) - 3, 2))
+            terms = list(dict.fromkeys(expanded_terms))[:16]
+            candidates = conn.execute(
+                """SELECT conversation_name,turn_index,text,create_time,archive_path
+                   FROM turns WHERE role='user'"""
+            ).fetchall()
+            scored = []
+            for row in candidates:
+                text = str(row["text"] or "")
+                name = str(row["conversation_name"] or "")
+                haystack = f"{name}\n{text}".casefold()
+                matched = [term for term in terms if term.casefold() in haystack]
+                if not matched:
+                    continue
+                score = sum(min(len(term), 20) ** 2 for term in matched)
+                if raw_query.casefold() in haystack:
+                    score += 1000
+                if any(term.casefold() in name.casefold() for term in matched):
+                    score += 100
+                scored.append((score, str(row["create_time"] or ""), row))
+            scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            rows = [item[2] for item in scored[:limit]]
+            conn.close()
+            lines = []
+            for row in rows:
+                text = re.sub(r"\s+", " ", str(row["text"] or "")).strip()
+                if not text:
+                    continue
+                positions = [text.casefold().find(term.casefold()) for term in terms if term]
+                positions = [pos for pos in positions if pos >= 0]
+                start = max(0, min(positions) - 80) if positions else 0
+                excerpt = text[start : start + max_chars]
+                name = str(row["conversation_name"] or "Untitled")
+                when = str(row["create_time"] or "")[:10]
+                lines.append(f"- [{when}] {name} (user turn {row['turn_index']}): {excerpt}")
+            if lines:
+                return (
+                    "## AI Studio User-History Evidence\n"
+                    "The following excerpts are the user's own past messages from private AI Studio/Gemini chats. "
+                    "Treat them as historical evidence, not automatically current truth; no Gemini/model replies are included.\n"
+                    + "\n".join(lines)
+                )
+        except Exception as exc:
+            logger.debug("AI Studio private prefetch failed: %s", exc, exc_info=True)
+        return ""
+
     def _merge_prefetch_text(self, query: str, hindsight_text: str) -> str:
         graph_text = self._memory_graph_prefetch_text(query)
-        if graph_text and hindsight_text:
-            return f"{graph_text}\n\n## Hindsight Recall\n{hindsight_text}"
-        return graph_text or hindsight_text
+        aistudio_text = self._aistudio_prefetch_text(query)
+        sections = [part for part in (graph_text, aistudio_text) if part]
+        if hindsight_text:
+            sections.append(f"## Hindsight Recall\n{hindsight_text}" if sections else hindsight_text)
+        return "\n\n".join(sections)
 
     def _recall_prefetch_text(self, query: str) -> str:
         if self._prefetch_method == "reflect":
@@ -1464,9 +1538,14 @@ class HindsightMemoryProvider(MemoryProvider):
                 sync_query = query
                 if self._recall_max_input_chars and len(sync_query) > self._recall_max_input_chars:
                     sync_query = sync_query[:self._recall_max_input_chars]
-                result = self._merge_prefetch_text(sync_query, self._recall_prefetch_text(sync_query))
+                try:
+                    hindsight_text = self._recall_prefetch_text(sync_query)
+                except Exception as exc:
+                    logger.debug("Hindsight recall failed; continuing with local evidence sources: %s", exc, exc_info=True)
+                    hindsight_text = ""
+                result = self._merge_prefetch_text(sync_query, hindsight_text)
             except Exception as e:
-                logger.debug("Hindsight synchronous prefetch failed: %s", e, exc_info=True)
+                logger.debug("Memory synchronous prefetch failed: %s", e, exc_info=True)
                 return ""
         else:
             try:
