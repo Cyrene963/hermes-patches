@@ -2,6 +2,7 @@ from agent.memory_write_pipeline import (
     CandidateFact,
     MemoryWritePipeline,
     _parse_structured_memory_result,
+    detect_conflicts,
 )
 
 
@@ -65,6 +66,34 @@ def config(mode="limited_auto", repair_queue_path=None):
     if repair_queue_path:
         out["repair_queue_path"] = str(repair_queue_path)
     return out
+
+
+def test_multiple_conflict_uris_fail_closed_to_review():
+    pipe = MemoryWritePipeline(graph_client=FakeVersioningGraph(), config=config())
+    item = candidate()
+    existing = old_fact() + [{
+        "subject": "Project Alpha",
+        "predicate": "version",
+        "object": "1.1",
+        "uri": "core://decision/alpha-duplicate",
+    }]
+    classification = pipe.classify_write(item, existing_facts=existing, namespace=item.namespace)
+    assert classification["action"] == "review"
+    assert classification["target_store"] == "review"
+    assert classification["conflict_candidates"] == [
+        "core://projects/alpha",
+        "core://decision/alpha-duplicate",
+    ]
+    assert "unsafe" in classification["reason"]
+
+
+def test_duplicate_search_rows_for_same_uri_are_one_conflict():
+    item = candidate()
+    existing = old_fact() + old_fact()
+    conflicts = detect_conflicts(item, existing)
+    assert len(conflicts) == 1
+    pipe = MemoryWritePipeline(graph_client=FakeVersioningGraph(), config=config())
+    assert pipe.classify_write(item, existing_facts=existing, namespace=item.namespace)["action"] == "supersede"
 
 
 def test_parser_rejects_unstructured_and_parses_snippet_shape():

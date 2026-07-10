@@ -347,16 +347,36 @@ def route_target(memory_type: str, importance: float, is_rule: bool = False) -> 
 
 # ─── Conflict Detection ──────────────────────────────────────────
 
-def detect_conflict(new_fact: CandidateFact, existing_facts: List[Dict]) -> Optional[str]:
-    """Check if new fact conflicts with existing facts."""
+def detect_conflicts(new_fact: CandidateFact, existing_facts: List[Dict]) -> List[Dict[str, str]]:
+    """Return all unique same-subject/predicate facts that disagree with the candidate."""
+    conflicts: list[dict[str, str]] = []
+    seen_uris: set[str] = set()
     for existing in existing_facts:
-        if (existing.get('subject', '').lower() == new_fact.subject.lower() and
-            existing.get('predicate', '').lower() == new_fact.predicate.lower()):
-            old_obj = str(existing.get('object', ''))
-            new_obj = new_fact.object_value
-            if old_obj.lower() != new_obj.lower():
-                return existing.get('uri', '')
-    return None
+        if not (
+            existing.get('subject', '').casefold() == new_fact.subject.casefold()
+            and existing.get('predicate', '').casefold() == new_fact.predicate.casefold()
+        ):
+            continue
+        old_obj = str(existing.get('object', ''))
+        if old_obj.casefold() == new_fact.object_value.casefold():
+            continue
+        uri = str(existing.get('uri') or '')
+        if not uri or uri in seen_uris:
+            continue
+        seen_uris.add(uri)
+        conflicts.append({
+            'uri': uri,
+            'object': old_obj,
+            'subject': str(existing.get('subject') or ''),
+            'predicate': str(existing.get('predicate') or ''),
+        })
+    return conflicts
+
+
+def detect_conflict(new_fact: CandidateFact, existing_facts: List[Dict]) -> Optional[str]:
+    """Backward-compatible single-conflict helper."""
+    conflicts = detect_conflicts(new_fact, existing_facts)
+    return conflicts[0]['uri'] if conflicts else None
 
 
 def _parse_structured_memory_result(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
@@ -872,9 +892,22 @@ class MemoryWritePipeline:
         # Gate 3: Type (already classified)
 
         # Gate 4: Conflict
-        conflict_uri = detect_conflict(candidate, existing)
-        if conflict_uri:
-            candidate.conflict_with = conflict_uri
+        conflicts = detect_conflicts(candidate, existing)
+        if conflicts:
+            conflict_uris = [item['uri'] for item in conflicts]
+            candidate.conflict_with = conflict_uris[0]
+            if len(conflict_uris) > 1:
+                candidate.requires_review = True
+                return {
+                    'action': 'review',
+                    'target_store': 'review',
+                    'reason': 'Multiple active facts conflict; automatic supersession is unsafe without consolidation.',
+                    'conflict_with': conflict_uris[0],
+                    'conflict_candidates': conflict_uris,
+                    'namespace': namespace or candidate.namespace,
+                    'requires_review': True,
+                }
+            conflict_uri = conflict_uris[0]
             explicit_correction = candidate.source_type == 'user_correction'
             safe_namespace = bool(namespace or candidate.namespace)
             mode = str(self.config.get('mode', 'shadow')).strip().lower()
