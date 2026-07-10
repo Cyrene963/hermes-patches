@@ -34,6 +34,7 @@ TREASURE = SCRIPTS / "aistudio_treasure_review.py"
 CONVERT = SCRIPTS / "convert_aistudio_to_review_proposals.py"
 DISTILL = SCRIPTS / "aistudio_distill_review_proposals.py"
 CONTINUOUS_DISTILL = SCRIPTS / "aistudio_continuous_distill.py"
+CONTINUOUS_REVIEW = SCRIPTS / "aistudio_continuous_review.py"
 
 
 def chmod_private(path: Path) -> None:
@@ -137,6 +138,10 @@ def main() -> int:
         "--limit", "24", "--batch-size", "6", "--apply",
     ], timeout=900) if CONTINUOUS_DISTILL.exists() and artifacts_ready() else subprocess.CompletedProcess([], 0, "", "")
     continuous_report = read_json(latest("continuous-distill-*.json"))
+    continuous_review = run([
+        PYTHON, str(CONTINUOUS_REVIEW), "--limit", "60", "--batch-size", "12", "--concurrency", "3",
+    ], timeout=900) if CONTINUOUS_REVIEW.exists() and continuous.returncode == 0 else subprocess.CompletedProcess([], 0, "", "")
+    continuous_review_report = read_json(latest("continuous-second-review-*.json"))
     if (
         sync.returncode == 0
         and not real_sync_errors
@@ -156,11 +161,15 @@ def main() -> int:
             "continuous_processing_coverage_rate": float(continuous_report.get("processing_coverage_rate") or 0.0),
             "continuous_proposals": int(continuous_report.get("proposal_count") or 0),
             "continuous_clarifications": int(continuous_report.get("clarification_count") or 0),
+            "continuous_review_returncode": continuous_review.returncode,
+            "continuous_reviewed": int(continuous_review_report.get("pending_reviewed") or 0),
+            "continuous_review_approved": len((continuous_review_report.get("applied") or {}).get("approved") or []),
             "reports_pruned": prune_reports(),
         })
         save_state(state)
-        if continuous.returncode != 0:
+        if continuous.returncode != 0 or continuous_review.returncode != 0:
             print(f"- continuous_distill_returncode={continuous.returncode}")
+            print(f"- continuous_review_returncode={continuous_review.returncode}")
             if continuous.stderr:
                 print(continuous.stderr[-1000:])
             return 1
@@ -231,6 +240,9 @@ def main() -> int:
         "continuous_processing_coverage_rate": float(continuous_report.get("processing_coverage_rate") or 0.0),
         "continuous_proposals": int(continuous_report.get("proposal_count") or 0),
         "continuous_clarifications": int(continuous_report.get("clarification_count") or 0),
+        "continuous_review_returncode": continuous_review.returncode,
+        "continuous_reviewed": int(continuous_review_report.get("pending_reviewed") or 0),
+        "continuous_review_approved": len((continuous_review_report.get("applied") or {}).get("approved") or []),
     }
     state.update(summary)
     save_state(state)
@@ -251,6 +263,8 @@ def main() -> int:
         or treasure.returncode != 0
         or convert.returncode != 0
         or distill.returncode != 0
+        or continuous.returncode != 0
+        or continuous_review.returncode != 0
     )
     if should_print:
         print("AI Studio memory sync:")
@@ -302,7 +316,7 @@ def main() -> int:
                 print(distill.stderr[-1000:])
         print(f"- state={STATE}")
     # Do not fail cron for known parse non-JSON artifacts; fail for sync/index/review real errors.
-    if summary["sync_error_count"] or sync.returncode != 0 or fts.returncode != 0 or turn.returncode != 0 or turn_index.returncode != 0 or treasure.returncode != 0 or convert.returncode != 0 or distill.returncode != 0 or continuous.returncode != 0:
+    if summary["sync_error_count"] or sync.returncode != 0 or fts.returncode != 0 or turn.returncode != 0 or turn_index.returncode != 0 or treasure.returncode != 0 or convert.returncode != 0 or distill.returncode != 0 or continuous.returncode != 0 or continuous_review.returncode != 0:
         return 1
     return 0
 

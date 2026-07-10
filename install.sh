@@ -541,6 +541,12 @@ if [ -f "$PATCHES_DIR/scripts/aistudio_continuous_distill.py" ]; then
     chmod +x "$PROFILE_DIR/scripts/aistudio_continuous_distill.py"
     echo "   ✅ AI Studio continuous review-first distiller 已安装（需私有 owner config）"
 fi
+if [ -f "$PATCHES_DIR/scripts/aistudio_continuous_review.py" ]; then
+    mkdir -p "$PROFILE_DIR/scripts"
+    cp "$PATCHES_DIR/scripts/aistudio_continuous_review.py" "$PROFILE_DIR/scripts/aistudio_continuous_review.py"
+    chmod +x "$PROFILE_DIR/scripts/aistudio_continuous_review.py"
+    echo "   ✅ AI Studio adversarial second-stage reviewer 已安装（默认 dry-run）"
+fi
 if [ -f "$PATCHES_DIR/scripts/aistudio_memory_watchdog.py" ]; then
     mkdir -p "$PROFILE_DIR/scripts"
     cp "$PATCHES_DIR/scripts/aistudio_memory_watchdog.py" "$PROFILE_DIR/scripts/aistudio_memory_watchdog.py"
