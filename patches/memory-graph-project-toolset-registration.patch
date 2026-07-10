@@ -1,32 +1,34 @@
 diff --git a/toolsets.py b/toolsets.py
-index 03e64fd..170b4a8 100644
+index 03e64fd..700f00e 100644
 --- a/toolsets.py
 +++ b/toolsets.py
-@@ -57,6 +57,12 @@ _HERMES_CORE_TOOLS = [
+@@ -57,6 +57,13 @@ _HERMES_CORE_TOOLS = [
      # move, so they live in the `project` toolset and are enabled solely by the
      # GUI gateway (tui_gateway/server.py::_load_enabled_toolsets) — keeping them
      # off every CLI/messaging/cron schema (narrow waist).
-+    # Memory Graph and evidence-grounded project decisions
++    # Memory Graph and evidence-grounded digital-twin decisions
 +    "memory_graph_read", "memory_graph_create", "memory_graph_update",
 +    "memory_graph_delete", "memory_graph_list", "memory_graph_search",
 +    "memory_graph_alias", "memory_graph_glossary_add", "memory_graph_glossary_scan",
 +    "memory_graph_recall", "memory_graph_orphans", "memory_graph_random",
-+    "memory_graph_diagnostics", "memory_graph_purge", "project_decision_assess",
++    "memory_graph_diagnostics", "memory_graph_purge",
++    "project_decision_assess", "relationship_boundary_assess",
      # Session history search
      "session_search",
      # Clarifying questions
-@@ -230,6 +236,18 @@ TOOLSETS = {
+@@ -230,6 +237,19 @@ TOOLSETS = {
          "includes": []
      },
      
 +    "memory_graph": {
-+        "description": "Persistent structured memory and evidence-grounded project decisions",
++        "description": "Persistent structured memory and evidence-grounded digital-twin decisions",
 +        "tools": [
 +            "memory_graph_read", "memory_graph_create", "memory_graph_update",
 +            "memory_graph_delete", "memory_graph_list", "memory_graph_search",
 +            "memory_graph_alias", "memory_graph_glossary_add", "memory_graph_glossary_scan",
 +            "memory_graph_recall", "memory_graph_orphans", "memory_graph_random",
-+            "memory_graph_diagnostics", "memory_graph_purge", "project_decision_assess",
++            "memory_graph_diagnostics", "memory_graph_purge",
++            "project_decision_assess", "relationship_boundary_assess",
 +        ],
 +        "includes": [],
 +    },
