@@ -576,13 +576,18 @@ def run_main() -> int:
         "SELECT count(*) FROM processed_turns WHERE policy_version=? AND status IN ('complete','skipped','heuristic_skipped','rejected')",
         (POLICY_VERSION,),
     ).fetchone()[0]
+    benchmark_excluded = len(excluded)
+    accounted = min(total_user, processed + benchmark_excluded)
     report = {
         "generated_at": now(), "apply": args.apply, "policy_version": POLICY_VERSION,
         "selected_turns": len(selected), "heuristic_skipped_this_run": len(heuristic_skips),
         "proposal_count": len(proposals), "clarification_count": len(clarifications),
         "rejected_item_count": len(rejected), "batch_errors": errors,
-        "processed_user_turns": int(processed), "total_user_turns": int(total_user),
-        "processing_coverage_rate": round(processed / total_user, 6) if total_user else 0.0,
+        "processed_user_turns": processed, "total_user_turns": total_user,
+        "processing_coverage_rate": round(processed / total_user, 6) if total_user else 1.0,
+        "benchmark_excluded_user_turns": benchmark_excluded,
+        "accounted_user_turns": accounted,
+        "accounted_coverage_rate": round(accounted / total_user, 6) if total_user else 1.0,
         "selected_turn_ids": [int(row["id"]) for row in selected],
         "proposal_ids": [row["proposal_id"] for row in proposals],
         "clarification_ids": [row["id"] for row in clarifications],
