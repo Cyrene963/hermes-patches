@@ -1,0 +1,41 @@
+diff --git a/plugins/platforms/telegram/adapter.py b/plugins/platforms/telegram/adapter.py
+index fd5fc01..b28ac34 100644
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -7411,6 +7411,20 @@ class TelegramAdapter(BasePlatformAdapter):
+             return True
+
+         chat_id_str = str(getattr(getattr(message, "chat", None), "id", ""))
++        try:
++            from gateway.group_mode import get_group_mode
++            from hermes_constants import get_hermes_home
++
++            group_mode = get_group_mode(
++                get_hermes_home(),
++                platform="telegram",
++                chat_id=chat_id_str,
++                thread_id=str(thread_id) if thread_id is not None else None,
++                default=None,
++            )
++        except Exception:
++            logger.warning("[%s] Failed to load Telegram group reply mode", self.name, exc_info=True)
++            group_mode = None
+
+         if self._telegram_exclusive_bot_mentions() and self._explicit_bot_mentions_exclude_self(message):
+             return False
+@@ -7428,9 +7442,13 @@ class TelegramAdapter(BasePlatformAdapter):
+
+         if guest_mention:
+             return True
+-        if chat_id_str in self._telegram_free_response_chats():
++        if group_mode == "free" or chat_id_str in self._telegram_free_response_chats():
+             return True
+-        if not self._telegram_require_mention():
++        if group_mode in {"mention", "auto"}:
++            require_mention = True
++        else:
++            require_mention = self._telegram_require_mention()
++        if not require_mention:
+             return True
+         if self._is_reply_to_bot(message):
+             return True

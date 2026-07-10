@@ -1,0 +1,61 @@
+diff --git a/hermes_state.py b/hermes_state.py
+index a0b6dfd..723eb94 100644
+--- a/hermes_state.py
++++ b/hermes_state.py
+@@ -2998,6 +2998,7 @@ class SessionDB:
+     def list_sessions_rich(
+         self,
+         source: str = None,
++        user_id: str = None,
+         exclude_sources: List[str] = None,
+         cwd_prefix: str = None,
+         limit: int = 20,
+@@ -3075,6 +3076,9 @@ class SessionDB:
+         if source:
+             where_clauses.append("s.source = ?")
+             params.append(source)
++        if user_id is not None:
++            where_clauses.append("s.user_id = ?")
++            params.append(str(user_id))
+         if exclude_sources:
+             placeholders = ",".join("?" for _ in exclude_sources)
+             where_clauses.append(f"s.source NOT IN ({placeholders})")
+@@ -4513,6 +4517,7 @@ class SessionDB:
+         self,
+         query: str,
+         source_filter: List[str] = None,
++        user_id: str = None,
+         exclude_sources: List[str] = None,
+         role_filter: List[str] = None,
+         limit: int = 20,
+@@ -4591,6 +4596,10 @@ class SessionDB:
+             where_clauses.append(f"s.source IN ({source_placeholders})")
+             params.extend(source_filter)
+
++        if user_id is not None:
++            where_clauses.append("s.user_id = ?")
++            params.append(str(user_id))
++
+         if exclude_sources is not None:
+             exclude_placeholders = ",".join("?" for _ in exclude_sources)
+             where_clauses.append(f"s.source NOT IN ({exclude_placeholders})")
+@@ -4670,6 +4679,9 @@ class SessionDB:
+                 if source_filter is not None:
+                     tri_where.append(f"s.source IN ({','.join('?' for _ in source_filter)})")
+                     tri_params.extend(source_filter)
++                if user_id is not None:
++                    tri_where.append("s.user_id = ?")
++                    tri_params.append(str(user_id))
+                 if exclude_sources is not None:
+                     tri_where.append(f"s.source NOT IN ({','.join('?' for _ in exclude_sources)})")
+                     tri_params.extend(exclude_sources)
+@@ -4727,6 +4739,9 @@ class SessionDB:
+                 if source_filter is not None:
+                     like_where.append(f"s.source IN ({','.join('?' for _ in source_filter)})")
+                     like_params.extend(source_filter)
++                if user_id is not None:
++                    like_where.append("s.user_id = ?")
++                    like_params.append(str(user_id))
+                 if exclude_sources is not None:
+                     like_where.append(f"s.source NOT IN ({','.join('?' for _ in exclude_sources)})")
+                     like_params.extend(exclude_sources)

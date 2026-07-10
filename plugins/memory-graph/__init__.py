@@ -376,6 +376,11 @@ def _is_shared_chat(chat_type: str = "", user_id: str = "", chat_id: str = "") -
     shared chats. Shared chats get their own namespace.
     """
     ct = (chat_type or "").strip().lower()
+    # personal_group is a private multi-window for one authorized user. The
+    # gateway rewrites chat_id to that user and carries the physical group in
+    # thread_id, so it must share the user's DM memory namespace.
+    if ct == "personal_group":
+        return False
     if ct and ct != "dm":
         return True
     # Telegram/Discord group IDs often differ from sender IDs even if chat_type
