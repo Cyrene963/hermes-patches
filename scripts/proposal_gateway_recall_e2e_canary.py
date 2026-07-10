@@ -25,10 +25,29 @@ import yaml
 
 ROOT = pathlib.Path.home()
 REPO = ROOT / ".hermes" / "hermes-agent"
+RUNTIME_PYTHON = REPO / "venv" / "bin" / "python"
 QUEUE = ROOT / ".hermes" / "logs" / "memory_review_queue" / "review_proposals.current.jsonl"
 OUT_DIR = ROOT / ".hermes" / "tasks" / "digital-brain-99-baselines"
 API_BASE = "http://127.0.0.1:8233"
 GATEWAY_URL = "http://127.0.0.1:8642/v1/chat/completions"
+
+
+def _ensure_runtime_python() -> None:
+    """Run under Hermes' runtime venv even when cron PATH points elsewhere."""
+    if os.environ.get("MEMORY_OS_E2E_RUNTIME_REEXEC") == "1":
+        return
+    if not RUNTIME_PYTHON.exists():
+        return
+    if pathlib.Path(sys.executable).resolve() == RUNTIME_PYTHON.resolve():
+        return
+    env = os.environ.copy()
+    env["MEMORY_OS_E2E_RUNTIME_REEXEC"] = "1"
+    os.execve(str(RUNTIME_PYTHON), [str(RUNTIME_PYTHON), str(pathlib.Path(__file__).resolve()), *sys.argv[1:]], env)
+
+
+_ensure_runtime_python()
+
+
 def _default_namespace() -> str:
     """Use the same namespace the API gateway assigns for this host by default.
 

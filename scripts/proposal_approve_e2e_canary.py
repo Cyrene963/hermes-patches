@@ -18,10 +18,28 @@ import time
 from datetime import datetime, timezone
 from urllib import error, request
 
+REPO = pathlib.Path.home() / ".hermes" / "hermes-agent"
+RUNTIME_PYTHON = REPO / "venv" / "bin" / "python"
 QUEUE = pathlib.Path.home() / ".hermes" / "logs" / "memory_review_queue" / "review_proposals.current.jsonl"
 EVIDENCE_DIR = pathlib.Path.home() / ".hermes" / "tasks" / "digital-brain-99-baselines"
 API_BASE = "http://127.0.0.1:8233"
 NAMESPACE = os.environ.get("MEMORY_OS_E2E_NAMESPACE", "telegram:test-user")
+
+
+def _ensure_runtime_python() -> None:
+    """Run under Hermes' runtime venv even when cron PATH points elsewhere."""
+    if os.environ.get("MEMORY_OS_E2E_RUNTIME_REEXEC") == "1":
+        return
+    if not RUNTIME_PYTHON.exists():
+        return
+    if pathlib.Path(sys.executable).resolve() == RUNTIME_PYTHON.resolve():
+        return
+    env = os.environ.copy()
+    env["MEMORY_OS_E2E_RUNTIME_REEXEC"] = "1"
+    os.execve(str(RUNTIME_PYTHON), [str(RUNTIME_PYTHON), str(pathlib.Path(__file__).resolve()), *sys.argv[1:]], env)
+
+
+_ensure_runtime_python()
 
 
 def _run(cmd: list[str], *, cwd: str | None = None) -> str:
