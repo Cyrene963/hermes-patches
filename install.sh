@@ -559,6 +559,12 @@ if [ -f "$PATCHES_DIR/scripts/memory_os_shadow_namespace_watchdog.py" ]; then
     chmod +x "$PROFILE_DIR/scripts/memory_os_shadow_namespace_watchdog.py"
     echo "   ✅ memory_os_shadow_namespace_watchdog.py 已安装"
 fi
+if [ -f "$PATCHES_DIR/scripts/memory_os_scorecard.py" ]; then
+    mkdir -p "$PROFILE_DIR/scripts"
+    cp "$PATCHES_DIR/scripts/memory_os_scorecard.py" "$PROFILE_DIR/scripts/memory_os_scorecard.py"
+    chmod +x "$PROFILE_DIR/scripts/memory_os_scorecard.py"
+    echo "   ✅ memory_os_scorecard.py 已安装"
+fi
 if [ -f "$PATCHES_DIR/scripts/correction_regression_eval.py" ]; then
     mkdir -p "$PROFILE_DIR/scripts"
     cp "$PATCHES_DIR/scripts/correction_regression_eval.py" "$PROFILE_DIR/scripts/correction_regression_eval.py"
