@@ -177,7 +177,7 @@ fi
 # Fast-moving core ABI files are intentionally excluded from the default copy
 # path unless they are known-rebased. A stale copy can pass py_compile while
 # breaking imports/call signatures added upstream.
-for module in active_workstream.py proactive_need.py correction_regression.py memory_metacognition.py memory_task_contract.py memory_semantic_classifier.py memory_review_proposals.py memory_write_filters.py memory_write_pipeline.py memory_clarification_queue.py memory_distiller.py memory_fact_classifier.py memory_write_earn.py shadow_write_logger.py hindsight_access_tracker.py hindsight_reranker.py request_context.py skill_router.py prompt_builder.py conversation_loop.py tool_executor.py system_prompt.py agent_runtime_helpers.py auto_store_heuristic.py memory_auto_hooks.py; do
+for module in active_workstream.py proactive_need.py project_decision.py correction_regression.py memory_metacognition.py memory_task_contract.py memory_semantic_classifier.py memory_review_proposals.py memory_write_filters.py memory_write_pipeline.py memory_clarification_queue.py memory_distiller.py memory_fact_classifier.py memory_write_earn.py shadow_write_logger.py hindsight_access_tracker.py hindsight_reranker.py request_context.py skill_router.py prompt_builder.py conversation_loop.py tool_executor.py system_prompt.py agent_runtime_helpers.py auto_store_heuristic.py memory_auto_hooks.py; do
     if [ -f "$PATCHES_DIR/agent/$module" ]; then
         cp "$PATCHES_DIR/agent/$module" "$HERMES_DIR/agent/"
         echo "   ✅ agent/$module 已复制"
@@ -211,7 +211,7 @@ if [ -d "$PATCHES_DIR/cron" ]; then
     done
 fi
 
-for tool_file in memory_graph_tool.py session_search_tool.py image_generation_tool.py cronjob_tools.py deep_research_tool.py web_tools.py thread_context.py managed_tool_gateway.py telegram_sticker_tool.py; do
+for tool_file in memory_graph_tool.py project_decision_tool.py session_search_tool.py image_generation_tool.py cronjob_tools.py deep_research_tool.py web_tools.py thread_context.py managed_tool_gateway.py telegram_sticker_tool.py; do
     if [ -f "$PATCHES_DIR/tools/$tool_file" ]; then
         cp "$PATCHES_DIR/tools/$tool_file" "$HERMES_DIR/tools/"
         echo "   ✅ tools/$tool_file 已复制"
@@ -223,8 +223,7 @@ if [ -f "$PATCHES_DIR/hermes_state.py" ]; then
     echo "   ℹ️ hermes_state.py full-file overlay skipped; session DB fixes must use targeted patches to avoid schema/API rollback"
 fi
 if [ -f "$PATCHES_DIR/toolsets.py" ]; then
-    cp "$PATCHES_DIR/toolsets.py" "$HERMES_DIR/toolsets.py"
-    echo "   ✅ toolsets.py 已复制"
+    echo "   ℹ️ toolsets.py full-file overlay skipped; Memory OS registrations use targeted patches to preserve upstream tool posture and registry APIs"
 fi
 if [ -f "$PATCHES_DIR/gateway/telegram_sticker_library.py" ]; then
     mkdir -p "$HERMES_DIR/gateway"
@@ -466,6 +465,7 @@ if [ -n "$PYTHON_BIN" ]; then
     for rel in \
         agent/active_workstream.py \
         agent/proactive_need.py \
+        agent/project_decision.py \
         agent/correction_regression.py \
         agent/memory_task_contract.py \
         agent/system_prompt.py \
@@ -480,6 +480,7 @@ if [ -n "$PYTHON_BIN" ]; then
         hermes_cli/main.py \
         gateway/platforms/telegram.py \
         tools/memory_graph_tool.py \
+        tools/project_decision_tool.py \
         tools/session_search_tool.py; do
         if [ -f "$HERMES_DIR/$rel" ]; then
             compile_files+=("$HERMES_DIR/$rel")
