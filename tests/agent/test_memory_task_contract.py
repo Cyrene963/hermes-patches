@@ -1,5 +1,6 @@
 from agent.memory_task_contract import (
     EvidenceItem,
+    build_contract_recall_queries,
     build_task_memory_contract,
     evaluate_contract,
     plan_contract_repair,
@@ -188,6 +189,23 @@ def test_repeated_autonomy_correction_promotes_durable_obligation():
     assert pending["passed"] is False
     assert any("active todos: next" in value for value in pending["obligations"][0]["missing"])
     assert done["passed"] is True
+
+
+def test_unfinished_next_step_generates_autonomy_recall_queries():
+    queries = build_contract_recall_queries("阶段检查通过，但还有下一步。")
+    assert "user autonomy preference continue until verified do not ask" in queries
+
+
+def test_single_authoritative_autonomy_rule_becomes_hard_obligation():
+    contract = build_task_memory_contract(
+        "阶段检查完成但还有下一步",
+        _evidence((
+            "core://neutral/authoritative-rule",
+            "Authorized multi-step work should continue through remaining stages without pausing until verified.",
+        )),
+    )
+    obligation = next(item for item in contract.obligations if item.id == "autonomy.continue_until_verified")
+    assert obligation.evidence_uris == ["core://neutral/authoritative-rule"]
 
 
 def test_single_autonomy_sentence_does_not_become_hard_obligation():

@@ -177,7 +177,7 @@ fi
 # Fast-moving core ABI files are intentionally excluded from the default copy
 # path unless they are known-rebased. A stale copy can pass py_compile while
 # breaking imports/call signatures added upstream.
-for module in active_workstream.py correction_regression.py memory_metacognition.py memory_task_contract.py memory_semantic_classifier.py memory_review_proposals.py memory_write_filters.py memory_write_pipeline.py memory_clarification_queue.py memory_distiller.py memory_fact_classifier.py memory_write_earn.py shadow_write_logger.py hindsight_access_tracker.py hindsight_reranker.py request_context.py skill_router.py prompt_builder.py conversation_loop.py tool_executor.py system_prompt.py agent_runtime_helpers.py auto_store_heuristic.py memory_auto_hooks.py; do
+for module in active_workstream.py proactive_need.py correction_regression.py memory_metacognition.py memory_task_contract.py memory_semantic_classifier.py memory_review_proposals.py memory_write_filters.py memory_write_pipeline.py memory_clarification_queue.py memory_distiller.py memory_fact_classifier.py memory_write_earn.py shadow_write_logger.py hindsight_access_tracker.py hindsight_reranker.py request_context.py skill_router.py prompt_builder.py conversation_loop.py tool_executor.py system_prompt.py agent_runtime_helpers.py auto_store_heuristic.py memory_auto_hooks.py; do
     if [ -f "$PATCHES_DIR/agent/$module" ]; then
         cp "$PATCHES_DIR/agent/$module" "$HERMES_DIR/agent/"
         echo "   ✅ agent/$module 已复制"
@@ -465,6 +465,7 @@ if [ -n "$PYTHON_BIN" ]; then
     compile_files=()
     for rel in \
         agent/active_workstream.py \
+        agent/proactive_need.py \
         agent/correction_regression.py \
         agent/memory_task_contract.py \
         agent/system_prompt.py \

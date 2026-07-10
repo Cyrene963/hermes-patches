@@ -16,6 +16,28 @@ def _plugin():
     return module
 
 
+def test_cli_owner_maps_to_configured_private_namespace_but_other_user_does_not(monkeypatch):
+    plugin = _plugin()
+    monkeypatch.setattr(plugin, "_default_terminal_user", lambda: "owner-1")
+    assert plugin._resolve_namespace(user_id="owner-1", chat_id="owner-1", platform="cli", chat_type="dm") == "telegram:owner-1"
+    assert plugin._resolve_namespace(user_id="other-2", chat_id="other-2", platform="cli", chat_type="dm") == "cli:other-2"
+    assert plugin._resolve_namespace(user_id="owner-1", chat_id="group-9", platform="cli", chat_type="group") == "cli:group:group-9"
+
+
+def test_contract_evidence_merge_keeps_both_lanes_and_deduplicates():
+    plugin = _plugin()
+    contract_lane = [{"uri": "core://neutral/contract", "content": "contract"}]
+    recall_lane = [
+        {"uri": "core://neutral/contract", "content": "duplicate"},
+        {"uri": "core://neutral/authoritative", "content": "authoritative"},
+    ]
+    merged = plugin._merge_contract_evidence(contract_lane, recall_lane)
+    assert [item["uri"] for item in merged] == [
+        "core://neutral/contract",
+        "core://neutral/authoritative",
+    ]
+
+
 def test_post_tool_and_post_llm_emit_behavioral_verdict(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     plugin = _plugin()

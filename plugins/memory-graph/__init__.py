@@ -394,6 +394,18 @@ def _is_shared_chat(chat_type: str = "", user_id: str = "", chat_id: str = "") -
     return bool(user_id and chat_id and str(user_id) != str(chat_id))
 
 
+def _default_terminal_user() -> str:
+    try:
+        import yaml
+        cfg_path = Path.home() / ".hermes" / "config.yaml"
+        if cfg_path.exists():
+            cfg = yaml.safe_load(cfg_path.read_text()) or {}
+            return str((cfg.get("memory_graph") or {}).get("default_terminal_user") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _resolve_namespace(user_id: str = "", chat_id: str = "",
                         platform: str = "", chat_type: str = "",
                         thread_id: str = "", **kwargs) -> str:
@@ -409,19 +421,11 @@ def _resolve_namespace(user_id: str = "", chat_id: str = "",
             parts.append(tid)
         return ":".join(parts)
     identifier = uid or cid or ""
+    default_user = _default_terminal_user()
+    if plat.lower() in {"cli", "terminal"} and default_user:
+        if not identifier or identifier == default_user:
+            return f"telegram:{default_user}"
     if not identifier:
-        # Terminal session: try to find user from config
-        try:
-            import yaml
-            cfg_path = Path.home() / ".hermes" / "config.yaml"
-            if cfg_path.exists():
-                cfg = yaml.safe_load(cfg_path.read_text()) or {}
-                mg_cfg = cfg.get("memory_graph", {})
-                default_user = mg_cfg.get("default_terminal_user", "")
-                if default_user:
-                    return f"telegram:{default_user}"
-        except Exception:
-            pass
         return ""
     if plat:
         return f"{plat}:{identifier}"
@@ -496,6 +500,21 @@ def _apply_turn_namespace_from_kwargs(kwargs: dict):
 # Protocol injection: first N turns get a brief auto-store reminder
 _protocol_turn_count = 0
 _PROTOCOL_MAX_TURNS = 8  # Inject for first 8 turns, then stop
+
+
+def _merge_contract_evidence(contract_results, recall_results, limit=12):
+    """Merge bounded evidence lanes without letting one hide the other."""
+    merged = []
+    seen = set()
+    for item in list(contract_results or []) + list(recall_results or []):
+        uri = str(item.get("uri") or "")
+        if not uri or uri in seen:
+            continue
+        seen.add(uri)
+        merged.append(item)
+        if len(merged) >= limit:
+            break
+    return merged
 
 
 def _pre_llm_call(user_message="", **kwargs):
@@ -578,13 +597,13 @@ def _pre_llm_call(user_message="", **kwargs):
                             asyncio.run,
                             _async_scoped_search(
                                 query, namespace=ns, include_core=True,
-                                shared_scope=shared_scope, limit=10,
+                                shared_scope=shared_scope, limit=5,
                             ),
                         ).result(timeout=3)
                 else:
                     lane = asyncio.run(_async_scoped_search(
                         query, namespace=ns, include_core=True,
-                        shared_scope=shared_scope, limit=10,
+                        shared_scope=shared_scope, limit=5,
                     ))
                 for item in lane:
                     uri = item.get("uri", "")
@@ -664,12 +683,41 @@ def _pre_llm_call(user_message="", **kwargs):
             try:
                 from agent.memory_task_contract import build_task_memory_contract
 
+                contract_evidence = _merge_contract_evidence(contract_results, results)
                 contract = build_task_memory_contract(
                     user_text,
-                    contract_results or results,
+                    contract_evidence,
                     namespace=ns,
                 )
                 contract_prompt = contract.to_prompt()
+                proactive_prompt = ""
+                try:
+                    from agent.proactive_need import decide_proactive_need
+
+                    proactive = decide_proactive_need(
+                        user_text,
+                        obligations=contract.obligations,
+                        active_todos=kwargs.get("active_todos") or [],
+                        evidence_uris=contract.evidence_uris,
+                        task_verified_complete=bool(kwargs.get("task_verified_complete", False)),
+                    )
+                    if proactive.action == "act":
+                        proactive_prompt = (
+                            "[Proactive action policy: Evidence supports acting now. "
+                            f"Next bounded step: {proactive.next_step}. Execute it through the normal tool safety and verification gates.]"
+                        )
+                    elif proactive.action == "diagnose":
+                        proactive_prompt = (
+                            "[Proactive action policy: Perform bounded read-only diagnosis now. "
+                            "Do not mutate state unless the user separately authorizes the write scope.]"
+                        )
+                    elif proactive.action == "clarify":
+                        proactive_prompt = (
+                            "[Proactive action policy: The next step has material side effects and lacks scoped authorization. "
+                            "Ask only for the target/scope needed before acting.]"
+                        )
+                except Exception:
+                    logger.debug("Proactive need policy failed", exc_info=True)
                 session_id = str(kwargs.get("session_id") or "")
                 if session_id:
                     with _contract_lock:
@@ -678,6 +726,8 @@ def _pre_llm_call(user_message="", **kwargs):
                         _turn_repair_fingerprints[session_id] = []
                 if contract_prompt:
                     context = context + "\n\n" + contract_prompt
+                if proactive_prompt:
+                    context = context + "\n\n" + proactive_prompt
             except Exception as contract_exc:
                 logger.debug("Memory task contract compilation failed: %s", contract_exc)
             logger.debug("Memory Graph auto-recall: %d results", len(parts))

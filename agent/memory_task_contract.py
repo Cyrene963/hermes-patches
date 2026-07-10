@@ -177,7 +177,7 @@ def build_contract_recall_queries(query: str) -> list[str]:
         queries.extend(("用户 文件交付 偏好 真实附件 message_id", "file delivery attachment preference"))
     if re.search(r"记忆系统|数字替身|外置大脑|memory os|memory system", lower):
         queries.extend(("记忆系统 可验证闭环 自动写入 自动召回", "memory capability behavioral evidence"))
-    if re.search(r"继续|推进|完成|修复|实现|调研|研究|build|fix|implement|finish|complete", lower):
+    if re.search(r"继续|推进|完成|修复|实现|调研|研究|下一步|还有.{0,8}(步骤|任务|工作)|未完成|剩余|pending|next step|remaining|build|fix|implement|finish|complete", lower):
         queries.extend((
             "用户 持续推进 不要问 是否继续 直到完成 验收 偏好",
             "user autonomy preference continue until verified do not ask",
@@ -421,18 +421,37 @@ def compile_obligations(query: str, evidence: Iterable[dict[str, Any] | Evidence
             evidence_uris=memory_uris,
         ))
 
-    autonomy_task = bool(re.search(r"继续|推进|完成|修复|实现|调研|研究|build|fix|implement|finish|complete", q))
+    autonomy_task = bool(re.search(r"继续|推进|完成|修复|实现|调研|研究|下一步|还有.{0,8}(步骤|任务|工作)|未完成|剩余|pending|next step|remaining|build|fix|implement|finish|complete", q))
     autonomy_uris = _matching_uris(items, (
         r"不要问.*继续|不问.*继续|不要.*等.*回复|自己.*推进|持续推进|直到.*完成|continue until|do not ask.*continue",
     ))
-    # Repeated corrections are stronger than one incidental sentence. Require
-    # two independent evidence nodes before promoting this into a hard contract.
-    if autonomy_task and len(autonomy_uris) >= 2:
+    authoritative_autonomy_uris: list[str] = []
+    for item in items:
+        hay = f"{item.uri}\n{item.text}".lower()
+        english_authority = (
+            "authorized" in hay
+            and bool(re.search(r"continue through|without pausing", hay, re.I))
+            and bool(re.search(r"verification|verified", hay, re.I))
+        )
+        cjk_authority = (
+            "权威用户规则" in hay
+            and bool(re.search(r"持续执行|继续推进", hay))
+            and bool(re.search(r"验收|验证", hay))
+        )
+        if (english_authority or cjk_authority) and item.uri and item.uri not in authoritative_autonomy_uris:
+            authoritative_autonomy_uris.append(item.uri)
+    authoritative_autonomy_uris = authoritative_autonomy_uris[:4]
+    # Repeated ordinary corrections are stronger than one incidental sentence.
+    # A single explicitly-authorized rule with a verification boundary is also
+    # sufficient; the stronger pattern prevents one casual sentence becoming a
+    # standing action mandate.
+    autonomy_evidence = authoritative_autonomy_uris or autonomy_uris
+    if autonomy_task and (authoritative_autonomy_uris or len(autonomy_uris) >= 2):
         obligations.append(Obligation(
             id="autonomy.continue_until_verified",
             description="Continue through all inferable next stages without asking whether to continue; stop only when the task is verified complete or a concrete external blocker prevents progress.",
             required_result_markers=["progress_evidence", "no_active_todos"],
-            evidence_uris=autonomy_uris,
+            evidence_uris=autonomy_evidence,
         ))
     return obligations
 
