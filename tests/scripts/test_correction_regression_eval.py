@@ -20,6 +20,9 @@ def test_replay_active_case_passes(tmp_path):
     assert report["total"] == 1
     assert report["passed"] == 1
     assert report["failed"] == 0
+    assert report["variant_total"] == 3
+    assert report["variant_passed"] == 3
+    assert report["negative_false_positives"] == 0
 
 
 def test_replay_detects_schema_expectation_regression(tmp_path):

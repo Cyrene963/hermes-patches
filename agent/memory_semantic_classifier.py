@@ -180,7 +180,31 @@ def _fallback_classify(user_message: str, assistant_message: str = "") -> Semant
             "user stated an open-source-safe architecture target function",
         )
 
-    if re.search(r"(纠正|错了|错错错|不对|不是|又没|太气人|防复发|根因|通用.*解决|reject gate|数字替身|外置大脑|有必要吗|之前.*聊过|先回忆|先召回|项目目标)", text, re.I):
+    strong_correction = re.search(
+        r"(纠正|错了|错错错|不对|又没|太气人|防复发|根因|通用.*解决|reject gate|有必要吗|先回忆|先召回)",
+        text,
+        re.I,
+    )
+    correction_discourse = re.search(
+        r"(不要把.{0,30}当|不要.{0,20}(停|等)|还没有.{0,30}就|不能只.{0,30}(应|要)|不应.{0,30}(而|要|应)|"
+        r"partial checkpoint is not completion|do not claim (success|isolation)|must not stop|"
+        r"before (claiming|calling).{0,20}(done|complete)|instead of waiting)",
+        text,
+        re.I,
+    )
+    failed_behavior = re.search(
+        r"(中途|停下|停止|未完成|剩余|验收|验证|测试|回读|防复发|泄漏|跨用户|隔离|"
+        r"过度设计|简化|completion|checkpoint|verification|runtime evidence|readback|"
+        r"cross-user|tenant-scoped|leak|over.?engineer|remaining step)",
+        text,
+        re.I,
+    )
+    legacy_correction = re.search(
+        r"(数字替身|外置大脑|之前.*聊过|项目目标|不是.{0,30}是)",
+        text,
+        re.I,
+    )
+    if strong_correction or legacy_correction or (correction_discourse and failed_behavior):
         return SemanticMemoryClassification(
             "correction_learning_event", "long_term", 0.88, text, "memory_graph", "用户档案/程序性记忆",
             True, "user_private", _queries("agent_memory_workflow", text, "correction_learning_event"),
