@@ -54,6 +54,36 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession as _AsyncSession
 
 
+def _memory_source_rank(item: Dict[str, Any], query: str) -> int:
+    """Rank allowed private/public candidates by durable source quality."""
+    user_profile_intent = any(
+        token in (query or "").casefold()
+        for token in ("preference", "personal", "privacy", "private", "用户偏好", "个人", "隐私", "私人")
+    )
+    path = str(item.get("path", ""))
+    domain = str(item.get("domain", ""))
+    namespace_rank = int(item.get("namespace_rank", 2))
+    user_structured = domain == "用户" or path.startswith("用户档案")
+    other_structured = domain in {"项目", "经验教训"} or path.startswith(("项目", "经验教训"))
+    structured = user_structured or other_structured
+    conversation = path.startswith("对话记录")
+    if namespace_rank == 0 and user_profile_intent and user_structured:
+        return 0
+    if namespace_rank == 0 and structured:
+        return 1
+    if namespace_rank == 1 and user_profile_intent and user_structured:
+        return 2
+    if namespace_rank == 1 and structured:
+        return 3
+    if namespace_rank == 0 and not conversation:
+        return 4
+    if namespace_rank == 0 and conversation:
+        return 5
+    if not conversation:
+        return 6
+    return 7
+
+
 class SearchIndexer:
     """Search index maintenance and query engine (PostgreSQL tsvector + ILIKE fallback)."""
 
@@ -374,7 +404,12 @@ class SearchIndexer:
                 # tsvector full-text search with broad OR ranking
                 search_text = self._SEARCH_TEXT_EXPR
                 domain_clause = ""
-                params: dict = {"namespace": namespace, "ts_query": or_ts_query, "raw_query": query, "candidate_limit": limit * 5}
+                params: dict = {
+                    "namespace": namespace,
+                    "ts_query": or_ts_query,
+                    "raw_query": query,
+                    "candidate_limit": max(limit * 5, 100),
+                }
                 if domain is not None:
                     domain_clause = "AND sd.domain = :domain"
                     params["domain"] = domain
@@ -473,7 +508,7 @@ class SearchIndexer:
                         ),
                     })
 
-            weighted_terms = self._query_rank_terms(query)
+            weighted_terms = self._query_rank_terms(normalized)
             terms = [term for term, _weight in weighted_terms]
 
             def _path_rank(path: str) -> int:
@@ -497,12 +532,10 @@ class SearchIndexer:
                 long_hit_count = sum(1 for t in terms if len(t) >= 4 and t in hay)
                 exact_phrase = 1 if query.strip().lower() in hay else 0
                 return (
-                    # Namespace tier FIRST: the caller's private memories are the
-                    # user's canonical truth and must outrank shared/public nodes,
-                    # however keyword-rich those are. The SQL already orders by
-                    # namespace_rank; this rerank previously discarded that and let
-                    # long shared notes bury private facts (eval cases 2/3).
-                    int(item.get("namespace_rank", 2)),
+                    # SQL namespace filtering already excludes other users. Within
+                    # the allowed current/private + public set, prefer durable
+                    # structured facts over raw conversation fragments.
+                    _memory_source_rank(item, query),
                     -exact_phrase,
                     -high_signal_hits,
                     -weighted_hit_score,

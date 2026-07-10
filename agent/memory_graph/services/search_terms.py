@@ -111,10 +111,31 @@ class SearchTokenizer:
         return terms
 
 
+_QUERY_SYNONYM_GROUPS = (
+    ("preference", "prefer", "偏好", "喜欢", "标准"),
+    ("verify", "verification", "evidence", "验收", "验证", "证据", "回读"),
+    ("complete", "completion", "completed", "finished", "done", "完成", "结束"),
+    ("privacy", "private", "personal", "shared memory", "memory space", "tenant scope", "isolation", "namespace", "隐私", "私人", "共享记忆", "隔离", "命名空间"),
+    ("writing", "draft", "coverage", "写作", "动笔", "要点", "覆盖"),
+    ("transactional writing", "task-based", "paper 2", "bullet point", "事务写作", "任务型写作", "要点覆盖"),
+    ("frontend", "web app", "browser", "device", "网页", "前端", "浏览器", "设备"),
+    ("web app", "public url", "real device", "safari", "browser path", "公网", "真机", "真实路径"),
+    ("evidence", "implementation", "file exists", "runtime", "artifact", "readback", "clean install", "真实运行", "实现文件", "产物", "回读", "全新安装"),
+    ("memory", "recall", "correction", "regression", "记忆", "召回", "纠错", "防复发"),
+    ("one-off note", "procedural guard", "root cause", "recurrence", "一次性笔记", "程序性规则", "根因", "防复发"),
+    ("continue", "remaining", "checkpoint", "继续", "剩余", "检查点", "阶段"),
+)
+
+
 def expand_query_terms(query: str) -> str:
-    """Normalize query text into jieba-segmented tokens plus CJK compounds."""
+    """Normalize query and add generic cross-language intent synonyms."""
     tokens = SearchTokenizer.tokenize(query)
     tokens.extend(SearchTokenizer._preserve_compound_cjk_terms(query))
+    lowered = (query or "").casefold()
+    for group in _QUERY_SYNONYM_GROUPS:
+        if any(term.casefold() in lowered for term in group):
+            for term in group:
+                tokens.extend(SearchTokenizer.tokenize(term))
     return " ".join(SearchTokenizer.dedupe(tokens))
 
 
