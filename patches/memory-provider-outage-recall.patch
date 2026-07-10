@@ -1,0 +1,82 @@
+diff --git a/agent/memory_manager.py b/agent/memory_manager.py
+index 32dd8e2..b0dddab 100644
+--- a/agent/memory_manager.py
++++ b/agent/memory_manager.py
+@@ -30,6 +30,7 @@ import logging
+ import re
+ import inspect
+ import threading
++import time
+ from concurrent.futures import ThreadPoolExecutor
+ from typing import Any, Callable, Dict, List, Optional
+ 
+@@ -44,6 +45,7 @@ logger = logging.getLogger(__name__)
+ # teardown indefinitely — the worker threads are daemon, so anything still
+ # running past this window dies with the interpreter.
+ _SYNC_DRAIN_TIMEOUT_S = 5.0
++_RECALL_FALLBACK_TTL_S = 15 * 60
+ 
+ 
+ def normalize_tool_schema(schema: Any) -> Optional[Dict[str, Any]]:
+@@ -368,6 +370,9 @@ class MemoryManager:
+         # _submit_background() and the sync_all/queue_prefetch_all rationale.
+         self._sync_executor: Optional[ThreadPoolExecutor] = None
+         self._sync_executor_lock = threading.Lock()
++        # Transient outages may reuse only recent context from this manager and
++        # the same session. This cache never persists or crosses chat scopes.
++        self._last_good_recall: Dict[tuple[str, str], tuple[float, str]] = {}
+ 
+     # -- Registration --------------------------------------------------------
+ 
+@@ -503,15 +508,31 @@ class MemoryManager:
+             return ""
+         parts = []
+         for provider in self._providers:
++            cache_key = (provider.name, session_id)
+             try:
+                 result = provider.prefetch(clean_query, session_id=session_id)
+                 if result and result.strip():
+                     parts.append(result)
++                    self._last_good_recall[cache_key] = (time.monotonic(), result)
+             except Exception as e:
+-                logger.debug(
+-                    "Memory provider '%s' prefetch failed (non-fatal): %s",
+-                    provider.name, e,
+-                )
++                cached = self._last_good_recall.get(cache_key)
++                if cached and time.monotonic() - cached[0] <= _RECALL_FALLBACK_TTL_S:
++                    parts.append(
++                        "[Memory recall degraded: provider unavailable; using recent "
++                        f"session-local context from {provider.name}.]\n{cached[1]}"
++                    )
++                    logger.warning(
++                        "Memory provider '%s' prefetch failed; using recent "
++                        "session-local recall: %s",
++                        provider.name, e,
++                    )
++                else:
++                    self._last_good_recall.pop(cache_key, None)
++                    logger.warning(
++                        "Memory provider '%s' prefetch failed with no recent "
++                        "session-local recall: %s",
++                        provider.name, e,
++                    )
+         return "\n\n".join(parts)
+ 
+     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
+diff --git a/agent/turn_context.py b/agent/turn_context.py
+index 4fd6ddf..fedae19 100644
+--- a/agent/turn_context.py
++++ b/agent/turn_context.py
+@@ -546,7 +546,10 @@ def build_turn_context(
+     if agent._memory_manager:
+         try:
+             _query = original_user_message if isinstance(original_user_message, str) else ""
+-            ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
++            ext_prefetch_cache = agent._memory_manager.prefetch_all(
++                _query,
++                session_id=agent.session_id or "",
++            ) or ""
+         except Exception:
+             pass
+ 
