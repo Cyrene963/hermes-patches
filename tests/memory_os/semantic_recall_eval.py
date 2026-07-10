@@ -171,8 +171,24 @@ class Harness:
         R.append(top1_case("7_top1_semantic", NS_A, "Alex 喝咖啡有什么偏好", t,
                             also_anchor="美式", carriage_title="dup_coffee"))
 
-        R.append(Result("8_hindsight_masking", "SKIP",
-                        "needs MG-outage injection; run in CI with stubbed MG"))
+        original_search = self.mg._search
+        try:
+            def _outage(_payload):
+                raise RuntimeError("synthetic Memory Graph outage")
+
+            self.mg._search = _outage
+            degraded = self.carriage(NS_A, "我的编辑器偏好是什么")
+            unavailable = bool(degraded and "Memory Graph unavailable" in degraded)
+            masqueraded = bool(degraded and "pref_editor" in degraded)
+            R.append(Result(
+                "8_hindsight_masking",
+                "PASS" if unavailable and not masqueraded else "FAIL",
+                f"outage_visible={unavailable} stale_anchor_masqueraded={masqueraded}",
+            ))
+        except Exception as e:
+            R.append(Result("8_hindsight_masking", "FAIL", f"fault injection failed: {e}"))
+        finally:
+            self.mg._search = original_search
 
         try:
             from agent.memory_metacognition import get_tool_preflight_block_message as gate

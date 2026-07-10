@@ -1417,7 +1417,13 @@ class HindsightMemoryProvider(MemoryProvider):
                 logger.debug("Prefetch: Memory Graph returned %d anchor results", len(lines))
                 return "## Memory Graph Anchors\n" + "\n".join(lines)
         except Exception as exc:
-            logger.debug("Memory Graph prefetch anchors failed: %s", exc, exc_info=True)
+            logger.warning("Memory Graph prefetch anchors unavailable: %s", exc)
+            return (
+                "## Memory Graph Status\n"
+                "[Memory Graph unavailable: structured truth-source recall could not be verified. "
+                "Hindsight content below, if any, is historical evidence only and must not be treated "
+                "as confirmed current truth.]"
+            )
         return ""
 
     def _aistudio_prefetch_text(self, query: str) -> str:

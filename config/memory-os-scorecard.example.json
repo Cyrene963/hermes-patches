@@ -7,101 +7,270 @@
       "id": "namespace_isolation",
       "weight": 12,
       "gates": [
-        {"id": "focused_tests", "status": "PASS", "evidence": "59 Telegram/group/privacy tests"},
-        {"id": "semantic_cross_user", "status": "PASS", "json": "../evidence/semantic-recall-auto-continuation-20260710.json", "json_require": {"fail": 0}},
-        {"id": "live_restart", "status": "PASS", "evidence_file": "../evidence/memory-os-correction-regression-audit-20260710.md"},
-        {"id": "fault_injection", "status": "MISSING"}
+        {
+          "id": "focused_tests",
+          "status": "PASS",
+          "evidence": "59 Telegram/group/privacy tests"
+        },
+        {
+          "id": "semantic_cross_user",
+          "status": "PASS",
+          "json": "../evidence/semantic-recall-auto-continuation-20260710.json",
+          "json_require": {
+            "fail": 0
+          }
+        },
+        {
+          "id": "live_restart",
+          "status": "PASS",
+          "evidence_file": "../evidence/memory-os-correction-regression-audit-20260710.md"
+        },
+        {
+          "id": "fault_injection",
+          "status": "PASS",
+          "json": "../evidence/semantic-recall-no-skip-20260710.json",
+          "json_require": {
+            "fail": 0,
+            "skip": 0
+          }
+        }
       ]
     },
     {
       "id": "semantic_recall",
       "weight": 12,
       "gates": [
-        {"id": "semantic_eval", "status": "PASS", "json": "../evidence/semantic-recall-auto-continuation-20260710.json", "json_require": {"fail": 0}},
-        {"id": "no_skips", "status": "SKIP", "json": "../evidence/semantic-recall-auto-continuation-20260710.json"},
-        {"id": "live_prompt_carriage", "status": "PASS", "evidence_file": "../evidence/memory-os-p1-behavior-audit-20260710.md"},
-        {"id": "provider_outage", "status": "MISSING"}
+        {
+          "id": "semantic_eval",
+          "status": "PASS",
+          "json": "../evidence/semantic-recall-no-skip-20260710.json",
+          "json_require": {
+            "fail": 0,
+            "skip": 0
+          }
+        },
+        {
+          "id": "no_skips",
+          "status": "PASS",
+          "json": "../evidence/semantic-recall-no-skip-20260710.json",
+          "json_require": {
+            "fail": 0,
+            "skip": 0
+          }
+        },
+        {
+          "id": "live_prompt_carriage",
+          "status": "PASS",
+          "evidence_file": "../evidence/memory-os-p1-behavior-audit-20260710.md"
+        },
+        {
+          "id": "provider_outage",
+          "status": "MISSING"
+        }
       ]
     },
     {
       "id": "automatic_writeback",
       "weight": 12,
       "gates": [
-        {"id": "write_tests", "status": "PASS", "evidence": "write and user-journey regression"},
-        {"id": "private_namespace_write", "status": "PASS", "evidence_file": "../evidence/memory-os-correction-regression-audit-20260710.md"},
-        {"id": "readback", "status": "PASS", "evidence_file": "../evidence/correction-regression-live-probe-20260710.jsonl"},
-        {"id": "general_live_auto_mode", "status": "MISSING"}
+        {
+          "id": "write_tests",
+          "status": "PASS",
+          "evidence": "write and user-journey regression"
+        },
+        {
+          "id": "private_namespace_write",
+          "status": "PASS",
+          "evidence_file": "../evidence/memory-os-correction-regression-audit-20260710.md"
+        },
+        {
+          "id": "readback",
+          "status": "PASS",
+          "evidence_file": "../evidence/correction-regression-live-probe-20260710.jsonl"
+        },
+        {
+          "id": "general_live_auto_mode",
+          "status": "MISSING"
+        }
       ]
     },
     {
       "id": "correction_learning",
       "weight": 10,
       "gates": [
-        {"id": "privacy_safe_ledger", "status": "PASS", "evidence_file": "../evidence/correction-regression-live-probe-20260710.jsonl"},
-        {"id": "executable_replay", "status": "PASS", "evidence_file": "../evidence/memory-os-correction-regression-audit-20260710.md"},
-        {"id": "durable_patch", "status": "PASS", "git_commit": "9d6540b2d036e0ab052b213106215167de171c80"},
-        {"id": "daily_replay_history", "status": "MISSING"}
+        {
+          "id": "privacy_safe_ledger",
+          "status": "PASS",
+          "evidence_file": "../evidence/correction-regression-live-probe-20260710.jsonl"
+        },
+        {
+          "id": "executable_replay",
+          "status": "PASS",
+          "evidence_file": "../evidence/memory-os-correction-regression-audit-20260710.md"
+        },
+        {
+          "id": "durable_patch",
+          "status": "PASS",
+          "git_commit": "9d6540b2d036e0ab052b213106215167de171c80"
+        },
+        {
+          "id": "daily_replay_history",
+          "status": "MISSING"
+        }
       ]
     },
     {
       "id": "temporal_supersession",
       "weight": 10,
       "gates": [
-        {"id": "version_tests", "status": "PASS", "evidence": "5 temporal tests"},
-        {"id": "live_two_versions", "status": "PASS", "evidence_file": "../evidence/memory-os-temporal-supersession-audit-20260710.md"},
-        {"id": "automatic_conflict_discovery", "status": "PASS", "git_commit": "c7f366ba886528dd50ef574c79293e534121cd5f"},
-        {"id": "multi_conflict_resolution", "status": "MISSING"}
+        {
+          "id": "version_tests",
+          "status": "PASS",
+          "evidence": "5 temporal tests"
+        },
+        {
+          "id": "live_two_versions",
+          "status": "PASS",
+          "evidence_file": "../evidence/memory-os-temporal-supersession-audit-20260710.md"
+        },
+        {
+          "id": "automatic_conflict_discovery",
+          "status": "PASS",
+          "git_commit": "c7f366ba886528dd50ef574c79293e534121cd5f"
+        },
+        {
+          "id": "multi_conflict_resolution",
+          "status": "MISSING"
+        }
       ]
     },
     {
       "id": "task_memory_contracts",
       "weight": 12,
       "gates": [
-        {"id": "compiler_tests", "status": "PASS", "evidence_file": "../evidence/memory-os-p1-behavior-audit-20260710.md"},
-        {"id": "tool_evidence", "status": "PASS", "evidence_file": "../evidence/memory-os-autonomous-continuation-audit-20260710.md"},
-        {"id": "completion_gate", "status": "PASS", "git_commit": "5154e46325601dc9f87adb83be2aad7a7de62761"},
-        {"id": "automatic_repair", "status": "MISSING"}
+        {
+          "id": "compiler_tests",
+          "status": "PASS",
+          "evidence_file": "../evidence/memory-os-p1-behavior-audit-20260710.md"
+        },
+        {
+          "id": "tool_evidence",
+          "status": "PASS",
+          "evidence_file": "../evidence/memory-os-autonomous-continuation-audit-20260710.md"
+        },
+        {
+          "id": "completion_gate",
+          "status": "PASS",
+          "git_commit": "5154e46325601dc9f87adb83be2aad7a7de62761"
+        },
+        {
+          "id": "automatic_repair",
+          "status": "MISSING"
+        }
       ]
     },
     {
       "id": "autonomous_continuation",
       "weight": 10,
       "gates": [
-        {"id": "same_turn_continue", "status": "PASS", "evidence_file": "../evidence/memory-os-autonomous-continuation-audit-20260710.md"},
-        {"id": "todo_and_action_evidence", "status": "PASS", "evidence_file": "../evidence/memory-os-autonomous-continuation-audit-20260710.md"},
-        {"id": "iteration_budget_500", "status": "PASS", "config_key": "agent.max_turns", "expected": 500},
-        {"id": "controller_completed_run", "status": "MISSING"}
+        {
+          "id": "same_turn_continue",
+          "status": "PASS",
+          "evidence_file": "../evidence/memory-os-autonomous-continuation-audit-20260710.md"
+        },
+        {
+          "id": "todo_and_action_evidence",
+          "status": "PASS",
+          "evidence_file": "../evidence/memory-os-autonomous-continuation-audit-20260710.md"
+        },
+        {
+          "id": "iteration_budget_500",
+          "status": "PASS",
+          "config_key": "agent.max_turns",
+          "expected": 500
+        },
+        {
+          "id": "controller_completed_run",
+          "status": "MISSING"
+        }
       ]
     },
     {
       "id": "cross_session_continuity",
       "weight": 8,
       "gates": [
-        {"id": "resolver_tests", "status": "PASS", "evidence": "61 continuity/session/plugin tests"},
-        {"id": "two_user_live_db", "status": "PASS", "evidence": "synthetic two-user isolation probe"},
-        {"id": "durable_patch", "status": "PASS", "git_commit": "4bc41009fee943e54c6e1839d656122100fa7970"},
-        {"id": "multi_entry_longitudinal", "status": "MISSING"}
+        {
+          "id": "resolver_tests",
+          "status": "PASS",
+          "evidence": "61 continuity/session/plugin tests"
+        },
+        {
+          "id": "two_user_live_db",
+          "status": "PASS",
+          "evidence": "synthetic two-user isolation probe"
+        },
+        {
+          "id": "durable_patch",
+          "status": "PASS",
+          "git_commit": "4bc41009fee943e54c6e1839d656122100fa7970"
+        },
+        {
+          "id": "multi_entry_longitudinal",
+          "status": "MISSING"
+        }
       ]
     },
     {
       "id": "durable_deployment",
       "weight": 8,
       "gates": [
-        {"id": "fresh_upstream", "status": "PASS", "evidence": "latest upstream overlay verification"},
-        {"id": "public_privacy", "status": "PASS", "evidence": "public patch privacy guard"},
-        {"id": "remote_parity", "status": "PASS", "repo": ".."},
-        {"id": "clean_install_full_e2e", "status": "MISSING"}
+        {
+          "id": "fresh_upstream",
+          "status": "PASS",
+          "evidence": "latest upstream overlay verification"
+        },
+        {
+          "id": "public_privacy",
+          "status": "PASS",
+          "evidence": "public patch privacy guard"
+        },
+        {
+          "id": "remote_parity",
+          "status": "PASS",
+          "repo": ".."
+        },
+        {
+          "id": "clean_install_full_e2e",
+          "status": "MISSING"
+        }
       ]
     },
     {
       "id": "failure_resilience",
       "weight": 6,
       "gates": [
-        {"id": "repair_queue", "status": "PASS", "evidence": "failed readback records repair"},
-        {"id": "gateway_restart", "status": "PASS", "health_url": "http://127.0.0.1:8642/health"},
-        {"id": "mg_outage", "status": "MISSING"},
-        {"id": "hindsight_outage", "status": "MISSING"},
-        {"id": "db_outage", "status": "MISSING"}
+        {
+          "id": "repair_queue",
+          "status": "PASS",
+          "evidence": "failed readback records repair"
+        },
+        {
+          "id": "gateway_restart",
+          "status": "PASS",
+          "health_url": "http://127.0.0.1:8642/health"
+        },
+        {
+          "id": "mg_outage",
+          "status": "MISSING"
+        },
+        {
+          "id": "hindsight_outage",
+          "status": "MISSING"
+        },
+        {
+          "id": "db_outage",
+          "status": "MISSING"
+        }
       ]
     }
   ]

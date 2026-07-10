@@ -652,6 +652,19 @@ class TestToolHandlers:
 
 
 class TestPrefetch:
+    def test_memory_graph_prefetch_outage_is_explicit(self, provider_with_config, monkeypatch):
+        provider = provider_with_config(memory_graph_prefetch=True)
+        provider._memory_namespace = "telegram:test"
+        import tools.memory_graph_tool as memory_graph_tool
+
+        def outage(_payload):
+            raise RuntimeError("synthetic outage")
+
+        monkeypatch.setattr(memory_graph_tool, "_search", outage)
+        text = provider._memory_graph_prefetch_text("current preference")
+        assert "Memory Graph unavailable" in text
+        assert "historical evidence only" in text
+
     def test_prefetch_returns_empty_when_no_result(self, provider_with_config):
         provider = provider_with_config(memory_graph_prefetch=False)
         provider._client.arecall.return_value = SimpleNamespace(results=[])
