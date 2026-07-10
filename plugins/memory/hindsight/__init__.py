@@ -1425,7 +1425,22 @@ class HindsightMemoryProvider(MemoryProvider):
         if not self._config.get("aistudio_prefetch", False):
             return ""
         owner_id = str(self._config.get("aistudio_owner_user_id") or "").strip()
-        if not owner_id or str(self._user_id or "").strip() != owner_id:
+        request_user_id = ""
+        request_namespace = ""
+        try:
+            from agent.request_context import get_context
+            request_context = get_context()
+            if request_context:
+                request_user_id = str(request_context.user_id or "").strip()
+                request_namespace = str(request_context.namespace or "").strip()
+        except Exception:
+            pass
+        identities = {str(self._user_id or "").strip(), request_user_id}
+        namespace_owner = request_namespace.rsplit(":", 1)[-1] if ":" in request_namespace else ""
+        if namespace_owner:
+            identities.add(namespace_owner)
+        identities.discard("")
+        if not owner_id or owner_id not in identities:
             return ""
         from pathlib import Path
         db_path = Path(str(self._config.get("aistudio_turn_db") or ""))
@@ -1442,29 +1457,58 @@ class HindsightMemoryProvider(MemoryProvider):
             import sqlite3
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
-            terms = [part for part in re.findall(r"[A-Za-z0-9_+-]{2,}|[\u3400-\u9fff]{2,}", raw_query) if part]
-            expanded_terms = list(terms)
-            for term in terms:
-                if re.fullmatch(r"[\u3400-\u9fff]+", term) and len(term) > 6:
-                    expanded_terms.extend(term[i : i + 4] for i in range(0, len(term) - 3, 2))
-            terms = list(dict.fromkeys(expanded_terms))[:16]
+            raw_terms = [part for part in re.findall(r"[A-Za-z0-9_+-]{2,}|[\u3400-\u9fff]+", raw_query) if part]
+            cjk_stop = {
+                "什么", "为什么", "怎么", "怎样", "哪些", "以前", "参加", "表现", "差异",
+                "我为", "为什", "么说", "我以", "前参", "有什", "什么差", "实际", "使用",
+                "感受", "质疑", "不适", "适合做", "为什么说",
+            }
+            terms: list[str] = []
+            for part in raw_terms:
+                if re.fullmatch(r"[\u3400-\u9fff]+", part):
+                    for width in (2, 3, 4):
+                        if len(part) < width:
+                            continue
+                        terms.extend(
+                            part[i : i + width]
+                            for i in range(0, len(part) - width + 1)
+                            if part[i : i + width] not in cjk_stop
+                        )
+                else:
+                    terms.append(part)
+            terms = list(dict.fromkeys(term for term in terms if term and term not in cjk_stop))[:48]
             candidates = conn.execute(
                 """SELECT conversation_name,turn_index,text,create_time,archive_path
                    FROM turns WHERE role='user'"""
             ).fetchall()
-            scored = []
+            import math
+            document_frequency = {term: 0 for term in terms}
+            candidate_text: list[tuple[Any, str, str]] = []
             for row in candidates:
                 text = str(row["text"] or "")
                 name = str(row["conversation_name"] or "")
                 haystack = f"{name}\n{text}".casefold()
+                candidate_text.append((row, name, haystack))
+                for term in terms:
+                    if term.casefold() in haystack:
+                        document_frequency[term] += 1
+            total_docs = max(1, len(candidates))
+            scored = []
+            for row, name, haystack in candidate_text:
                 matched = [term for term in terms if term.casefold() in haystack]
                 if not matched:
                     continue
-                score = sum(min(len(term), 20) ** 2 for term in matched)
+                score = 0.0
+                for term in matched:
+                    idf = math.log((total_docs + 1) / (document_frequency[term] + 1)) + 1.0
+                    lexical_weight = 2.0 if re.search(r"[A-Za-z0-9]", term) else min(2.0, len(term) / 2.0)
+                    score += idf * lexical_weight
+                # Reward independent evidence coverage without letting one title token dominate.
+                score += min(30.0, len(matched) ** 1.5)
                 if raw_query.casefold() in haystack:
-                    score += 1000
-                if any(term.casefold() in name.casefold() for term in matched):
-                    score += 100
+                    score += 50.0
+                title_matches = sum(1 for term in matched if term.casefold() in name.casefold())
+                score += min(8.0, title_matches * 2.0)
                 scored.append((score, str(row["create_time"] or ""), row))
             scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
             rows = [item[2] for item in scored[:limit]]

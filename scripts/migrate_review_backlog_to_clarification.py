@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 
 REVIEW_PATH = Path.home() / ".hermes" / "logs" / "memory_review_queue" / "review_proposals.current.jsonl"
@@ -116,6 +117,23 @@ def _append_clarifications(items: list[dict]) -> int:
     return written
 
 
+MIXED_EXTERNAL_MODEL_RE = re.compile(
+    r"(?:\bModel\s+\d{1,2}:\d{2}\s*(?:AM|PM)?\b|Thoughts\s+Expand\s+to\s+view\s+model\s+thoughts|\bmodel\s+thoughts\b)",
+    re.I,
+)
+
+
+def _is_role_pure_user_candidate(payload: dict) -> bool:
+    cand = _candidate(payload)
+    metadata = cand.get("metadata") or {}
+    role = str(metadata.get("role") or cand.get("role") or "").strip().lower()
+    source = str(cand.get("source_type") or cand.get("source") or "").strip().lower()
+    text = "\n".join([_content(payload), _evidence(payload)])
+    if source in {"google_ai_studio", "google_ai_studio_distilled"} and role != "user":
+        return False
+    return not MIXED_EXTERNAL_MODEL_RE.search(text)
+
+
 def main() -> int:
     if not REVIEW_PATH.exists():
         print(json.dumps({"status": "missing_review_queue", "path": str(REVIEW_PATH)}))
@@ -137,7 +155,7 @@ def main() -> int:
         status = str(row.get("status", "pending") or "pending")
         reason = _reason(row)
         target_store = _target_store(row)
-        if status == "pending" and target_store == "memory_graph" and reason in MIGRATABLE_REASONS:
+        if status == "pending" and target_store == "memory_graph" and reason in MIGRATABLE_REASONS and _is_role_pure_user_candidate(row):
             cand = _candidate(row)
             cid = _clarification_id(row)
             item = {

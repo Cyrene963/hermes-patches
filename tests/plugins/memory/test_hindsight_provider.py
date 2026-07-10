@@ -713,6 +713,86 @@ class TestPrefetch:
         assert "模型说用户喜欢被附和" not in text
         assert "/private/a" not in text
 
+    def test_aistudio_prefetch_ranks_rare_multilingual_terms_over_generic_cjk(self, provider_with_config, tmp_path):
+        import sqlite3
+
+        db = tmp_path / "turns.sqlite3"
+        conn = sqlite3.connect(db)
+        conn.executescript("""
+            CREATE TABLE turns (
+                id INTEGER PRIMARY KEY, conversation_id TEXT, conversation_name TEXT,
+                turn_index INTEGER, role TEXT, text TEXT, create_time TEXT,
+                archive_path TEXT
+            );
+            INSERT INTO turns VALUES
+                (1,'a','Generic discussion',0,'user','我为什么会参加一般活动，以及有什么表现差异。','2026-01-01','/private/a'),
+                (2,'b','Language practice',1,'user','我粤语不熟，临场发挥时要先用普通话想一遍，再翻译成粤语。','2026-02-01','/private/b'),
+                (3,'c','Model output',2,'model','模型推断用户粤语很好。','2026-03-01','/private/c');
+        """)
+        conn.commit()
+        conn.close()
+
+        p = provider_with_config(
+            memory_graph_prefetch=False,
+            aistudio_prefetch=True,
+            aistudio_owner_user_id="owner",
+            aistudio_turn_db=str(db),
+        )
+        p._user_id = "owner"
+        text = p._aistudio_prefetch_text("我为什么说粤语临场发挥困难？")
+        first = next(line for line in text.splitlines() if line.startswith("- "))
+        assert "普通话想一遍" in first
+        assert "模型推断" not in text
+        assert "/private/" not in text
+
+    def test_aistudio_prefetch_accepts_owner_from_request_context(self, provider_with_config, tmp_path):
+        import sqlite3
+        from agent.request_context import RequestContext, reset_context, set_context
+
+        db = tmp_path / "turns.sqlite3"
+        conn = sqlite3.connect(db)
+        conn.executescript("""
+            CREATE TABLE turns (
+                id INTEGER PRIMARY KEY, conversation_id TEXT, conversation_name TEXT,
+                turn_index INTEGER, role TEXT, text TEXT, create_time TEXT,
+                archive_path TEXT
+            );
+            INSERT INTO turns VALUES
+                (1,'a','Private history',0,'user','我用普通话想一遍，再翻译成粤语。','2026-01-01','/private/a');
+        """)
+        conn.commit()
+        conn.close()
+        p = provider_with_config(
+            memory_graph_prefetch=False,
+            aistudio_prefetch=True,
+            aistudio_owner_user_id="owner",
+            aistudio_turn_db=str(db),
+        )
+        p._user_id = ""
+        set_context(RequestContext(user_id="owner", platform="telegram", namespace="telegram:owner"))
+        try:
+            assert "普通话想一遍" in p._aistudio_prefetch_text("粤语翻译")
+        finally:
+            reset_context()
+
+    def test_aistudio_prefetch_rejects_wrong_request_context_owner(self, provider_with_config, tmp_path):
+        from agent.request_context import RequestContext, reset_context, set_context
+
+        db = tmp_path / "turns.sqlite3"
+        db.write_bytes(b"must not open for wrong owner")
+        p = provider_with_config(
+            memory_graph_prefetch=False,
+            aistudio_prefetch=True,
+            aistudio_owner_user_id="owner",
+            aistudio_turn_db=str(db),
+        )
+        p._user_id = ""
+        set_context(RequestContext(user_id="other", platform="telegram", namespace="telegram:other"))
+        try:
+            assert p._aistudio_prefetch_text("粤语翻译") == ""
+        finally:
+            reset_context()
+
     def test_aistudio_prefetch_rejects_non_owner(self, provider_with_config, tmp_path):
         db = tmp_path / "turns.sqlite3"
         db.write_bytes(b"not opened for non-owner")
