@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 # Thread-local storage for current namespace context
 _context = threading.local()
+_contract_lock = threading.Lock()
+_turn_contracts: dict[str, object] = {}
+_turn_tool_events: dict[str, list[dict]] = {}
+_turn_contract_verdicts: dict[str, dict] = {}
 
 # Admin platform IDs — users who get admin role in Memory Graph
 # Read from config.yaml memory_graph.admin_platform_ids, fallback to first user
@@ -376,9 +380,10 @@ def _is_shared_chat(chat_type: str = "", user_id: str = "", chat_id: str = "") -
     shared chats. Shared chats get their own namespace.
     """
     ct = (chat_type or "").strip().lower()
-    # personal_group is a private multi-window for one authorized user. The
-    # gateway rewrites chat_id to that user and carries the physical group in
-    # thread_id, so it must share the user's DM memory namespace.
+    # A personal_group is a Telegram group used as one authorized user's
+    # private multi-window. The gateway rewrites chat_id to that user's id and
+    # keeps the physical group in thread_id=group:<id>, so it must share the DM
+    # namespace rather than becoming a shared group memory scope.
     if ct == "personal_group":
         return False
     if ct and ct != "dm":
@@ -518,7 +523,14 @@ def _pre_llm_call(user_message="", **kwargs):
             max_chars=int(cfg.get("auto_recall_max_query_chars", 320)),
             max_tokens=int(cfg.get("auto_recall_max_tokens", 12)),
         )
-        if not recall_queries:
+        contract_queries = []
+        try:
+            from agent.memory_task_contract import build_contract_recall_queries
+
+            contract_queries = build_contract_recall_queries(user_text)
+        except Exception:
+            logger.debug("Memory contract query planning failed", exc_info=True)
+        if not recall_queries and not contract_queries:
             return None
 
         # Search with whole-message and longest-token fallback queries. This is
@@ -526,7 +538,10 @@ def _pre_llm_call(user_message="", **kwargs):
         seen_uris = set()
         all_results = []
         ns = _resolve_runtime_namespace(kwargs)
-        shared_scope = ns.split(":")[1:2] == ["group"] or bool(kwargs.get("chat_type") and kwargs.get("chat_type") != "dm")
+        chat_type = str(kwargs.get("chat_type") or "").strip().lower()
+        shared_scope = ns.split(":")[1:2] == ["group"] or chat_type in {
+            "group", "supergroup", "channel", "thread",
+        }
         max_results = int(cfg.get("auto_recall_max_results", 5))
         for query in recall_queries:
             try:
@@ -548,15 +563,51 @@ def _pre_llm_call(user_message="", **kwargs):
                 break
 
         results = all_results
-
-        if results:
+        # Contract evidence has its own small lane. It must run even when normal
+        # recall already filled max_results, otherwise relation/preference queries
+        # are generated but silently skipped by the early break above.
+        contract_results = []
+        contract_seen = set()
+        for query in contract_queries:
             try:
                 if loop2 and loop2.is_running():
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        results = pool.submit(asyncio.run, _hydrate_recall_content(results, namespace=ns)).result(timeout=3)
+                        lane = pool.submit(
+                            asyncio.run,
+                            _async_scoped_search(
+                                query, namespace=ns, include_core=True,
+                                shared_scope=shared_scope, limit=10,
+                            ),
+                        ).result(timeout=3)
                 else:
-                    results = asyncio.run(_hydrate_recall_content(results, namespace=ns))
+                    lane = asyncio.run(_async_scoped_search(
+                        query, namespace=ns, include_core=True,
+                        shared_scope=shared_scope, limit=10,
+                    ))
+                for item in lane:
+                    uri = item.get("uri", "")
+                    if uri and uri not in contract_seen:
+                        contract_seen.add(uri)
+                        contract_results.append(item)
+            except Exception:
+                logger.debug("Memory contract evidence query failed: %s", query, exc_info=True)
+
+        if results or contract_results:
+            try:
+                hydrate_targets = results + [
+                    item for item in contract_results
+                    if item.get("uri") not in {row.get("uri") for row in results}
+                ]
+                if loop2 and loop2.is_running():
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        hydrated = pool.submit(asyncio.run, _hydrate_recall_content(hydrate_targets, namespace=ns)).result(timeout=3)
+                else:
+                    hydrated = asyncio.run(_hydrate_recall_content(hydrate_targets, namespace=ns))
+                hydrated_by_uri = {item.get("uri"): item for item in hydrated}
+                results = [hydrated_by_uri.get(item.get("uri"), item) for item in results]
+                contract_results = [hydrated_by_uri.get(item.get("uri"), item) for item in contract_results]
             except Exception as e:
                 logger.debug("Memory Graph content hydration failed: %s", e)
 
@@ -591,6 +642,24 @@ def _pre_llm_call(user_message="", **kwargs):
 
         if parts:
             context = "\n".join(parts)
+            try:
+                from agent.memory_task_contract import build_task_memory_contract
+
+                contract = build_task_memory_contract(
+                    user_text,
+                    contract_results or results,
+                    namespace=ns,
+                )
+                contract_prompt = contract.to_prompt()
+                session_id = str(kwargs.get("session_id") or "")
+                if session_id:
+                    with _contract_lock:
+                        _turn_contracts[session_id] = contract
+                        _turn_tool_events[session_id] = []
+                if contract_prompt:
+                    context = context + "\n\n" + contract_prompt
+            except Exception as contract_exc:
+                logger.debug("Memory task contract compilation failed: %s", contract_exc)
             logger.debug("Memory Graph auto-recall: %d results", len(parts))
             return {"context": context}
 
@@ -740,6 +809,120 @@ async def _async_scoped_search(query: str, namespace: str = "", include_core: bo
     return merged
 
 
+def _safe_tool_result_summary(result) -> dict:
+    """Keep compliance evidence bounded and avoid persisting raw tool payloads."""
+    if isinstance(result, dict):
+        summary = {
+            key: result.get(key)
+            for key in ("success", "exit_code", "status", "message_id", "error")
+            if key in result
+        }
+        output = result.get("output") or result.get("content") or ""
+        if output:
+            summary["output"] = str(output)[:500]
+        return summary
+    return {"output": str(result or "")[:500]}
+
+
+def _post_tool_call(tool_name="", args=None, result=None, session_id="", **kwargs):
+    session_key = str(session_id or kwargs.get("task_id") or "")
+    if not session_key:
+        return None
+    with _contract_lock:
+        if session_key not in _turn_contracts:
+            return None
+        events = _turn_tool_events.setdefault(session_key, [])
+        events.append({
+            "tool_name": str(tool_name or ""),
+            "result": _safe_tool_result_summary(result),
+        })
+        del events[:-40]
+    return None
+
+
+def _write_contract_audit(session_id: str, contract, verdict: dict) -> None:
+    try:
+        log_dir = Path.home() / ".hermes" / "logs" / "memory_contracts"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "session_id": session_id,
+            "namespace": getattr(contract, "namespace", ""),
+            "query": getattr(contract, "query", "")[:500],
+            "contract": contract.to_dict(),
+            "verdict": verdict,
+        }
+        with (log_dir / "contracts.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        logger.debug("Memory task contract audit write failed", exc_info=True)
+
+
+def _post_llm_contract_verdict(session_id="", assistant_response="", **kwargs):
+    """Evaluate obligations against actual tool evidence and persist the verdict."""
+    session_key = str(session_id or "")
+    if not session_key:
+        return None
+    with _contract_lock:
+        contract = _turn_contracts.pop(session_key, None)
+        events = _turn_tool_events.pop(session_key, [])
+        prior_verdict = _turn_contract_verdicts.pop(session_key, None)
+    if contract is None:
+        return None
+    try:
+        from agent.memory_task_contract import evaluate_contract
+
+        verdict = prior_verdict or evaluate_contract(contract, events)
+        _write_contract_audit(session_key, contract, verdict)
+        if not verdict.get("passed"):
+            logger.warning(
+                "Memory task contract unmet for session=%s obligations=%s",
+                session_key,
+                [item.get("id") for item in verdict.get("obligations", []) if not item.get("passed")],
+            )
+    except Exception:
+        logger.debug("Memory task contract evaluation failed", exc_info=True)
+    return None
+
+
+def _transform_contract_output(response_text="", session_id="", **kwargs):
+    """Prevent a clean-completion claim when required memory obligations failed."""
+    session_key = str(session_id or "")
+    if not session_key:
+        return None
+    with _contract_lock:
+        verdict = _turn_contract_verdicts.get(session_key)
+        contract = _turn_contracts.get(session_key)
+        events = list(_turn_tool_events.get(session_key, []))
+    # transform_llm_output fires before post_llm_call, so evaluate here when the
+    # post-turn observer has not run yet. post_llm_call will consume and audit.
+    if verdict is None and contract is not None:
+        try:
+            from agent.memory_task_contract import evaluate_contract
+
+            verdict = evaluate_contract(contract, events)
+            with _contract_lock:
+                _turn_contract_verdicts[session_key] = verdict
+        except Exception:
+            logger.debug("Memory contract output gate evaluation failed", exc_info=True)
+            return None
+    if not verdict or verdict.get("passed"):
+        return None
+    failures = []
+    for item in verdict.get("obligations", []):
+        if item.get("passed"):
+            continue
+        missing = ", ".join(str(value) for value in item.get("missing", []))
+        failures.append(f"- {item.get('id')}: {missing or 'required evidence missing'}")
+    if not failures:
+        return None
+    footer = (
+        "[Memory contract: NOT VERIFIED]\n"
+        + "\n".join(failures)
+        + "\nThe response above must not be treated as a fully verified completion claim."
+    )
+    return str(response_text or "").rstrip() + "\n\n" + footer
+
+
 def _core_item_safe_for_shared_chat(item: dict) -> bool:
     """Allow only public operational core memories into group-chat prompts."""
     path = str(item.get("path") or item.get("uri") or "")
@@ -762,5 +945,9 @@ def register(ctx):
     """Plugin registration entry point."""
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("pre_llm_call", _pre_llm_call)
+    ctx.register_hook("post_tool_call", _post_tool_call)
+    ctx.register_hook("transform_llm_output", _transform_contract_output)
+    # Keep automatic storage and behavioral verdicting as separate observers.
     ctx.register_hook("post_llm_call", _post_llm_call)
-    logger.info("Memory Graph plugin registered (namespace isolation + auto-recall + auto-store)")
+    ctx.register_hook("post_llm_call", _post_llm_contract_verdict)
+    logger.info("Memory Graph plugin registered (namespace isolation + auto-recall + task contracts + auto-store)")

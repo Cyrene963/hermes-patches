@@ -1141,35 +1141,14 @@ def _extract_entities(text: str, max_entities: int = 8) -> List[str]:
             entities.append(match)
             seen.add(match)
 
-    # 4. CJK words (2-4 chars for nouns, plus longer phrases)
-    # For Chinese without a word segmenter, extract:
-    # - 2-char sequences (most common Chinese word length: 蓝牙, 键盘, 场景)
-    # - 3-char sequences (compound words: 使用场, etc.)
-    # - 4-char sequences (idioms, compound nouns)
-    # This gives hindsight better keyword-level matches.
-    cjk_segments = _re.findall(r'[\u4e00-\u9fff]+', text)
-    for seg in cjk_segments:
-        # Extract 2-char windows (highest signal for search)
-        if len(seg) >= 2:
-            for i in range(len(seg) - 1):
-                w2 = seg[i:i+2]
-                if w2 not in _CJK_STOPWORDS and w2 not in seen:
-                    entities.append(w2)
-                    seen.add(w2)
-        # Extract 3-char windows
-        if len(seg) >= 3:
-            for i in range(len(seg) - 2):
-                w3 = seg[i:i+3]
-                if w3 not in _CJK_STOPWORDS and w3 not in seen:
-                    entities.append(w3)
-                    seen.add(w3)
-        # Extract 4-char windows
-        if len(seg) >= 4:
-            for i in range(len(seg) - 3):
-                w4 = seg[i:i+4]
-                if w4 not in _CJK_STOPWORDS and w4 not in seen:
-                    entities.append(w4)
-                    seen.add(w4)
+    # 4. CJK compounds. Never emit arbitrary 2/3/4-character sliding windows:
+    # they turn ordinary sentences into fake entities (e.g. 我和/和我/我同/学去).
+    # The full user message is already recalled separately; retain only whole,
+    # short noun-like segments here.
+    for seg in _re.findall(r'[\u4e00-\u9fff]+', text):
+        if 2 <= len(seg) <= 8 and seg not in _CJK_STOPWORDS and seg not in seen:
+            entities.append(seg)
+            seen.add(seg)
 
     # 5. English words (3+ characters)
     for match in _re.findall(r'[A-Za-z]{3,}', text):
