@@ -21,6 +21,10 @@ BASE = Path(_base_env) if _base_env else _default_base
 REPORTS = BASE / "reports"
 STATE = BASE / "watchdog_state.json"
 SCRIPTS = PROFILE / "scripts"
+_runtime_python_env = str(os.environ.get("HERMES_RUNTIME_PYTHON") or "").strip()
+_default_runtime_python = PROFILE / "hermes-agent" / "venv" / "bin" / "python"
+RUNTIME_PYTHON = Path(_runtime_python_env) if _runtime_python_env else _default_runtime_python
+PYTHON = str(RUNTIME_PYTHON) if RUNTIME_PYTHON.exists() else sys.executable
 SYNC = SCRIPTS / "aistudio_drive_sync.py"
 PARSE = SCRIPTS / "aistudio_archive_parse.py"
 FTS = SCRIPTS / "aistudio_fts_index.py"
@@ -155,14 +159,14 @@ def main() -> int:
     turn_index_report = read_json(latest("turn-index-report-*.json"))
     treasure = run([str(TREASURE), "--quiet", "--min-score", "14"], timeout=600)
     treasure_report = read_json(latest("treasure-review-report-*.json"))
-    convert = run([sys.executable, str(CONVERT), "--replace-aistudio"], timeout=300)
+    convert = run([PYTHON, str(CONVERT), "--replace-aistudio"], timeout=300)
     try:
         convert_report = json.loads(convert.stdout) if convert.stdout.strip() else {}
     except Exception:
         convert_report = {}
     distill_report_path = REPORTS / "aistudio-distill-latest.json"
     distill = run([
-        sys.executable, str(DISTILL),
+        PYTHON, str(DISTILL),
         "--input", str(BASE / "review_queue.jsonl"),
         "--rules", str(BASE / "distillation_rules.json"),
         "--apply", "--report", str(distill_report_path),

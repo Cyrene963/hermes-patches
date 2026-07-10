@@ -51,6 +51,11 @@ def test_prune_reports_keeps_bounded_files_per_type(tmp_path, monkeypatch):
     assert len(list(reports.glob("parse-report-*.json"))) == 2
 
 
+def test_runtime_python_prefers_profile_venv_or_current_interpreter():
+    m = load_module()
+    assert Path(m.PYTHON).exists()
+
+
 def test_main_fails_closed_without_explicit_base_or_private_symlink(tmp_path, monkeypatch, capsys):
     m = load_module()
     monkeypatch.setattr(m, "_base_env", "")
