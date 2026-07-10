@@ -3,6 +3,7 @@ from agent.memory_task_contract import (
     build_task_memory_contract,
     evaluate_contract,
     resolve_relationships,
+    resolve_projects,
 )
 
 
@@ -45,6 +46,45 @@ def test_unknown_relation_abstains():
     [binding] = resolve_relationships("我同学想做游戏", [])
     assert binding.status == "unresolved"
     assert binding.entity is None
+
+
+def test_unique_active_project_resolves_with_evidence():
+    evidence = _evidence(
+        ("core://projects/atlas", "Project Atlas is the user's current active project."),
+        ("core://projects/beacon", "Project Beacon was completed and archived."),
+    )
+    [binding] = resolve_projects("Continue that project", evidence)
+    assert binding.status == "resolved"
+    assert binding.entity == "Atlas"
+    assert binding.evidence_uris == ["core://projects/atlas"]
+
+
+def test_two_active_projects_are_ambiguous():
+    evidence = _evidence(
+        ("core://projects/atlas", "Project Atlas is active."),
+        ("core://projects/beacon", "Project Beacon is active."),
+    )
+    [binding] = resolve_projects("继续那个项目", evidence)
+    assert binding.status == "ambiguous"
+    assert {item.name for item in binding.candidates} == {"Atlas", "Beacon"}
+
+
+def test_project_reference_abstains_without_explicit_project_grammar():
+    [binding] = resolve_projects(
+        "Continue that project",
+        _evidence(("core://notes/atlas", "Atlas is a useful product mentioned in passing.")),
+    )
+    assert binding.status == "unresolved"
+
+
+def test_project_binding_is_carried_in_contract_prompt():
+    contract = build_task_memory_contract(
+        "继续那个项目",
+        _evidence(("core://projects/atlas", "项目 Atlas 是当前活跃项目。")),
+        namespace="tenant:a",
+    )
+    assert contract.bindings[0].relation == "project"
+    assert "Resolved `那个项目` -> `Atlas`" in contract.to_prompt()
 
 
 def test_research_preference_compiles_to_obligation():

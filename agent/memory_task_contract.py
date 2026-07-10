@@ -13,6 +13,10 @@ _RELATION_PATTERNS = {
     "teacher": (r"老师|导师", r"teacher|mentor"),
     "friend": (r"朋友|好友", r"friend"),
 }
+_PROJECT_REFERENCE_PATTERNS = (
+    r"那个项目|这个项目|当前项目|之前的项目",
+    r"that project|this project|current project|the project we (?:discussed|worked on)",
+)
 _COMMON_CJK_SURNAMES = (
     "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜"
     "戚谢邹喻柏水窦章云苏潘葛奚范彭郎鲁韦昌马苗凤花方俞任袁柳鲍史唐"
@@ -139,6 +143,16 @@ def detect_relation_mentions(query: str) -> list[tuple[str, str]]:
     return mentions
 
 
+def detect_project_mentions(query: str) -> list[str]:
+    mentions: list[str] = []
+    for pattern in _PROJECT_REFERENCE_PATTERNS:
+        for match in re.finditer(pattern, query, re.IGNORECASE):
+            mention = match.group(0)
+            if mention not in mentions:
+                mentions.append(mention)
+    return mentions
+
+
 def build_contract_recall_queries(query: str) -> list[str]:
     """Add generic evidence queries required to compile a behavioral contract."""
     queries: list[str] = []
@@ -150,6 +164,8 @@ def build_contract_recall_queries(query: str) -> list[str]:
     }
     for _mention, relation in detect_relation_mentions(query):
         queries.extend(relation_labels[relation])
+    if detect_project_mentions(query):
+        queries.extend(("当前项目 活跃项目 项目名称 状态", "current active project name status"))
     lower = query.lower()
     if re.search(r"调研|研究|查一下|调查|research|博主|网站|产品对比", lower):
         queries.extend(("用户 调研 偏好 多信息源 交叉验证", "research preference source verification"))
@@ -262,6 +278,89 @@ def resolve_relationships(query: str, evidence: Iterable[dict[str, Any] | Eviden
     return bindings
 
 
+def _extract_project_names(item: EvidenceItem) -> set[str]:
+    """Extract names only from explicit project grammar or a project URI."""
+    names: set[str] = set()
+    body = item.text.split("\n", 1)[-1]
+    patterns = (
+        r"(?:项目|工程|project)\s*[`'\"「『]?([A-Z][A-Za-z0-9_-]{2,31}|[\u4e00-\u9fff]{2,12})",
+        r"([A-Z][A-Za-z0-9_-]{2,31}|[\u4e00-\u9fff]{2,12})\s*(?:项目|工程|project)\b",
+        r"(?:名为|叫做|代号为|named|called)\s*[`'\"「『]?([A-Z][A-Za-z0-9_-]{2,31}|[\u4e00-\u9fff]{2,12})",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, body, re.IGNORECASE):
+            value = match.group(1).strip("`'\"「『」』：:，,。.（）() ")
+            invalid_cjk_phrase = (
+                not value.isascii()
+                and (
+                    value.startswith(("是", "为", "的", "在", "当前", "这个", "那个", "之前"))
+                    or value.endswith(("当前", "活跃", "正在", "继续", "完成", "归档"))
+                )
+            )
+            if (
+                value
+                and not invalid_cjk_phrase
+                and value.lower() not in {"current", "active", "this", "that"}
+            ):
+                names.add(value)
+    uri_match = re.search(r"(?:^|://)(?:projects?|项目)/([^/?#]+)", item.uri, re.IGNORECASE)
+    if uri_match and not names:
+        value = uri_match.group(1).strip()
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{2,31}", value):
+            names.add(value)
+    return names
+
+
+def resolve_projects(query: str, evidence: Iterable[dict[str, Any] | EvidenceItem]) -> list[ResolvedBinding]:
+    """Resolve implicit project references conservatively from scoped evidence."""
+    mentions = detect_project_mentions(query)
+    if not mentions:
+        return []
+    items = _evidence_items(evidence)
+    scores: dict[str, float] = {}
+    uris: dict[str, list[str]] = {}
+    for item in items:
+        hay = f"{item.uri}\n{item.text}"
+        for name in _extract_project_names(item):
+            score = 1.0 + min(max(item.score, 0.0), 1.0)
+            if re.search(r"当前|活跃|正在|继续|current|active|ongoing|in progress", hay, re.IGNORECASE):
+                score += 2.0
+            if re.search(r"已完成|归档|停止|废弃|completed|archived|stopped|abandoned", hay, re.IGNORECASE):
+                score -= 1.5
+            if "项目" in item.uri or re.search(r"projects?", item.uri, re.IGNORECASE):
+                score += 1.0
+            scores[name] = max(scores.get(name, float("-inf")), score)
+            if item.uri and item.uri not in uris.setdefault(name, []):
+                uris[name].append(item.uri)
+    ranked = sorted(
+        (
+            EntityCandidate(name=name, relation="project", score=score, evidence_uris=uris.get(name, []))
+            for name, score in scores.items()
+        ),
+        key=lambda item: (-item.score, item.name.lower()),
+    )
+    bindings: list[ResolvedBinding] = []
+    for mention in mentions:
+        if not ranked:
+            bindings.append(ResolvedBinding(mention, "project", "unresolved", 0.0))
+            continue
+        top = ranked[0]
+        second = ranked[1].score if len(ranked) > 1 else 0.0
+        margin = top.score - second
+        confidence = min(0.99, 0.48 + 0.08 * max(top.score, 0.0) + 0.08 * max(margin, 0.0))
+        if top.score >= 2.0 and (len(ranked) == 1 or margin >= 1.5):
+            bindings.append(ResolvedBinding(
+                mention, "project", "resolved", confidence, entity=top.name,
+                candidates=ranked[:3], evidence_uris=top.evidence_uris[:3],
+            ))
+        else:
+            bindings.append(ResolvedBinding(
+                mention, "project", "ambiguous", min(confidence, 0.74),
+                candidates=ranked[:3], evidence_uris=top.evidence_uris[:3],
+            ))
+    return bindings
+
+
 def _matching_uris(items: list[EvidenceItem], patterns: Iterable[str]) -> list[str]:
     found: list[str] = []
     for item in items:
@@ -343,7 +442,7 @@ def build_task_memory_contract(
     namespace: str = "",
 ) -> TaskMemoryContract:
     items = _evidence_items(evidence)
-    bindings = resolve_relationships(query, items)
+    bindings = resolve_relationships(query, items) + resolve_projects(query, items)
     obligations = compile_obligations(query, items)
     unresolved = [binding.mention for binding in bindings if binding.status != "resolved"]
     evidence_uris: list[str] = []
