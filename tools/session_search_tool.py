@@ -340,7 +340,7 @@ def _discover(
     results = []
     for lineage_root, match_info in seen_sessions.items():
         hit_sid = match_info.get("session_id") or lineage_root
-        msg_id = match_info.get("id")
+        msg_id = match_info.get("id") or match_info.get("match_message_id") or match_info.get("message_id")
         try:
             view = db.get_anchored_view(hit_sid, msg_id, window=5, bookend=3)
         except Exception as e:

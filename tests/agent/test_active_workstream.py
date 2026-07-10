@@ -20,6 +20,7 @@ class FakeDB:
             "bookend_end": row["messages"],
             "messages_before": 0,
             "messages_after": 0,
+            "match_message_id": row.get("match_message_id", row["message_id"]),
         }
 
     def get_messages_around(self, session_id, message_id, before=5, after=5):
@@ -49,6 +50,7 @@ def row(session_id="s1", when=20, user="Build the memory system", state="Still p
         "started_at": when,
         "source": "telegram",
         "message_id": when,
+        "match_message_id": when,
         "role": "assistant",
         "content": state,
         "messages": [
@@ -86,6 +88,29 @@ def test_resolves_newest_unfinished_same_user_candidate():
 def test_completed_candidate_is_rejected():
     db = FakeDB([row(state="All done. Fully complete.")])
     assert resolve_active_workstream("继续", user_id="user-a", db=db).status == "unresolved"
+
+
+def test_latest_completed_state_overrides_earlier_pending_state():
+    item = row(state="Still pending. Next step: verify.")
+    item["messages"].append({
+        "id": 21,
+        "role": "assistant",
+        "content": "All done. Fully complete.",
+        "timestamp": 21,
+    })
+    db = FakeDB([item])
+    assert resolve_active_workstream("继续", user_id="user-a", db=db).status == "unresolved"
+
+
+def test_same_display_time_uses_distinct_message_id_tiebreaker():
+    newest = row("new", 20, user="Newest goal")
+    older = row("old", 20, user="Older goal")
+    newest["match_message_id"] = 102
+    older["match_message_id"] = 101
+    db = FakeDB([newest, older])
+    result = resolve_active_workstream("继续", user_id="user-a", db=db)
+    assert result.status == "resolved"
+    assert result.session_id == "new"
 
 
 def test_equal_recency_candidates_are_ambiguous():

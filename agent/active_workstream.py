@@ -72,7 +72,7 @@ def _candidate_from_result(row: dict[str, Any]) -> dict[str, Any] | None:
         return None
     latest = assistant_messages[-1]
     combined = " ".join(assistant_messages[-3:])
-    if _COMPLETED_RE.search(latest) and not _UNFINISHED_RE.search(combined):
+    if _COMPLETED_RE.search(latest) and not _UNFINISHED_RE.search(latest):
         return None
     if not _UNFINISHED_RE.search(combined):
         return None
@@ -95,6 +95,7 @@ def _candidate_from_result(row: dict[str, Any]) -> dict[str, Any] | None:
         "latest_state": latest[:360],
         "next_step": next_step[:240],
         "when": str(row.get("when") or row.get("last_active") or ""),
+        "match_message_id": int(row.get("match_message_id") or row.get("message_id") or 0),
     }
 
 
@@ -132,9 +133,14 @@ def resolve_active_workstream(
             candidates.append(candidate)
     if not candidates:
         return ActiveWorkstream(status="unresolved")
-    # session_search newest ordering is authoritative. If two candidates have the
-    # same recency marker, refuse to choose silently.
-    if len(candidates) > 1 and candidates[0].get("when") == candidates[1].get("when"):
+    # session_search newest ordering is authoritative. Minute-level display time
+    # may tie for distinct messages, so use the user-scoped DB message id as a
+    # monotonic tie-breaker. Refuse only when both recency signals are identical.
+    if (
+        len(candidates) > 1
+        and candidates[0].get("when") == candidates[1].get("when")
+        and candidates[0].get("match_message_id") == candidates[1].get("match_message_id")
+    ):
         return ActiveWorkstream(status="ambiguous", candidate_count=len(candidates), confidence=0.45)
     top = candidates[0]
     return ActiveWorkstream(
