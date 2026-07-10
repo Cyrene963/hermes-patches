@@ -14,7 +14,6 @@ import hashlib
 import json
 import os
 import pathlib
-import shutil
 import subprocess
 import sys
 import time
@@ -91,8 +90,6 @@ def _admin_token() -> str:
 def _append_canary() -> dict[str, str]:
     QUEUE.parent.mkdir(parents=True, exist_ok=True)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    backup = QUEUE.with_suffix(QUEUE.suffix + f".bak_gateway_e2e_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-    shutil.copy2(QUEUE, backup)
     marker = f"memory-os-gateway-recall-e2e-{int(time.time())}"
     code = "GW-ANCHOR-" + hashlib.sha256(marker.encode()).hexdigest()[:5].upper()
     proposal_id = "rp_gateway_" + hashlib.sha256((marker + code).encode()).hexdigest()[:16]
@@ -139,7 +136,7 @@ def _append_canary() -> dict[str, str]:
     }
     with QUEUE.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-    return {"proposal_id": proposal_id, "marker": marker, "code": code, "target_uri": target_uri, "backup": str(backup)}
+    return {"proposal_id": proposal_id, "marker": marker, "code": code, "target_uri": target_uri}
 
 
 def _approve(proposal_id: str) -> dict:
