@@ -38,10 +38,17 @@ def load_rules(path: Path) -> tuple[str, list[dict[str, Any]]]:
         raise ValueError("owner namespace is required; refusing shared default")
     if not isinstance(rules, list) or not rules:
         raise ValueError("distillation rules must be a non-empty list")
-    required = {"id", "match", "kind", "target", "draft", "query", "risk"}
+    required = {"id", "kind", "target", "draft", "query", "risk"}
     for index, rule in enumerate(rules):
         if not isinstance(rule, dict) or not required.issubset(rule):
             raise ValueError(f"invalid rule at index {index}")
+        has_source_id = bool(str(rule.get("source_candidate_id") or "").strip())
+        has_match = isinstance(rule.get("match"), list) and bool(rule.get("match"))
+        if has_source_id == has_match:
+            raise ValueError(
+                f"rule at index {index} must define exactly one source selector: "
+                "source_candidate_id or non-empty match list"
+            )
     return namespace, rules
 
 
@@ -75,8 +82,12 @@ def atomic_write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     tmp.replace(path)
 
 
-def matches(rule: dict[str, Any], text: str) -> bool:
-    return all(re.search(pattern, text, re.I | re.S) for pattern in rule["match"])
+def source_for_rule(rule: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    source_id = str(rule.get("source_candidate_id") or "").strip()
+    if source_id:
+        return next((row for row in rows if str(row.get("candidate_id") or "") == source_id), None)
+    patterns = rule.get("match") or []
+    return next((row for row in rows if all(re.search(pattern, str(row.get("excerpt") or ""), re.I | re.S) for pattern in patterns)), None)
 
 
 def graph_search(query: str, namespace: str) -> list[dict[str, Any]]:
@@ -196,7 +207,7 @@ def main() -> int:
     clarifications: list[dict[str, Any]] = []
     matched_rules: set[str] = set()
     for rule in rules:
-        source = next((row for row in raw if matches(rule, str(row.get("excerpt") or ""))), None)
+        source = source_for_rule(rule, raw)
         if not source:
             continue
         matched_rules.add(rule["id"])

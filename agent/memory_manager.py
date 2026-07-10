@@ -373,7 +373,11 @@ class MemoryManager:
                 )
         try:
             from agent.memory_clarification_queue import build_clarification_context_block
-            clarification_block = build_clarification_context_block(query)
+            from agent.request_context import get_namespace
+            clarification_block = build_clarification_context_block(
+                query,
+                namespace=get_namespace(),
+            )
             if clarification_block.strip():
                 parts.append(clarification_block)
         except Exception as e:

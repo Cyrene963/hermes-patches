@@ -22,10 +22,9 @@ def raw_row(role="user"):
     }
 
 
-def rule(target="core://profiles/preferences/evidence-first"):
-    return {
+def rule(target="core://profiles/preferences/evidence-first", *, selector="id"):
+    item = {
         "id": "evidence-first",
-        "match": ["durable evidence", "verified readback"],
         "kind": "user_preference",
         "target": target,
         "draft": "The user prefers durable evidence and verified readback for every memory change.",
@@ -33,6 +32,11 @@ def rule(target="core://profiles/preferences/evidence-first"):
         "existing_terms": ["durable evidence", "verified readback"],
         "risk": "medium",
     }
+    if selector == "id":
+        item["source_candidate_id"] = "raw-1"
+    elif selector == "regex":
+        item["match"] = ["durable evidence", "verified readback"]
+    return item
 
 
 def write_jsonl(path, rows):
@@ -42,6 +46,38 @@ def write_jsonl(path, rows):
 
 def write_rules(path, rules):
     path.write_text(json.dumps({"namespace": "telegram:test-user", "rules": rules}), encoding="utf-8")
+
+
+def test_source_candidate_id_allows_multiple_atomic_facts_from_one_turn():
+    m = load_module()
+    rows = [raw_row()]
+    first = rule()
+    second = rule("core://profiles/preferences/second")
+    second["id"] = "second-fact"
+    assert m.source_for_rule(first, rows) == rows[0]
+    assert m.source_for_rule(second, rows) == rows[0]
+
+
+def test_regex_selector_remains_backward_compatible():
+    m = load_module()
+    assert m.source_for_rule(rule(selector="regex"), [raw_row()]) == raw_row()
+
+
+def test_rule_requires_exactly_one_source_selector(tmp_path):
+    m = load_module()
+    missing = rule()
+    missing.pop("source_candidate_id")
+    both = rule()
+    both["match"] = ["durable evidence"]
+    for index, invalid in enumerate([missing, both]):
+        path = tmp_path / f"invalid-{index}.json"
+        write_rules(path, [invalid])
+        try:
+            m.load_rules(path)
+        except ValueError as exc:
+            assert "exactly one source selector" in str(exc)
+        else:
+            raise AssertionError("invalid selector contract was accepted")
 
 
 def test_model_turn_cannot_become_proposal(tmp_path, monkeypatch):

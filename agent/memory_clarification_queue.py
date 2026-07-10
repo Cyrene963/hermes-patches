@@ -188,7 +188,8 @@ def relevant_clarification_candidates(
     limit: int = 3,
 ) -> list[dict[str, Any]]:
     query_tokens = _tokens(query)
-    if not query_tokens:
+    namespace = _normalize(namespace)
+    if not namespace or not query_tokens:
         return []
     matches: list[tuple[int, dict[str, Any]]] = []
     for row in _load_pending(_path(queue_path)):

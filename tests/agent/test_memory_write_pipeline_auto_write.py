@@ -347,8 +347,8 @@ def test_clarification_queue_surfaces_only_when_relevant(tmp_path):
     result = pipeline.write_and_verify(candidate, classification)
 
     assert result["queued_for_clarification"] is True
-    unrelated = build_clarification_context_block("帮我写一段中史答题框架", queue_path=str(queue_path))
-    relevant = build_clarification_context_block("Claude Code not logged in 怎么查凭据", queue_path=str(queue_path))
+    unrelated = build_clarification_context_block("帮我写一段中史答题框架", namespace="telegram:u1", queue_path=str(queue_path))
+    relevant = build_clarification_context_block("Claude Code not logged in 怎么查凭据", namespace="telegram:u1", queue_path=str(queue_path))
 
     assert unrelated == ""
     assert "Memory Clarification Candidates" in relevant

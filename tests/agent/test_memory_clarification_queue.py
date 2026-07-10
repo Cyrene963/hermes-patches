@@ -3,6 +3,7 @@
 from agent.memory_clarification_queue import record_clarification_candidate
 from agent.memory_manager import MemoryManager
 from agent.memory_write_pipeline import CandidateFact
+from agent.request_context import RequestContext, reset_context, set_context
 
 
 class EmptyProvider:
@@ -51,10 +52,47 @@ def test_memory_manager_injects_relevant_clarification_candidates(tmp_path, monk
 
     manager = MemoryManager()
     manager.add_provider(EmptyProvider())
+    set_context(RequestContext(user_id="u1", platform="telegram", namespace="telegram:u1"))
 
-    unrelated = manager.prefetch_all("中史 15 分题怎么写")
-    relevant = manager.prefetch_all("Claude Code not logged in 凭据在哪")
+    try:
+        unrelated = manager.prefetch_all("中史 15 分题怎么写")
+        relevant = manager.prefetch_all("Claude Code not logged in 凭据在哪")
+    finally:
+        reset_context()
 
     assert "Memory Clarification Candidates" not in unrelated
     assert "Memory Clarification Candidates" in relevant
     assert "tool_credential_route" in relevant
+
+
+def test_memory_manager_clarification_is_fail_closed_without_or_with_wrong_namespace(tmp_path, monkeypatch):
+    queue_path = tmp_path / "clarification.jsonl"
+    monkeypatch.setattr("agent.memory_clarification_queue.DEFAULT_QUEUE_PATH", str(queue_path))
+    candidate = CandidateFact(
+        subject="private_family_state",
+        predicate="needs_current_confirmation",
+        object_value="Private family state may have changed.",
+        importance=0.9,
+        memory_type="relationship_state",
+        target_store="clarification",
+        target_path="用户档案/家庭/状态",
+        evidence_quote="Private owner-authored evidence.",
+        confidence=0.9,
+        source_type="external_import",
+        requires_review=True,
+        namespace="telegram:owner",
+    )
+    record_clarification_candidate(candidate, {"namespace": "telegram:owner", "target_path": candidate.target_path}, queue_path=str(queue_path))
+    manager = MemoryManager()
+    manager.add_provider(EmptyProvider())
+
+    reset_context()
+    missing = manager.prefetch_all("private family state changed")
+    set_context(RequestContext(user_id="other", platform="telegram", namespace="telegram:other"))
+    try:
+        wrong_owner = manager.prefetch_all("private family state changed")
+    finally:
+        reset_context()
+
+    assert "Memory Clarification Candidates" not in missing
+    assert "Memory Clarification Candidates" not in wrong_owner
