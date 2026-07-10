@@ -159,6 +159,11 @@ def build_contract_recall_queries(query: str) -> list[str]:
         queries.extend(("用户 文件交付 偏好 真实附件 message_id", "file delivery attachment preference"))
     if re.search(r"记忆系统|数字替身|外置大脑|memory os|memory system", lower):
         queries.extend(("记忆系统 可验证闭环 自动写入 自动召回", "memory capability behavioral evidence"))
+    if re.search(r"继续|推进|完成|修复|实现|调研|研究|build|fix|implement|finish|complete", lower):
+        queries.extend((
+            "用户 持续推进 不要问 是否继续 直到完成 验收 偏好",
+            "user autonomy preference continue until verified do not ask",
+        ))
     deduped: list[str] = []
     for item in queries:
         if item not in deduped:
@@ -314,6 +319,20 @@ def compile_obligations(query: str, evidence: Iterable[dict[str, Any] | Evidence
             required_result_markers=["behavioral_evidence"],
             evidence_uris=memory_uris,
         ))
+
+    autonomy_task = bool(re.search(r"继续|推进|完成|修复|实现|调研|研究|build|fix|implement|finish|complete", q))
+    autonomy_uris = _matching_uris(items, (
+        r"不要问.*继续|不问.*继续|不要.*等.*回复|自己.*推进|持续推进|直到.*完成|continue until|do not ask.*continue",
+    ))
+    # Repeated corrections are stronger than one incidental sentence. Require
+    # two independent evidence nodes before promoting this into a hard contract.
+    if autonomy_task and len(autonomy_uris) >= 2:
+        obligations.append(Obligation(
+            id="autonomy.continue_until_verified",
+            description="Continue through all inferable next stages without asking whether to continue; stop only when the task is verified complete or a concrete external blocker prevents progress.",
+            required_result_markers=["progress_evidence", "no_active_todos"],
+            evidence_uris=autonomy_uris,
+        ))
     return obligations
 
 
@@ -351,8 +370,14 @@ def _result_success(result: Any) -> bool:
     return not any(marker in text for marker in ("traceback", "fatal:", "permission denied"))
 
 
-def evaluate_contract(contract: TaskMemoryContract, tool_events: Iterable[dict[str, Any]]) -> dict[str, Any]:
+def evaluate_contract(
+    contract: TaskMemoryContract,
+    tool_events: Iterable[dict[str, Any]],
+    *,
+    active_todos: Iterable[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     events = list(tool_events)
+    todos = list(active_todos or [])
     tools = {str(event.get("tool_name") or "") for event in events if _result_success(event.get("result"))}
     rendered_results = "\n".join(str(event.get("result") or "") for event in events).lower()
     verdicts = []
@@ -384,6 +409,25 @@ def evaluate_contract(contract: TaskMemoryContract, tool_events: Iterable[dict[s
             elif marker == "behavioral_evidence":
                 if not any(token in rendered_results for token in ("passed", "pass=", "behavior", "semantic recall", "live")):
                     missing.append("behavior-level test evidence")
+            elif marker == "no_active_todos":
+                active = [
+                    item for item in todos
+                    if str(item.get("status") or "").lower() in {"pending", "in_progress"}
+                ]
+                if active:
+                    missing.append(
+                        "active todos: "
+                        + ", ".join(str(item.get("id") or "?") for item in active[:8])
+                    )
+            elif marker == "progress_evidence":
+                housekeeping = {"todo", "memory", "memory_graph_read", "memory_graph_search", "hindsight_recall", "session_search"}
+                progressed = any(
+                    str(event.get("tool_name") or "") not in housekeeping
+                    and _result_success(event.get("result"))
+                    for event in events
+                )
+                if not progressed:
+                    missing.append("successful non-housekeeping action evidence")
         verdicts.append({
             "id": obligation.id,
             "passed": not missing,

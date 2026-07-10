@@ -837,7 +837,52 @@ def _post_tool_call(tool_name="", args=None, result=None, session_id="", **kwarg
             "result": _safe_tool_result_summary(result),
         })
         del events[:-40]
+        # Any new tool evidence invalidates a verdict cached by an earlier
+        # completion attempt in this same turn.
+        _turn_contract_verdicts.pop(session_key, None)
     return None
+
+
+def _pre_verify_contract(session_id="", attempt=0, final_response="", **kwargs):
+    """Keep the live tool loop running while required memory obligations fail."""
+    session_key = str(session_id or "")
+    if not session_key:
+        return None
+    with _contract_lock:
+        contract = _turn_contracts.get(session_key)
+        events = list(_turn_tool_events.get(session_key, []))
+    if contract is None:
+        return None
+    try:
+        from agent.memory_task_contract import evaluate_contract
+
+        verdict = evaluate_contract(
+            contract,
+            events,
+            active_todos=kwargs.get("active_todos") or [],
+        )
+    except Exception:
+        logger.debug("Memory contract pre_verify evaluation failed", exc_info=True)
+        return None
+    if verdict.get("passed"):
+        return None
+    failures = []
+    for item in verdict.get("obligations", []):
+        if not item.get("passed"):
+            failures.append(f"{item.get('id')}: {', '.join(item.get('missing', []))}")
+    if not failures:
+        return None
+    return {
+        "action": "continue",
+        "message": (
+            "[System: Do not stop or ask whether to continue. The current task's "
+            "evidence-backed memory contract is still incomplete. Continue autonomously "
+            "with the next required tools/actions now.\n- "
+            + "\n- ".join(failures)
+            + "\nAfter each action, inspect the real result. Only finish when the obligations "
+            "pass, or after the bounded continuation attempts explain a concrete external blocker.]"
+        ),
+    }
 
 
 def _write_contract_audit(session_id: str, contract, verdict: dict) -> None:
@@ -946,6 +991,7 @@ def register(ctx):
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("pre_llm_call", _pre_llm_call)
     ctx.register_hook("post_tool_call", _post_tool_call)
+    ctx.register_hook("pre_verify", _pre_verify_contract)
     ctx.register_hook("transform_llm_output", _transform_contract_output)
     # Keep automatic storage and behavioral verdicting as separate observers.
     ctx.register_hook("post_llm_call", _post_llm_call)

@@ -69,4 +69,8 @@ def test_unmet_contract_transforms_completion_claim():
     transformed = plugin._transform_contract_output(response_text="已经全部修复。", session_id="s2")
     assert "NOT VERIFIED" in transformed
     assert "coding.verify" in transformed
+    directive = plugin._pre_verify_contract(session_id="s2", attempt=0, final_response="已经全部修复。")
+    assert directive["action"] == "continue"
+    assert "Do not stop or ask whether to continue" in directive["message"]
+    assert "coding.verify" in directive["message"]
     plugin._post_llm_contract_verdict(session_id="s2", assistant_response=transformed)

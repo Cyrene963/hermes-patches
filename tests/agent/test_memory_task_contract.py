@@ -95,6 +95,39 @@ def test_contract_does_not_import_unprovided_cross_namespace_evidence():
     assert evidence  # caller owns namespace filtering; compiler never fetches globally
 
 
+def test_repeated_autonomy_correction_promotes_durable_obligation():
+    contract = build_task_memory_contract(
+        "继续推进并完成这个任务",
+        _evidence(
+            ("core://correction/one", "用户要求不要问是否继续，自己持续推进直到完成。"),
+            ("core://correction/two", "用户再次纠正：不要等回复再进行下一阶段。"),
+        ),
+    )
+    assert "autonomy.continue_until_verified" in [item.id for item in contract.obligations]
+
+    pending = evaluate_contract(
+        contract,
+        [],
+        active_todos=[{"id": "next", "content": "next stage", "status": "pending"}],
+    )
+    done = evaluate_contract(
+        contract,
+        [{"tool_name": "terminal", "result": {"exit_code": 0, "output": "verified"}}],
+        active_todos=[],
+    )
+    assert pending["passed"] is False
+    assert any("active todos: next" in value for value in pending["obligations"][0]["missing"])
+    assert done["passed"] is True
+
+
+def test_single_autonomy_sentence_does_not_become_hard_obligation():
+    contract = build_task_memory_contract(
+        "继续推进",
+        _evidence(("core://note", "这一次不要问是否继续。")),
+    )
+    assert "autonomy.continue_until_verified" not in [item.id for item in contract.obligations]
+
+
 def test_cjk_entity_extractor_does_not_emit_sliding_window_noise():
     from agent.memory_metacognition import _extract_entities
 

@@ -1,0 +1,24 @@
+diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
+index ce62ffc..57aa2d8 100644
+--- a/agent/conversation_loop.py
++++ b/agent/conversation_loop.py
+@@ -5202,7 +5202,7 @@ def run_conversation(
+                     from agent.verify_hooks import max_verify_nudges
+                     from hermes_cli.plugins import get_pre_verify_continue_message, has_hook
+
+-                    if _edited and has_hook("pre_verify") and _attempt < max_verify_nudges():
++                    if has_hook("pre_verify") and _attempt < max_verify_nudges():
+                         # Posture is fixed for the session — resolve once + cache.
+                         coding = getattr(agent, "_resolved_is_coding", None)
+                         if coding is None:
+@@ -5217,6 +5217,10 @@ def run_conversation(
+                             attempt=_attempt,
+                             final_response=final_response,
+                             changed_paths=_edited,
++                            active_todos=[
++                                item for item in agent._todo_store.read()
++                                if item.get("status") in {"pending", "in_progress"}
++                            ] if getattr(agent, "_todo_store", None) else [],
+                         )
+                 except Exception:
+                     logger.debug("pre_verify hook check failed", exc_info=True)
