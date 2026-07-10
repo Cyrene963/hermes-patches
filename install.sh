@@ -572,16 +572,18 @@ if [ -f "$PATCHES_DIR/scripts/memory_os_shadow_namespace_watchdog.py" ]; then
     echo "   ✅ memory_os_shadow_namespace_watchdog.py 已安装"
 fi
 if [ -f "$PATCHES_DIR/scripts/memory_os_controller_lease.py" ]; then
-    mkdir -p "$PROFILE_DIR/scripts"
+    mkdir -p "$HERMES_DIR/scripts" "$PROFILE_DIR/scripts"
+    cp "$PATCHES_DIR/scripts/memory_os_controller_lease.py" "$HERMES_DIR/scripts/memory_os_controller_lease.py"
     cp "$PATCHES_DIR/scripts/memory_os_controller_lease.py" "$PROFILE_DIR/scripts/memory_os_controller_lease.py"
-    chmod +x "$PROFILE_DIR/scripts/memory_os_controller_lease.py"
-    echo "   ✅ memory_os_controller_lease.py 已安装"
+    chmod +x "$HERMES_DIR/scripts/memory_os_controller_lease.py" "$PROFILE_DIR/scripts/memory_os_controller_lease.py"
+    echo "   ✅ memory_os_controller_lease.py 已安装到 repo + profile"
 fi
 if [ -f "$PATCHES_DIR/scripts/memory_os_scorecard.py" ]; then
-    mkdir -p "$PROFILE_DIR/scripts"
+    mkdir -p "$HERMES_DIR/scripts" "$PROFILE_DIR/scripts"
+    cp "$PATCHES_DIR/scripts/memory_os_scorecard.py" "$HERMES_DIR/scripts/memory_os_scorecard.py"
     cp "$PATCHES_DIR/scripts/memory_os_scorecard.py" "$PROFILE_DIR/scripts/memory_os_scorecard.py"
-    chmod +x "$PROFILE_DIR/scripts/memory_os_scorecard.py"
-    echo "   ✅ memory_os_scorecard.py 已安装"
+    chmod +x "$HERMES_DIR/scripts/memory_os_scorecard.py" "$PROFILE_DIR/scripts/memory_os_scorecard.py"
+    echo "   ✅ memory_os_scorecard.py 已安装到 repo + profile"
 fi
 if [ -f "$PATCHES_DIR/scripts/correction_regression_eval.py" ]; then
     mkdir -p "$PROFILE_DIR/scripts"
