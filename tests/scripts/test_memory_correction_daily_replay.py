@@ -22,7 +22,14 @@ def manifest():
 
 
 def successful(day):
-    return {"date": day, "total": 1, "passed": 1, "failed": 0, "invalid": 0}
+    return {
+        "date": day,
+        "ledger_sha256": "a" * 64,
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "invalid": 0,
+    }
 
 
 def test_one_day_does_not_promote(monkeypatch, tmp_path):
@@ -56,3 +63,32 @@ def test_filename_date_mismatch_is_rejected(monkeypatch, tmp_path):
     module.HISTORY.mkdir(parents=True)
     module._atomic_json(module.HISTORY / "2026-07-11.json", successful("2026-07-10"))
     assert module._successful_history() == []
+
+
+def test_history_requires_valid_ledger_digest(monkeypatch, tmp_path):
+    module = load_module(monkeypatch, tmp_path)
+    module.HISTORY.mkdir(parents=True)
+    item = successful("2026-07-10")
+    item["ledger_sha256"] = "not-recorded"
+    module._atomic_json(module.HISTORY / "2026-07-10.json", item)
+    assert module._successful_history() == []
+
+
+def test_daily_history_is_immutable(monkeypatch, tmp_path):
+    module = load_module(monkeypatch, tmp_path)
+    path = module.HISTORY / "2026-07-10.json"
+    original = successful("2026-07-10")
+    replacement = {**original, "passed": 999}
+    assert module._write_history_once(path, original) is True
+    assert module._write_history_once(path, replacement) is False
+    assert json.loads(path.read_text()) == original
+
+
+def test_ledger_digest_does_not_copy_private_content(monkeypatch, tmp_path):
+    module = load_module(monkeypatch, tmp_path)
+    private_text = "private correction text"
+    module.LEDGER.parent.mkdir(parents=True)
+    module.LEDGER.write_text(private_text)
+    digest = module._ledger_sha256(module.LEDGER)
+    assert len(digest) == 64
+    assert private_text not in digest

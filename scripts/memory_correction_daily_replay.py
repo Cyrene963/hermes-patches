@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -11,9 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HOME = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
-CANDIDATE = Path(os.environ.get("HERMES_AGENT_DIR") or (HOME / "hermes-agent-candidate-20260703p"))
-if str(CANDIDATE) not in sys.path:
-    sys.path.insert(0, str(CANDIDATE))
+AGENT_DIR = Path(os.environ.get("HERMES_AGENT_DIR") or (HOME / "hermes-agent"))
+if str(AGENT_DIR) not in sys.path:
+    sys.path.insert(0, str(AGENT_DIR))
 
 from scripts.correction_regression_eval import replay_cases
 
@@ -32,6 +33,30 @@ def _atomic_json(path: Path, payload: dict) -> None:
     tmp.replace(path)
 
 
+def _ledger_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_history_once(path: Path, payload: dict) -> bool:
+    """Create an immutable daily record, returning False when it already exists."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(serialized)
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def _successful_history() -> list[Path]:
     valid = []
     for path in sorted(HISTORY.glob("????-??-??.json")):
@@ -40,6 +65,13 @@ def _successful_history() -> list[Path]:
         except Exception:
             continue
         if item.get("date") != path.stem:
+            continue
+        ledger_sha256 = item.get("ledger_sha256")
+        if not isinstance(ledger_sha256, str) or len(ledger_sha256) != 64:
+            continue
+        try:
+            int(ledger_sha256, 16)
+        except ValueError:
             continue
         if item.get("total", 0) > 0 and item.get("failed") == 0 and item.get("invalid") == 0:
             valid.append(path)
@@ -68,7 +100,9 @@ def _promote_scorecard(history: list[Path]) -> None:
     if not changed:
         return
     _atomic_json(SCORECARD, data)
-    evaluator = CANDIDATE / "scripts" / "memory_os_scorecard.py"
+    evaluator = AGENT_DIR / "scripts" / "memory_os_scorecard.py"
+    if not evaluator.exists():
+        evaluator = HOME / "scripts" / "memory_os_scorecard.py"
     if evaluator.exists():
         subprocess.run(
             [sys.executable, str(evaluator), str(SCORECARD), "--output", str(SCORE_RESULT)],
@@ -83,7 +117,7 @@ def main() -> int:
     payload = {
         "date": now.date().isoformat(),
         "evaluated_at": now.isoformat(),
-        "ledger_sha256_redacted": "not-recorded",
+        "ledger_sha256": _ledger_sha256(LEDGER) if LEDGER.exists() else None,
         **report,
     }
     _atomic_json(REPORT, payload)
@@ -95,7 +129,7 @@ def main() -> int:
             f"failed={report['failed']} invalid={report['invalid']}"
         )
         return 1
-    _atomic_json(HISTORY / f"{payload['date']}.json", payload)
+    _write_history_once(HISTORY / f"{payload['date']}.json", payload)
     _promote_scorecard(_successful_history())
     return 0
 
