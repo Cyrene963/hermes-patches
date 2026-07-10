@@ -1469,7 +1469,16 @@ class MemoryWritePipeline:
 
         # Rules that would normally fit MEMORY.md are written to Memory Graph here.
         # L1 memory remains a tiny injected rules layer; Graph is the durable store.
-        graph_result = self._write_memory_graph(candidate, classification)
+        try:
+            graph_result = self._write_memory_graph(candidate, classification)
+        except Exception as exc:
+            graph_result = {
+                'written': False,
+                'readback_ok': False,
+                'error': exc.__class__.__name__,
+                'failure_reason': f'memory graph write unavailable: {exc.__class__.__name__}',
+            }
+            logger.warning('Memory Graph write failed closed: %s', exc.__class__.__name__)
         result.update(graph_result)
         result['readback_ok'] = bool(graph_result.get('readback_ok') or graph_result.get('duplicate'))
 

@@ -51,6 +51,36 @@ def make_candidate(**overrides):
     return CandidateFact(**data)
 
 
+class FailingGraphClient:
+    def write_candidate(self, candidate, classification, readback_queries):
+        raise ConnectionError("postgresql://private-user:secret-password@db.internal/memory")
+
+
+def test_database_outage_fails_closed_and_records_redacted_repair(tmp_path):
+    queue = tmp_path / "repair.jsonl"
+    pipeline = MemoryWritePipeline(
+        graph_client=FailingGraphClient(),
+        config={
+            "mode": "limited_auto",
+            "auto_write_threshold": 0.85,
+            "allowed_auto_types": ["decision"],
+            "never_auto_write_to_core": True,
+            "require_llm_classifier": False,
+            "repair_queue_path": str(queue),
+        },
+    )
+    item = make_candidate(namespace="tenant:a")
+    classification = pipeline.classify_write(item, namespace="tenant:a")
+    result = pipeline.write_and_verify(item, classification)
+    assert result["written"] is False
+    assert result["readback_ok"] is False
+    assert result["error"] == "ConnectionError"
+    assert "secret-password" not in str(result)
+    repair = queue.read_text()
+    assert "secret-password" not in repair
+    assert "ConnectionError" in repair
+
+
 def test_default_shadow_mode_never_writes_even_high_confidence(shadow_pipeline_config):
     graph = FakeGraphClient()
     pipeline = MemoryWritePipeline(graph_client=graph, config=shadow_pipeline_config)
