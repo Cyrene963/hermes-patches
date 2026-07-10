@@ -611,7 +611,21 @@ def _pre_llm_call(user_message="", **kwargs):
             except Exception as e:
                 logger.debug("Memory Graph content hydration failed: %s", e)
 
-        if not results:
+        continuity_prompt = ""
+        try:
+            from agent.active_workstream import resolve_active_workstream
+
+            workstream = resolve_active_workstream(
+                user_text,
+                user_id=str(kwargs.get("user_id") or kwargs.get("sender_id") or ""),
+                current_session_id=str(kwargs.get("session_id") or ""),
+                source=str(kwargs.get("platform") or "") or None,
+            )
+            continuity_prompt = workstream.to_prompt()
+        except Exception:
+            logger.debug("Active workstream recovery failed", exc_info=True)
+
+        if not results and not contract_results and not continuity_prompt:
             return None
 
         # Format results as context within a configurable budget.
@@ -639,6 +653,10 @@ def _pre_llm_call(user_message="", **kwargs):
                 break
             parts.append(line)
             total_len += len(line)
+
+        if continuity_prompt:
+            parts.append(continuity_prompt)
+            total_len += len(continuity_prompt)
 
         if parts:
             context = "\n".join(parts)
