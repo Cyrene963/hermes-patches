@@ -1,5 +1,9 @@
 import importlib
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 
 def load_module(monkeypatch, tmp_path):
@@ -92,3 +96,24 @@ def test_ledger_digest_does_not_copy_private_content(monkeypatch, tmp_path):
     digest = module._ledger_sha256(module.LEDGER)
     assert len(digest) == 64
     assert private_text not in digest
+
+
+def test_script_direct_execution_resolves_repo_imports(tmp_path):
+    repo = Path(__file__).resolve().parents[2]
+    home = tmp_path / "home"
+    env = {
+        **os.environ,
+        "HERMES_HOME": str(home),
+        "HERMES_AGENT_DIR": str(tmp_path / "missing-agent-checkout"),
+    }
+    result = subprocess.run(
+        [sys.executable, str(repo / "scripts" / "memory_correction_daily_replay.py")],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "Memory correction regression alert" in result.stdout
+    assert "ModuleNotFoundError" not in result.stderr

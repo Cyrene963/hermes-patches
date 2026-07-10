@@ -13,8 +13,10 @@ from pathlib import Path
 
 HOME = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
 AGENT_DIR = Path(os.environ.get("HERMES_AGENT_DIR") or (HOME / "hermes-agent"))
-if str(AGENT_DIR) not in sys.path:
-    sys.path.insert(0, str(AGENT_DIR))
+REPO_DIR = Path(__file__).resolve().parents[1]
+for import_root in (AGENT_DIR, REPO_DIR):
+    if str(import_root) not in sys.path:
+        sys.path.insert(0, str(import_root))
 
 from scripts.correction_regression_eval import replay_cases
 
