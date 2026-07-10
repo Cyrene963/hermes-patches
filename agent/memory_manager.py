@@ -28,12 +28,14 @@ from __future__ import annotations
 import logging
 import re
 import inspect
+import time
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
+_RECALL_FALLBACK_TTL_S = 15 * 60
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +253,9 @@ class MemoryManager:
         self._providers: List[MemoryProvider] = []
         self._tool_to_provider: Dict[str, MemoryProvider] = {}
         self._has_external: bool = False  # True once a non-builtin provider is added
+        # Transient outages may reuse only recent context from this manager and
+        # the same session. This cache never persists or crosses chat scopes.
+        self._last_good_recall: Dict[tuple[str, str], tuple[float, str]] = {}
 
     # -- Registration --------------------------------------------------------
 
@@ -362,15 +367,29 @@ class MemoryManager:
         """
         parts = []
         for provider in self._providers:
+            cache_key = (provider.name, session_id)
             try:
                 result = provider.prefetch(query, session_id=session_id)
                 if result and result.strip():
                     parts.append(result)
+                    self._last_good_recall[cache_key] = (time.monotonic(), result)
             except Exception as e:
-                logger.debug(
-                    "Memory provider '%s' prefetch failed (non-fatal): %s",
-                    provider.name, e,
-                )
+                cached = self._last_good_recall.get(cache_key)
+                if cached and time.monotonic() - cached[0] <= _RECALL_FALLBACK_TTL_S:
+                    parts.append(
+                        "[Memory recall degraded: provider unavailable; using recent "
+                        f"session-local context from {provider.name}.]\n{cached[1]}"
+                    )
+                    logger.warning(
+                        "Memory provider '%s' prefetch failed; using recent session-local recall: %s",
+                        provider.name, e,
+                    )
+                else:
+                    self._last_good_recall.pop(cache_key, None)
+                    logger.warning(
+                        "Memory provider '%s' prefetch failed with no recent session-local recall: %s",
+                        provider.name, e,
+                    )
         try:
             from agent.memory_clarification_queue import build_clarification_context_block
             from agent.request_context import get_namespace
