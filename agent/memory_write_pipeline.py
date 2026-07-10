@@ -827,6 +827,25 @@ class MemoryWritePipeline:
         conflict_uri = detect_conflict(candidate, existing)
         if conflict_uri:
             candidate.conflict_with = conflict_uri
+            explicit_correction = candidate.source_type == 'user_correction'
+            safe_namespace = bool(namespace or candidate.namespace)
+            mode = str(self.config.get('mode', 'shadow')).strip().lower()
+            allow_supersede = bool(self.config.get('auto_supersede_user_corrections', True))
+            if (
+                explicit_correction
+                and safe_namespace
+                and allow_supersede
+                and mode in {'limited_auto', 'full_auto'}
+                and candidate.confidence >= float(self.config.get('auto_write_threshold', 0.85))
+            ):
+                return {
+                    'action': 'supersede',
+                    'target_store': 'memory_graph',
+                    'target_path': candidate.target_path,
+                    'conflict_with': conflict_uri,
+                    'namespace': namespace or candidate.namespace,
+                    'requires_review': False,
+                }
             candidate.requires_review = True
             return {
                 'action': 'review',
@@ -1201,6 +1220,111 @@ class MemoryWritePipeline:
         except Exception as exc:
             logger.debug('Failed to record memory repair queue item: %s', exc)
 
+    def _supersede_and_verify(self, candidate: CandidateFact, classification: Dict[str, Any]) -> Dict[str, Any]:
+        """Version an explicit correction and prove stale content is no longer active."""
+        namespace = str(classification.get('namespace') or candidate.namespace or '')
+        uri = str(classification.get('conflict_with') or candidate.conflict_with or '')
+        result = {
+            'candidate': candidate.subject + '/' + candidate.predicate,
+            'action': 'supersede',
+            'target': 'memory_graph',
+            'written': False,
+            'auto_write_allowed': False,
+            'readback_ok': False,
+            'superseded_uri': uri,
+            'failure_reason': '',
+        }
+        if candidate.source_type != 'user_correction' or not namespace or not uri:
+            result['failure_reason'] = 'supersede requires explicit user correction, namespace, and conflict URI'
+            return result
+        try:
+            if self.graph is not None and hasattr(self.graph, 'supersede_candidate'):
+                graph_result = self.graph.supersede_candidate(candidate, classification)
+            else:
+                from tools import memory_graph_tool
+
+                old = json.loads(memory_graph_tool._read({'uri': uri, 'namespace': namespace}))
+                if old.get('error'):
+                    raise ValueError(old['error'])
+                old_content = str(old.get('content') or '')
+                updated_content = self._memory_graph_content(candidate)
+                graph_result = json.loads(memory_graph_tool._update({
+                    'uri': uri,
+                    'content': updated_content,
+                    'priority': 2 if candidate.importance >= 0.95 else 1,
+                    'namespace': namespace,
+                }))
+                if graph_result.get('error'):
+                    raise ValueError(graph_result['error'])
+                new_query = f"{candidate.subject} {candidate.predicate} {candidate.object_value}"
+                old_query = f"{candidate.subject} {candidate.predicate} {old_content[:120]}"
+                new_rows = json.loads(memory_graph_tool._search({
+                    'query': new_query, 'limit': 5, 'namespace': namespace,
+                })).get('results', [])
+                old_rows = json.loads(memory_graph_tool._search({
+                    'query': old_query, 'limit': 5, 'namespace': namespace,
+                })).get('results', [])
+                current = json.loads(memory_graph_tool._read({'uri': uri, 'namespace': namespace}))
+                if current.get('error'):
+                    raise ValueError(current['error'])
+                graph_result.update({
+                    'old_content': old_content,
+                    'current_content': str(current.get('content') or ''),
+                    'new_results': new_rows,
+                    'old_results': old_rows,
+                })
+
+            new_rows = list(graph_result.get('new_results') or [])
+            old_rows = list(graph_result.get('old_results') or [])
+            top_new = new_rows[0] if new_rows else {}
+            top_old = old_rows[0] if old_rows else {}
+            top_new_text = f"{top_new.get('content', '')}\n{top_new.get('snippet', '')}".lower()
+            new_ok = bool(
+                top_new
+                and (
+                    top_new.get('uri') == uri
+                    or candidate.object_value.lower() in top_new_text
+                )
+            )
+            stale_value = str(graph_result.get('old_content') or '').strip().lower()
+            value_match = re.search(r'(?im)^Value:\s*(.+)$', stale_value)
+            if value_match:
+                stale_value = value_match.group(1).strip()
+            old_top_content = f"{top_old.get('content', '')}\n{top_old.get('snippet', '')}".lower()
+            current_content = str(graph_result.get('current_content') or '').lower()
+            same_entity_top = bool(top_old and top_old.get('uri') == uri)
+            current_is_new = bool(candidate.object_value.lower() in current_content)
+            stale_top1 = bool(
+                same_entity_top
+                and not current_is_new
+                and candidate.object_value.lower() not in old_top_content
+            )
+            if (
+                stale_value
+                and stale_value in old_top_content
+                and candidate.object_value.lower() not in old_top_content
+                and not current_is_new
+            ):
+                stale_top1 = True
+            result.update({
+                'written': bool(graph_result.get('updated', True)),
+                'auto_write_allowed': True,
+                'readback_ok': bool(new_ok and not stale_top1),
+                'uri': graph_result.get('uri') or uri,
+                'memory_id': graph_result.get('memory_id'),
+                'old_top1_stale': stale_top1,
+                'new_top_uri': top_new.get('uri', ''),
+                'old_top_uri': top_old.get('uri', ''),
+            })
+            if not result['readback_ok']:
+                result['failure_reason'] = 'supersede committed but temporal top-1 verification failed'
+                self._record_repair_queue(candidate, classification, result)
+            return result
+        except Exception as exc:
+            result['failure_reason'] = f'supersede failed: {exc}'
+            self._record_repair_queue(candidate, classification, result)
+            return result
+
     def write_and_verify(self, candidate: CandidateFact, classification: Dict) -> Dict[str, Any]:
         """Write to target store and verify readback."""
         result = {
@@ -1216,8 +1340,11 @@ class MemoryWritePipeline:
             'failure_reason': '',
         }
 
-        if classification.get('action') not in {'write', 'clarify_later'}:
+        if classification.get('action') not in {'write', 'clarify_later', 'supersede'}:
             return result
+
+        if classification.get('action') == 'supersede':
+            return self._supersede_and_verify(candidate, classification)
 
         if classification.get('action') == 'clarify_later' or classification.get('target_store') == 'clarification':
             try:
