@@ -358,6 +358,52 @@ def detect_conflict(new_fact: CandidateFact, existing_facts: List[Dict]) -> Opti
                 return existing.get('uri', '')
     return None
 
+
+def _parse_structured_memory_result(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """Parse only pipeline-authored Subject/Predicate/Value memories."""
+    text = f"{item.get('content', '')}\n{item.get('snippet', '')}"
+    fields = {}
+    for key in ('Subject', 'Predicate', 'Value'):
+        match = re.search(rf'(?im)^\s*{key}:\s*(.+?)\s*$', text)
+        if not match:
+            return None
+        fields[key.lower()] = match.group(1).strip()
+    fields['uri'] = str(item.get('uri') or '')
+    return fields if fields['uri'] else None
+
+
+def _discover_existing_facts(candidate: CandidateFact, namespace: str) -> List[Dict[str, str]]:
+    """Discover exact same-subject/predicate facts within one private namespace."""
+    if not namespace:
+        return []
+    try:
+        from tools import memory_graph_tool
+
+        raw = memory_graph_tool._search({
+            'query': f"{candidate.subject} {candidate.predicate}",
+            'limit': 10,
+            'namespace': namespace,
+        })
+        rows = json.loads(raw).get('results', [])
+    except Exception:
+        return []
+    discovered = []
+    for row in rows:
+        parsed = _parse_structured_memory_result(row)
+        if not parsed:
+            continue
+        if (
+            parsed['subject'].casefold() == candidate.subject.casefold()
+            and parsed['predicate'].casefold() == candidate.predicate.casefold()
+        ):
+            discovered.append({
+                'subject': parsed['subject'],
+                'predicate': parsed['predicate'],
+                'object': parsed['value'],
+                'uri': parsed['uri'],
+            })
+    return discovered
+
 # ─── Dedup ────────────────────────────────────────────────────────
 
 def make_dedup_key(fact: CandidateFact) -> str:
@@ -792,7 +838,9 @@ class MemoryWritePipeline:
 
     def classify_write(self, candidate: CandidateFact, existing_facts: List[Dict] = None, namespace: str = "") -> Dict[str, Any]:
         """Apply 5 gates to determine if and where to write."""
-        existing = existing_facts or []
+        existing = list(existing_facts or [])
+        if existing_facts is None:
+            existing = _discover_existing_facts(candidate, namespace or candidate.namespace)
 
         # Gate 1: Candidate quality / pollution guard. This only rejects obvious
         # wrappers, logs, empty fragments, or system events; durable user-authored

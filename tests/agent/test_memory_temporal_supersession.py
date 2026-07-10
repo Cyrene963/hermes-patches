@@ -1,4 +1,8 @@
-from agent.memory_write_pipeline import CandidateFact, MemoryWritePipeline
+from agent.memory_write_pipeline import (
+    CandidateFact,
+    MemoryWritePipeline,
+    _parse_structured_memory_result,
+)
 
 
 class FakeVersioningGraph:
@@ -61,6 +65,20 @@ def config(mode="limited_auto", repair_queue_path=None):
     if repair_queue_path:
         out["repair_queue_path"] = str(repair_queue_path)
     return out
+
+
+def test_parser_rejects_unstructured_and_parses_snippet_shape():
+    assert _parse_structured_memory_result({"uri": "core://x", "snippet": "related Project Alpha"}) is None
+    parsed = _parse_structured_memory_result({
+        "uri": "core://projects/alpha",
+        "snippet": "Subject: Project Alpha\nPredicate: version\nValue: 1.2",
+    })
+    assert parsed == {
+        "subject": "Project Alpha",
+        "predicate": "version",
+        "value": "1.2",
+        "uri": "core://projects/alpha",
+    }
 
 
 def test_explicit_correction_supersedes_and_verifies_top1():
