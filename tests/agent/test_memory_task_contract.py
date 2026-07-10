@@ -2,6 +2,7 @@ from agent.memory_task_contract import (
     EvidenceItem,
     build_task_memory_contract,
     evaluate_contract,
+    plan_contract_repair,
     resolve_relationships,
     resolve_projects,
 )
@@ -95,6 +96,35 @@ def test_research_preference_compiles_to_obligation():
     )
     assert [item.id for item in contract.obligations] == ["research.multi_source"]
     assert "multiple independent sources" in contract.to_prompt()
+
+
+def test_repair_plan_is_specific_and_bounded():
+    verdict = {
+        "passed": False,
+        "obligations": [{"id": "coding.verify", "passed": False, "missing": ["passing test/runtime evidence"]}],
+    }
+    first = plan_contract_repair(verdict)
+    second = plan_contract_repair(verdict, prior_fingerprints=[first["fingerprint"]])
+    third = plan_contract_repair(verdict, prior_fingerprints=[first["fingerprint"], first["fingerprint"]])
+    assert first["action"] == "repair" and first["attempt"] == 1
+    assert "Run the narrowest relevant test" in first["actions"][0]
+    assert second["action"] == "repair" and second["attempt"] == 2
+    assert third["action"] == "block"
+    assert "do not repeat" in third["message"].lower()
+
+
+def test_repair_plan_maps_delivery_and_research_actions():
+    verdict = {
+        "passed": False,
+        "obligations": [
+            {"id": "delivery.real_attachment", "passed": False, "missing": ["platform delivery confirmation"]},
+            {"id": "research.multi_source", "passed": False, "missing": ["multi-source/cross-check evidence"]},
+        ],
+    }
+    plan = plan_contract_repair(verdict)
+    text = "\n".join(plan["actions"])
+    assert "real platform attachment" in text
+    assert "two independent sources" in text
 
 
 def test_coding_verification_obligation_fails_without_runtime_evidence():

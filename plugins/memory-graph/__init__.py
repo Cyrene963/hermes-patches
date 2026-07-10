@@ -21,6 +21,7 @@ _contract_lock = threading.Lock()
 _turn_contracts: dict[str, object] = {}
 _turn_tool_events: dict[str, list[dict]] = {}
 _turn_contract_verdicts: dict[str, dict] = {}
+_turn_repair_fingerprints: dict[str, list[str]] = {}
 
 # Admin platform IDs — users who get admin role in Memory Graph
 # Read from config.yaml memory_graph.admin_platform_ids, fallback to first user
@@ -674,6 +675,7 @@ def _pre_llm_call(user_message="", **kwargs):
                     with _contract_lock:
                         _turn_contracts[session_id] = contract
                         _turn_tool_events[session_id] = []
+                        _turn_repair_fingerprints[session_id] = []
                 if contract_prompt:
                     context = context + "\n\n" + contract_prompt
             except Exception as contract_exc:
@@ -872,13 +874,16 @@ def _pre_verify_contract(session_id="", attempt=0, final_response="", **kwargs):
     if contract is None:
         return None
     try:
-        from agent.memory_task_contract import evaluate_contract
+        from agent.memory_task_contract import evaluate_contract, plan_contract_repair
 
         verdict = evaluate_contract(
             contract,
             events,
             active_todos=kwargs.get("active_todos") or [],
         )
+        with _contract_lock:
+            prior_repairs = list(_turn_repair_fingerprints.get(session_key, []))
+        repair = plan_contract_repair(verdict, prior_fingerprints=prior_repairs)
     except Exception:
         logger.debug("Memory contract pre_verify evaluation failed", exc_info=True)
         return None
@@ -890,15 +895,30 @@ def _pre_verify_contract(session_id="", attempt=0, final_response="", **kwargs):
             failures.append(f"{item.get('id')}: {', '.join(item.get('missing', []))}")
     if not failures:
         return None
+    if repair.get("action") == "block":
+        return {
+            "action": "continue",
+            "message": (
+                "[System: Bounded contract repair is exhausted for the unchanged failure "
+                f"fingerprint `{repair.get('fingerprint')}`. Do not repeat the same tool action. "
+                "State the concrete external blocker and preserve the NOT VERIFIED status.]"
+            ),
+        }
+    fingerprint = str(repair.get("fingerprint") or "")
+    if fingerprint:
+        with _contract_lock:
+            history = _turn_repair_fingerprints.setdefault(session_key, [])
+            history.append(fingerprint)
+            del history[:-8]
+    actions = list(repair.get("actions") or [])
     return {
         "action": "continue",
         "message": (
             "[System: Do not stop or ask whether to continue. The current task's "
-            "evidence-backed memory contract is still incomplete. Continue autonomously "
-            "with the next required tools/actions now.\n- "
-            + "\n- ".join(failures)
-            + "\nAfter each action, inspect the real result. Only finish when the obligations "
-            "pass, or after the bounded continuation attempts explain a concrete external blocker.]"
+            "evidence-backed memory contract is still incomplete. Execute this bounded "
+            f"repair plan (attempt {repair.get('attempt', 1)}/2) now:\n- "
+            + "\n- ".join(actions or failures)
+            + "\nAfter each action, inspect the real result. Do not repeat an unchanged failed action.]"
         ),
     }
 
@@ -929,6 +949,7 @@ def _post_llm_contract_verdict(session_id="", assistant_response="", **kwargs):
         contract = _turn_contracts.pop(session_key, None)
         events = _turn_tool_events.pop(session_key, [])
         prior_verdict = _turn_contract_verdicts.pop(session_key, None)
+        _turn_repair_fingerprints.pop(session_key, None)
     if contract is None:
         return None
     try:

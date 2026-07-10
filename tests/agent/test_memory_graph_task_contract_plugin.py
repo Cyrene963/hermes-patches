@@ -71,6 +71,12 @@ def test_unmet_contract_transforms_completion_claim():
     assert "coding.verify" in transformed
     directive = plugin._pre_verify_contract(session_id="s2", attempt=0, final_response="已经全部修复。")
     assert directive["action"] == "continue"
-    assert "Do not stop or ask whether to continue" in directive["message"]
-    assert "coding.verify" in directive["message"]
+    assert "bounded repair plan (attempt 1/2)" in directive["message"]
+    assert "Run the narrowest relevant test" in directive["message"]
+    second = plugin._pre_verify_contract(session_id="s2", attempt=1, final_response="已经全部修复。")
+    assert "attempt 2/2" in second["message"]
+    exhausted = plugin._pre_verify_contract(session_id="s2", attempt=2, final_response="已经全部修复。")
+    assert "repair is exhausted" in exhausted["message"]
+    assert "Do not repeat" in exhausted["message"]
     plugin._post_llm_contract_verdict(session_id="s2", assistant_response=transformed)
+    assert "s2" not in plugin._turn_repair_fingerprints

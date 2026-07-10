@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable
@@ -467,6 +469,59 @@ def _result_success(result: Any) -> bool:
             return False
     text = str(result or "").lower()
     return not any(marker in text for marker in ("traceback", "fatal:", "permission denied"))
+
+
+def plan_contract_repair(
+    verdict: dict[str, Any],
+    *,
+    prior_fingerprints: Iterable[str] = (),
+    max_attempts_per_failure: int = 2,
+) -> dict[str, Any]:
+    """Build a bounded, mechanical next-action plan for unmet obligations."""
+    prior = list(prior_fingerprints)
+    failures = [item for item in verdict.get("obligations", []) if not item.get("passed")]
+    normalized = [
+        {
+            "id": str(item.get("id") or "unknown"),
+            "missing": sorted(str(value) for value in item.get("missing", []) if value),
+        }
+        for item in failures
+    ]
+    fingerprint = hashlib.sha256(
+        json.dumps(normalized, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    attempts = sum(1 for value in prior if value == fingerprint)
+    if attempts >= max_attempts_per_failure:
+        return {
+            "action": "block",
+            "fingerprint": fingerprint,
+            "attempt": attempts,
+            "message": "Repeated repair attempts did not change the contract failure. Report the concrete blocker and the evidence already collected; do not repeat the same action.",
+        }
+    actions: list[str] = []
+    for item in normalized:
+        obligation = item["id"]
+        missing = " ".join(item["missing"]).lower()
+        if "active todos:" in missing:
+            actions.append("Continue the listed active TODO in priority order; mark it complete only after its real acceptance check passes.")
+        elif "successful non-housekeeping action" in missing:
+            actions.append("Execute one task-producing non-housekeeping tool action now, then inspect its real result.")
+        elif obligation == "coding.verify" or "passing test/runtime" in missing:
+            actions.append("Run the narrowest relevant test or live runtime probe with terminal/process/browser evidence; fix failures before retrying completion.")
+        elif obligation == "delivery.real_attachment" or "delivery confirmation" in missing:
+            actions.append("Use the real platform attachment delivery path and verify a returned message/delivery identifier; a local path is not evidence.")
+        elif obligation == "research.multi_source" or "multi-source" in missing:
+            actions.append("Collect and compare at least two independent sources, including an official/primary source when available.")
+        elif obligation == "memory.behavioral_claim" or "behavior-level" in missing:
+            actions.append("Run an isolated automatic recall/write/compliance behavior probe and clean up its fixture; module presence is insufficient.")
+        else:
+            actions.append(f"Address `{obligation}` with a new tool result that directly supplies: {', '.join(item['missing'])}.")
+    return {
+        "action": "repair",
+        "fingerprint": fingerprint,
+        "attempt": attempts + 1,
+        "actions": list(dict.fromkeys(actions)),
+    }
 
 
 def evaluate_contract(
