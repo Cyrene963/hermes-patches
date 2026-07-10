@@ -710,7 +710,7 @@ class MemoryWritePipeline:
                 }
                 sem_memory_type = sem_type_map.get(sem_kind, 'lesson')
                 sem_requires_review = bool(sem.requires_review)
-                candidates.append(CandidateFact(
+                sem_candidate = CandidateFact(
                     subject=sem_subject_map.get(sem_kind, sem_kind),
                     predicate='semantic_signal',
                     object_value=sem.evidence_quote[:500],
@@ -723,7 +723,30 @@ class MemoryWritePipeline:
                     source_type='user_correction' if sem_kind == 'correction_learning_event' else 'user_direct',
                     requires_review=sem_requires_review,
                     reason=sem.reason or sem.reject_gate,
-                ))
+                )
+                if sem_kind == 'correction_learning_event':
+                    try:
+                        from agent.correction_regression import build_correction_case, record_correction_case
+
+                        correction_case = build_correction_case(
+                            evidence_text=sem.evidence_quote,
+                            namespace=sem_candidate.namespace or '',
+                            memory_kind=sem_kind,
+                            target_store=sem.target_store,
+                            requires_review=sem_requires_review,
+                            reject_gate=sem.reject_gate,
+                            future_queries=sem.readback_queries,
+                        )
+                        correction_record = record_correction_case(
+                            correction_case,
+                            ledger_path=self.config.get('correction_regression_path'),
+                        )
+                        sem_candidate.correction_case_id = correction_case.case_id
+                        sem_candidate.changeset_id = correction_case.changeset_id
+                        sem_candidate.correction_regression_record = correction_record
+                    except Exception as exc:
+                        logger.debug('Correction regression artifact failed closed: %s', exc)
+                candidates.append(sem_candidate)
         except Exception as exc:
             logger.debug('Semantic memory classifier failed closed: %s', exc)
 
@@ -1170,6 +1193,8 @@ class MemoryWritePipeline:
                 'evidence_preview': _preview(raw_evidence),
                 'raw_secret_redacted': raw_secret_detected,
                 'value_sha256': hashlib.sha256(raw_value.encode('utf-8', 'ignore')).hexdigest() if raw_value else '',
+                'changeset_id': getattr(candidate, 'changeset_id', ''),
+                'correction_case_id': getattr(candidate, 'correction_case_id', ''),
             }
             with path.open('a', encoding='utf-8') as f:
                 f.write(json.dumps(item, ensure_ascii=False) + '\n')
