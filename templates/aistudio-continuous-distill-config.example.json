@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "namespace": "platform:owner-id",
+  "target_parents": {
+    "preference": "core://profiles/preferences",
+    "self_model": "core://profiles/self-model",
+    "learning": "core://profiles/learning",
+    "relationship": "core://profiles/relationships",
+    "project": "core://projects",
+    "procedure": "core://profiles/procedures",
+    "default": "core://profiles"
+  },
+  "excluded_turn_ids": []
+}

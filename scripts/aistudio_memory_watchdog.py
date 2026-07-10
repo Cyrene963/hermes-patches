@@ -33,6 +33,7 @@ TURN_INDEX = SCRIPTS / "aistudio_turn_index.py"
 TREASURE = SCRIPTS / "aistudio_treasure_review.py"
 CONVERT = SCRIPTS / "convert_aistudio_to_review_proposals.py"
 DISTILL = SCRIPTS / "aistudio_distill_review_proposals.py"
+CONTINUOUS_DISTILL = SCRIPTS / "aistudio_continuous_distill.py"
 
 
 def chmod_private(path: Path) -> None:
@@ -106,7 +107,7 @@ def prune_reports(keep_per_pattern: int = 20) -> int:
     for pattern in [
         "drive-sync-*.json", "parse-report-*.json", "fts-index-report-*.json",
         "turn-extract-report-*.json", "turn-index-report-*.json",
-        "treasure-review-report-*.json",
+        "treasure-review-report-*.json", "continuous-distill-*.json",
     ]:
         files = sorted(REPORTS.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
         for path in files[keep_per_pattern:]:
@@ -128,6 +129,14 @@ def main() -> int:
     synced_count = int(sync_report.get("synced_count") or 0)
     state = load_state()
     current_fingerprint = input_fingerprint()
+    continuous = run([
+        PYTHON, str(CONTINUOUS_DISTILL),
+        "--config", str(BASE / "continuous_distill_config.json"),
+        "--turn-db", str(BASE / "aistudio_turns.sqlite3"),
+        "--state-db", str(BASE / "continuous_distill.sqlite3"),
+        "--limit", "24", "--batch-size", "6", "--apply",
+    ], timeout=900) if CONTINUOUS_DISTILL.exists() and artifacts_ready() else subprocess.CompletedProcess([], 0, "", "")
+    continuous_report = read_json(latest("continuous-distill-*.json"))
     if (
         sync.returncode == 0
         and not real_sync_errors
@@ -141,9 +150,20 @@ def main() -> int:
             "synced_count": 0,
             "sync_error_count": 0,
             "fast_path": True,
+            "continuous_distill_returncode": continuous.returncode,
+            "continuous_processed_user_turns": int(continuous_report.get("processed_user_turns") or 0),
+            "continuous_total_user_turns": int(continuous_report.get("total_user_turns") or 0),
+            "continuous_processing_coverage_rate": float(continuous_report.get("processing_coverage_rate") or 0.0),
+            "continuous_proposals": int(continuous_report.get("proposal_count") or 0),
+            "continuous_clarifications": int(continuous_report.get("clarification_count") or 0),
             "reports_pruned": prune_reports(),
         })
         save_state(state)
+        if continuous.returncode != 0:
+            print(f"- continuous_distill_returncode={continuous.returncode}")
+            if continuous.stderr:
+                print(continuous.stderr[-1000:])
+            return 1
         return 0
 
     # Rebuild safe metadata index only when Drive or local distillation inputs changed.
@@ -205,6 +225,12 @@ def main() -> int:
         "distilled_needs_dedup": int(distill_report.get("needs_dedup_review") or 0),
         "distilled_clarifications": int(distill_report.get("clarification_count") or 0),
         "distilled_already_canonical": int(distill_report.get("already_canonical") or 0),
+        "continuous_distill_returncode": continuous.returncode,
+        "continuous_processed_user_turns": int(continuous_report.get("processed_user_turns") or 0),
+        "continuous_total_user_turns": int(continuous_report.get("total_user_turns") or 0),
+        "continuous_processing_coverage_rate": float(continuous_report.get("processing_coverage_rate") or 0.0),
+        "continuous_proposals": int(continuous_report.get("proposal_count") or 0),
+        "continuous_clarifications": int(continuous_report.get("clarification_count") or 0),
     }
     state.update(summary)
     save_state(state)
@@ -276,7 +302,7 @@ def main() -> int:
                 print(distill.stderr[-1000:])
         print(f"- state={STATE}")
     # Do not fail cron for known parse non-JSON artifacts; fail for sync/index/review real errors.
-    if summary["sync_error_count"] or sync.returncode != 0 or fts.returncode != 0 or turn.returncode != 0 or turn_index.returncode != 0 or treasure.returncode != 0 or convert.returncode != 0 or distill.returncode != 0:
+    if summary["sync_error_count"] or sync.returncode != 0 or fts.returncode != 0 or turn.returncode != 0 or turn_index.returncode != 0 or treasure.returncode != 0 or convert.returncode != 0 or distill.returncode != 0 or continuous.returncode != 0:
         return 1
     return 0
 

@@ -535,6 +535,12 @@ if [ -f "$PATCHES_DIR/scripts/aistudio_turn_index.py" ]; then
     chmod +x "$PROFILE_DIR/scripts/aistudio_turn_index.py"
     echo "   ✅ AI Studio private turn-index helper 已安装（opt-in prefetch 仍需 profile config）"
 fi
+if [ -f "$PATCHES_DIR/scripts/aistudio_continuous_distill.py" ]; then
+    mkdir -p "$PROFILE_DIR/scripts"
+    cp "$PATCHES_DIR/scripts/aistudio_continuous_distill.py" "$PROFILE_DIR/scripts/aistudio_continuous_distill.py"
+    chmod +x "$PROFILE_DIR/scripts/aistudio_continuous_distill.py"
+    echo "   ✅ AI Studio continuous review-first distiller 已安装（需私有 owner config）"
+fi
 if [ -f "$PATCHES_DIR/scripts/aistudio_memory_watchdog.py" ]; then
     mkdir -p "$PROFILE_DIR/scripts"
     cp "$PATCHES_DIR/scripts/aistudio_memory_watchdog.py" "$PROFILE_DIR/scripts/aistudio_memory_watchdog.py"

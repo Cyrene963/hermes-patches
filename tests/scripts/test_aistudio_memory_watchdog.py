@@ -46,9 +46,11 @@ def test_prune_reports_keeps_bounded_files_per_type(tmp_path, monkeypatch):
     for index in range(5):
         (reports / f"drive-sync-{index}.json").write_text(json.dumps({"i": index}), encoding="utf-8")
         (reports / f"parse-report-{index}.json").write_text(json.dumps({"i": index}), encoding="utf-8")
-    assert m.prune_reports(keep_per_pattern=2) == 6
+        (reports / f"continuous-distill-{index}.json").write_text(json.dumps({"i": index}), encoding="utf-8")
+    assert m.prune_reports(keep_per_pattern=2) == 9
     assert len(list(reports.glob("drive-sync-*.json"))) == 2
     assert len(list(reports.glob("parse-report-*.json"))) == 2
+    assert len(list(reports.glob("continuous-distill-*.json"))) == 2
 
 
 def test_runtime_python_prefers_profile_venv_or_current_interpreter():
