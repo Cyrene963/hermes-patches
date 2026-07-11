@@ -1,0 +1,95 @@
+diff --git a/agent/agent_runtime_helpers.py b/agent/agent_runtime_helpers.py
+index 08c0052..d138baa 100644
+--- a/agent/agent_runtime_helpers.py
++++ b/agent/agent_runtime_helpers.py
+@@ -942,6 +942,13 @@ def try_recover_primary_transport(
+     error_type = type(api_error).__name__
+     if error_type not in _TRANSIENT_TRANSPORT_ERRORS:
+         return False
++    if retry_count >= max_retries and error_type in _EXHAUSTED_TIMEOUT_ERRORS:
++        logger.info(
++            "Skipping primary client rebuild after exhausted %s retries; "
++            "replaying the same timeout budget would only duplicate latency.",
++            error_type,
++        )
++        return False
+ 
+     # Skip for aggregator providers — they manage their own retry infra
+     if agent._is_openrouter_url():
+@@ -1260,6 +1267,13 @@ _TRANSIENT_TRANSPORT_ERRORS = frozenset({
+     "APIConnectionError", "APITimeoutError",
+ })
+ 
++# A timeout that already consumed the normal retry budget is not repaired by
++# rebuilding the same client and replaying the whole budget. Keep rebuilds for
++# stale-pool/protocol/connectivity failures, where a fresh transport can help.
++_EXHAUSTED_TIMEOUT_ERRORS = frozenset({
++    "ReadTimeout", "APITimeoutError",
++})
++
+ 
+ 
+ def extract_reasoning(agent, assistant_message) -> Optional[str]:
+diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
+index 629667c..298e3af 100644
+--- a/agent/conversation_loop.py
++++ b/agent/conversation_loop.py
+@@ -68,6 +68,22 @@ from utils import base_url_host_matches, env_var_enabled
+ 
+ logger = logging.getLogger(__name__)
+ 
++
++def _large_context_max_attempts(approx_tokens: int, configured_attempts: int) -> int:
++    """Bound long-prompt primary attempts before fallback."""
++    return 1 if approx_tokens >= 16_000 else max(1, configured_attempts)
++
++
++def _large_context_timeout_seconds(approx_tokens: int) -> float | None:
++    """Return a bounded per-request timeout floor for large prompts."""
++    if approx_tokens < 16_000:
++        return None
++    if approx_tokens < 64_000:
++        return 90.0
++    if approx_tokens < 128_000:
++        return 180.0
++    return 300.0
++
+ # Stable prefix of the local interrupt status string emitted when a turn is
+ # cancelled while waiting on the provider. Surfaces (ACP, TUI) match on this
+ # to treat it as cancellation metadata rather than assistant prose.
+@@ -1000,7 +1016,7 @@ def run_conversation(
+         
+         api_start_time = time.time()
+         retry_count = 0
+-        max_retries = agent._api_max_retries
++        max_retries = _large_context_max_attempts(approx_tokens, agent._api_max_retries)
+         _retry = TurnRetryState()
+         max_compression_attempts = 3
+ 
+@@ -1072,6 +1088,16 @@ def run_conversation(
+                 # isn't sent with stale, primary-shaped reasoning fields.
+                 agent._reapply_reasoning_echo_for_provider(api_messages)
+                 api_kwargs = agent._build_api_kwargs(api_messages)
++                if agent.api_mode != "anthropic_messages":
++                    _timeout_floor = _large_context_timeout_seconds(approx_tokens)
++                    if _timeout_floor is not None:
++                        _configured_timeout = None
++                        try:
++                            from hermes_cli.timeouts import get_provider_request_timeout
++                            _configured_timeout = get_provider_request_timeout(agent.provider, agent.model)
++                        except Exception:
++                            pass
++                        api_kwargs["timeout"] = max(float(_configured_timeout or 0), _timeout_floor)
+                 if agent._force_ascii_payload:
+                     _sanitize_structure_non_ascii(api_kwargs)
+                 if agent.api_mode == "codex_responses":
+@@ -3758,6 +3784,9 @@ def run_conversation(
+                         agent._fallback_index = 0
+                         agent._fallback_activated = False
+                         continue
++                    if type(api_error).__name__ in {"ReadTimeout", "APITimeoutError"} and getattr(agent, "_fallback_chain", None):
++                        agent._fallback_index = 0
++                        agent._fallback_activated = False
+                     # Try fallback before giving up entirely
+                     if agent._has_pending_fallback():
+                         agent._buffer_status(f"⚠️ Max retries ({max_retries}) exhausted — trying fallback...")

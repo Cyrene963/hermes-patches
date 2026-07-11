@@ -64,6 +64,22 @@ from utils import base_url_host_matches, env_var_enabled
 logger = logging.getLogger(__name__)
 
 
+def _large_context_max_attempts(approx_tokens: int, configured_attempts: int) -> int:
+    """Bound long-prompt primary attempts before fallback."""
+    return 1 if approx_tokens >= 16_000 else max(1, configured_attempts)
+
+
+def _large_context_timeout_seconds(approx_tokens: int) -> float | None:
+    """Return a bounded per-request timeout floor for large prompts."""
+    if approx_tokens < 16_000:
+        return None
+    if approx_tokens < 64_000:
+        return 90.0
+    if approx_tokens < 128_000:
+        return 180.0
+    return 300.0
+
+
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
     """Return a user-facing error when Ollama is loaded with too little context."""
     if not getattr(agent, "tools", None):
@@ -1151,7 +1167,7 @@ def run_conversation(
         
         api_start_time = time.time()
         retry_count = 0
-        max_retries = agent._api_max_retries
+        max_retries = _large_context_max_attempts(approx_tokens, agent._api_max_retries)
         primary_recovery_attempted = False
         max_compression_attempts = 3
         codex_auth_retry_attempted=False
@@ -1233,6 +1249,16 @@ def run_conversation(
                 # isn't sent with stale, primary-shaped reasoning fields.
                 agent._reapply_reasoning_echo_for_provider(api_messages)
                 api_kwargs = agent._build_api_kwargs(api_messages)
+                if agent.api_mode != "anthropic_messages":
+                    _timeout_floor = _large_context_timeout_seconds(approx_tokens)
+                    if _timeout_floor is not None:
+                        _configured_timeout = None
+                        try:
+                            from hermes_cli.timeouts import get_provider_request_timeout
+                            _configured_timeout = get_provider_request_timeout(agent.provider, agent.model)
+                        except Exception:
+                            pass
+                        api_kwargs["timeout"] = max(float(_configured_timeout or 0), _timeout_floor)
                 if agent._force_ascii_payload:
                     _sanitize_structure_non_ascii(api_kwargs)
                 if agent.api_mode == "codex_responses":
@@ -3308,6 +3334,9 @@ def run_conversation(
                         primary_recovery_attempted = True
                         retry_count = 0
                         continue
+                    if type(api_error).__name__ in {"ReadTimeout", "APITimeoutError"} and getattr(agent, "_fallback_chain", None):
+                        agent._fallback_index = 0
+                        agent._fallback_activated = False
                     # Try fallback before giving up entirely
                     if agent._has_pending_fallback():
                         agent._buffer_status(f"⚠️ Max retries ({max_retries}) exhausted — trying fallback...")

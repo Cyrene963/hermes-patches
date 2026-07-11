@@ -729,6 +729,13 @@ def try_recover_primary_transport(
     error_type = type(api_error).__name__
     if error_type not in _TRANSIENT_TRANSPORT_ERRORS:
         return False
+    if retry_count >= max_retries and error_type in _EXHAUSTED_TIMEOUT_ERRORS:
+        logger.info(
+            "Skipping primary client rebuild after exhausted %s retries; "
+            "replaying the same timeout budget would only duplicate latency.",
+            error_type,
+        )
+        return False
 
     # Skip for aggregator providers — they manage their own retry infra
     if agent._is_openrouter_url():
@@ -971,6 +978,10 @@ _TRANSIENT_TRANSPORT_ERRORS = frozenset({
     "ReadTimeout", "ConnectTimeout", "PoolTimeout",
     "ConnectError", "RemoteProtocolError",
     "APIConnectionError", "APITimeoutError",
+})
+
+_EXHAUSTED_TIMEOUT_ERRORS = frozenset({
+    "ReadTimeout", "APITimeoutError",
 })
 
 
