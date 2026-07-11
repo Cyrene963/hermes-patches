@@ -39,6 +39,43 @@ def test_api_approval_happens_after_single_queue_snapshot_write():
     assert "atomic_jsonl(args.queue, rows)" not in after_loop
 
 
+def _ready_row(*, role="user", risk="low", volatility="stable", status="pending", distilled=True):
+    return {
+        "status": status,
+        "candidate": {
+            "distilled": distilled,
+            "risk_level": risk,
+            "readback_queries": ["stable fact"],
+            "metadata": {"role": role, "volatility": volatility},
+        },
+        "decision": {"target_store": "review"},
+    }
+
+
+def test_promote_ready_memory_requires_consensus_but_does_not_approve():
+    module = load_module()
+    row = _ready_row()
+    module.promote_ready_memory(row, consensus_gate="independent_a_b", promoted_at="2026-01-01T00:00:00+00:00")
+    assert row["status"] == "pending"
+    assert row["candidate"]["suggested_store"] == "memory_graph"
+    assert row["candidate"]["metadata"]["target_store"] == "memory_graph"
+    assert row["candidate"]["metadata"]["consensus_gate"] == "independent_a_b"
+    assert row["decision"]["target_store"] == "memory_graph"
+
+
+def test_promote_ready_memory_rejects_non_user_sensitive_or_raw_candidates():
+    module = load_module()
+    import pytest
+    for row in (
+        _ready_row(role="model"),
+        _ready_row(risk="medium"),
+        _ready_row(volatility="time_bound"),
+        _ready_row(distilled=False),
+    ):
+        with pytest.raises(ValueError):
+            module.promote_ready_memory(row, consensus_gate="independent_a_b")
+
+
 def test_reviewer_uses_same_private_lock_as_distiller():
     module = load_module()
     assert module.LOCK.name == "continuous_distill.lock"

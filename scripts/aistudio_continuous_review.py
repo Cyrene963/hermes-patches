@@ -60,6 +60,37 @@ def atomic_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     tmp.chmod(0o600); tmp.replace(path)
 
 
+def promote_ready_memory(row: dict[str, Any], *, consensus_gate: str, promoted_at: str | None = None) -> None:
+    """Promote a reviewed proposal to the API's ready-memory stage.
+
+    This is a state transition, not approval. The approval API still owns the
+    Graph write and read/search verification.
+    """
+    candidate = row.get("candidate") or {}
+    metadata = candidate.get("metadata") or {}
+    if row.get("status", "pending") != "pending":
+        raise ValueError("only pending proposals can be promoted")
+    if not candidate.get("distilled"):
+        raise ValueError("proposal is not distilled")
+    if metadata.get("role") != "user":
+        raise ValueError("only role=user evidence can be promoted")
+    if candidate.get("risk_level") != "low" or metadata.get("volatility") in {"sensitive", "time_bound"}:
+        raise ValueError("sensitive or volatile proposal cannot be promoted")
+    if not candidate.get("readback_queries"):
+        raise ValueError("proposal has no readback queries")
+    timestamp = promoted_at or now()
+    candidate["suggested_store"] = "memory_graph"
+    metadata["target_store"] = "memory_graph"
+    metadata["consensus_gate"] = consensus_gate
+    metadata["consensus_promoted_at"] = timestamp
+    candidate["metadata"] = metadata
+    decision = row.setdefault("decision", {})
+    decision["action"] = "review"
+    decision["target_store"] = "memory_graph"
+    decision["reason"] = f"promoted after {consensus_gate}"
+    row["updated_at"] = timestamp
+
+
 def graph_read(uri: str, namespace: str) -> str:
     try:
         from tools import memory_graph_tool
