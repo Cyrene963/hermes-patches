@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from agent.memory_clarification_queue import build_clarification_context_block
-from agent.memory_write_pipeline import CandidateFact, MemoryWritePipeline
+from agent.memory_write_pipeline import CandidateFact, MemoryWritePipeline, is_verified_write_result
 
 
 class FakeGraphClient:
@@ -92,6 +92,13 @@ def test_default_shadow_mode_never_writes_even_high_confidence(shadow_pipeline_c
     assert result["auto_write_allowed"] is False
     assert result["written"] is False
     assert graph.calls == []
+
+
+def test_verified_write_requires_storage_readback_and_changeset():
+    assert is_verified_write_result({'written':True,'readback_ok':True,'changeset_recorded':True})
+    assert not is_verified_write_result({'written':True,'readback_ok':True,'changeset_recorded':False})
+    assert not is_verified_write_result({'written':True,'readback_ok':False,'changeset_recorded':True})
+    assert not is_verified_write_result({'written':False,'readback_ok':True,'changeset_recorded':True})
 
 
 def test_limited_auto_writes_high_confidence_user_candidate_and_verifies_readback():

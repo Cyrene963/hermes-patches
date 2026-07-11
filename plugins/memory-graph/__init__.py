@@ -783,85 +783,14 @@ def _pre_llm_call(user_message="", **kwargs):
 _db_ready = False
 
 
-# Keywords that signal memorable content worth storing
-_MEMORABLE_KEYWORDS_CN = {
-    "记住", "喜欢", "不喜欢", "讨厌", "偏好", "密码", "重要",
-    "生日", "地址", "电话", "家人", "孩子", "老公", "老婆",
-    "医院", "药", "病", "预约", "考试", "成绩",
-}
-_MEMORABLE_KEYWORDS_EN = {
-    "remember", "prefer", "important", "birthday", "password",
-    "address", "phone", "doctor", "appointment", "exam",
-}
-
-
 def _post_llm_call(user_message="", assistant_response="", platform="", **kwargs):
-    """Hook: auto-store memorable conversations to Memory Graph.
+    """Post-turn plugin hook.
 
-    Lightweight keyword detection — if the user's message or the assistant's
-    response contains memorable keywords, store a summary to MG.
-    This ensures WeChat (and other platforms) retain key information even
-    without Hindsight.
+    Durable writes are owned exclusively by the full MemoryWritePipeline in
+    conversation_loop. Keeping a second keyword-based Graph writer here caused
+    duplicate raw conversation snippets, assistant-text pollution, and writes
+    without classification/readback/changesets.
     """
-    ns = get_current_namespace()
-    if not ns:
-        _apply_turn_namespace_from_kwargs(kwargs)
-        ns = get_current_namespace()
-    if not ns:
-        return None
-
-    # Only auto-store if memorable keywords are present
-    user_text = _coerce_text(user_message)
-    assistant_text = _coerce_text(assistant_response)
-    combined = (user_text + " " + assistant_text).lower()
-    has_memorable = False
-    for kw in _MEMORABLE_KEYWORDS_CN | _MEMORABLE_KEYWORDS_EN:
-        if kw in combined:
-            has_memorable = True
-            break
-    if not has_memorable:
-        return None
-
-    try:
-        import asyncio
-        from agent.memory_graph.services.graph import GraphService
-
-        # Build a concise memory snippet
-        user_short = user_text[:150].strip()
-        resp_short = assistant_text[:150].strip()
-        content = f"用户: {user_short}\n回复: {resp_short}"
-
-        async def _store():
-            global _db_ready
-            if not _db_ready:
-                from agent.memory_graph.db import init_db
-                await init_db()
-                _db_ready = True
-            gs = GraphService()
-            try:
-                await gs.create_memory(
-                    parent_path="对话记录",
-                    content=content,
-                    priority=1,
-                    title=f"对话 {user_short[:20]}",
-                    domain="core",
-                    namespace=ns,
-                    auto_create_parents=True,
-                )
-                logger.debug("MG auto-stored conversation snippet for ns=%s", ns)
-            except Exception as e:
-                logger.debug("MG auto-store failed: %s", e)
-
-        # Run in existing event loop or create one
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(_store())
-        except RuntimeError:
-            asyncio.run(_store())
-
-    except Exception as e:
-        logger.debug("Memory Graph post_llm_call failed: %s", e)
-
     return None
 
 

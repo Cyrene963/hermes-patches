@@ -38,6 +38,19 @@ def test_contract_evidence_merge_keeps_both_lanes_and_deduplicates():
     ]
 
 
+def test_post_llm_plugin_does_not_bypass_full_write_pipeline():
+    plugin = _plugin()
+    plugin._db_ready = False
+    assert plugin._post_llm_call(
+        user_message="remember this neutral preference",
+        assistant_response="assistant text must not be persisted by this hook",
+        platform="cli",
+        user_id="neutral-user",
+        chat_id="neutral-user",
+    ) is None
+    assert plugin._db_ready is False
+
+
 def test_post_tool_and_post_llm_emit_behavioral_verdict(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     plugin = _plugin()

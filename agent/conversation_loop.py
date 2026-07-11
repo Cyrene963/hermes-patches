@@ -65,12 +65,21 @@ logger = logging.getLogger(__name__)
 
 
 def _large_context_max_attempts(approx_tokens: int, configured_attempts: int) -> int:
-    """Bound long-prompt primary attempts before fallback."""
+    """Bound long-prompt primary attempts before fallback.
+
+    A single large request already receives a longer timeout floor. Replaying it
+    on the same model multiplies latency without adding route diversity.
+    """
     return 1 if approx_tokens >= 16_000 else max(1, configured_attempts)
 
 
 def _large_context_timeout_seconds(approx_tokens: int) -> float | None:
-    """Return a bounded per-request timeout floor for large prompts."""
+    """Return a bounded per-request timeout floor for large prompts.
+
+    Small prompts keep the provider/client default. Large prompts need enough
+    server compute time to produce the first token, but remain bounded so a
+    stalled route can still fail over promptly.
+    """
     if approx_tokens < 16_000:
         return None
     if approx_tokens < 64_000:
@@ -3334,6 +3343,9 @@ def run_conversation(
                         primary_recovery_attempted = True
                         retry_count = 0
                         continue
+                    # Exhausted timeouts do not rebuild/replay the same primary
+                    # budget. Reset any stale per-turn fallback cursor so a
+                    # configured alternate model remains reachable immediately.
                     if type(api_error).__name__ in {"ReadTimeout", "APITimeoutError"} and getattr(agent, "_fallback_chain", None):
                         agent._fallback_index = 0
                         agent._fallback_activated = False
@@ -4349,6 +4361,73 @@ def run_conversation(
                 
                 final_response = agent._strip_think_blocks(final_response).strip()
                 
+                # Completion gates run before the candidate final response is
+                # committed to the transcript. They may keep this same tool loop
+                # alive with ephemeral assistant/user scaffolding.
+                _continue_nudge = None
+                _continue_flag = None
+                try:
+                    from agent.verification_stop import (
+                        build_verify_on_stop_nudge,
+                        verify_on_stop_enabled,
+                    )
+                    if verify_on_stop_enabled():
+                        _continue_nudge = build_verify_on_stop_nudge(
+                            session_id=agent.session_id,
+                            changed_paths=getattr(agent, "_turn_file_mutation_paths", set()),
+                            attempts=getattr(agent, "_verification_stop_nudges", 0),
+                        )
+                        if _continue_nudge:
+                            setattr(
+                                agent,
+                                "_verification_stop_nudges",
+                                getattr(agent, "_verification_stop_nudges", 0) + 1,
+                            )
+                            _continue_flag = "_verification_stop_synthetic"
+                except Exception:
+                    logger.debug("verify-on-stop completion gate failed", exc_info=True)
+
+                if _continue_nudge is None:
+                    try:
+                        from agent.verify_hooks import max_verify_nudges
+                        from hermes_cli.plugins import get_pre_verify_continue_message
+
+                        _max_verify = max_verify_nudges()
+                        _attempt = getattr(agent, "_pre_verify_nudges", 0)
+                        if _attempt < _max_verify:
+                            _continue_nudge = get_pre_verify_continue_message(
+                                session_id=agent.session_id or "",
+                                platform=getattr(agent, "platform", None) or "",
+                                model=agent.model,
+                                coding=bool(getattr(agent, "_turn_file_mutation_paths", set())),
+                                attempt=_attempt,
+                                final_response=final_response,
+                                changed_paths=sorted(getattr(agent, "_turn_file_mutation_paths", set())),
+                                active_todos=[
+                                    item for item in agent._todo_store.read()
+                                    if item.get("status") in {"pending", "in_progress"}
+                                ] if getattr(agent, "_todo_store", None) else [],
+                            )
+                            if _continue_nudge:
+                                setattr(agent, "_pre_verify_nudges", _attempt + 1)
+                                _continue_flag = "_pre_verify_synthetic"
+                    except Exception:
+                        logger.debug("pre_verify completion gate failed", exc_info=True)
+
+                if _continue_nudge and _continue_flag:
+                    synthetic_final = agent._build_assistant_message(assistant_message, finish_reason)
+                    synthetic_final["content"] = final_response or "(premature completion)"
+                    synthetic_final[_continue_flag] = True
+                    messages.append(synthetic_final)
+                    messages.append({
+                        "role": "user",
+                        "content": _continue_nudge,
+                        _continue_flag: True,
+                    })
+                    agent._session_messages = messages
+                    _turn_exit_reason = "completion_gate_continue"
+                    continue
+
                 final_msg = agent._build_assistant_message(assistant_message, finish_reason)
 
                 # Pop thinking-only prefill and empty-response retry
@@ -4772,7 +4851,7 @@ def run_conversation(
     # current policy leaves auto-write disabled.
     if final_response and not interrupted:
         try:
-            from agent.memory_write_pipeline import MemoryWritePipeline
+            from agent.memory_write_pipeline import MemoryWritePipeline, is_verified_write_result
             from agent.shadow_write_logger import log_shadow_write
 
             _pipeline = MemoryWritePipeline()
@@ -4859,9 +4938,13 @@ def run_conversation(
                         "failure_reason": _write_result.get("failure_reason", ""),
                         "uri": _write_result.get("uri", ""),
                         "write_error": _write_result.get("error", ""),
+                        "changeset_id": _write_result.get("changeset_id", ""),
+                        "changeset_recorded": bool(_write_result.get("changeset_recorded")),
                     })
 
-                _mode = "auto" if any(r.get("written") for r in _auto_write_results) else "shadow"
+                _mode = "auto" if any(
+                    is_verified_write_result(r) for r in _auto_write_results
+                ) else "shadow"
                 log_shadow_write(
                     conversation_id=getattr(agent, "session_id", "") or "",
                     user_id=_user_id,

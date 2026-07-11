@@ -8,7 +8,7 @@ import logging
 import json
 import os
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
@@ -265,6 +265,11 @@ def _auto_type(candidate: "CandidateFact") -> str:
     if candidate.memory_type in {"target_function", "procedural_memory", "decision", "user_fact"} and candidate.source_type == "user_direct":
         return candidate.memory_type
     return candidate.memory_type
+
+def is_verified_write_result(result: Mapping[str, Any]) -> bool:
+    """A natural-path write counts only after storage, readback, and journal."""
+    return bool(result.get('written') and result.get('readback_ok') and result.get('changeset_recorded'))
+
 
 # ─── Data Classes ────────────────────────────────────────────────
 
