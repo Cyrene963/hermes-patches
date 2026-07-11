@@ -7,7 +7,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PATCHES_DIR="$SCRIPT_DIR"
 DEFAULT_HERMES_DIR="$HOME/.hermes/hermes-agent"
-HERMES_DIR="${HERMES_HOME:-$DEFAULT_HERMES_DIR}"
+REQUESTED_HERMES_DIR="${HERMES_HOME:-$DEFAULT_HERMES_DIR}"
+HERMES_DIR="$REQUESTED_HERMES_DIR"
 # When hermes update calls this script from the profile root (~/.hermes),
 # HERMES_HOME may point at the profile directory instead of the repo root.
 # Detect that case and fall back to the real repo if it exists.
@@ -32,9 +33,11 @@ mkdir -p "$PROFILE_DIR"
 # ~/.hermes/tasks or /tmp.  Those runs must never rewrite persistent systemd
 # units to point at the disposable checkout; doing so breaks the live Memory
 # Graph service after the temp tree is removed.  Allow callers to override, but
-# default to no systemd side effects for obvious non-production checkouts.
-case "$HERMES_DIR" in
-    "$HOME/.hermes/tasks"/*|/tmp/*|/var/tmp/*)
+# default to no systemd side effects whenever either the originally requested
+# checkout or the profile is temporary. This remains true even if repo-path
+# fallback later resolves HERMES_DIR to the live checkout.
+case "$REQUESTED_HERMES_DIR:$PROFILE_DIR" in
+    "$HOME/.hermes/tasks"/*:*|/tmp/*:*|/var/tmp/*:*|*:/tmp/*|*:/var/tmp/*|*:"$HOME/.hermes/tasks"/*)
         if [ -z "${HERMES_INSTALL_SYSTEMD+x}" ]; then
             HERMES_INSTALL_SYSTEMD=0
             echo "   ℹ️ safe smoke mode: systemd installation disabled for temporary checkout (set HERMES_INSTALL_SYSTEMD=1 to override)"

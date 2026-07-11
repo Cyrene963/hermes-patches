@@ -122,12 +122,14 @@ class MemoryLifecycleManager:
         children: Callable[[str, str], list[Mapping[str, Any]]],
         delete: Callable[[str, str], bool],
         create: Callable[[str, str, str, str, int], Mapping[str, Any]],
+        update: Callable[[str, str, str, int], Mapping[str, Any]] | None = None,
         journal_root: str | Path | None = None,
     ) -> None:
         self.read = read
         self.children = children
         self.delete = delete
         self.create = create
+        self.update = update
         self.journal_root = Path(journal_root or os.path.expanduser("~/.hermes/memory_changesets"))
 
     @staticmethod
@@ -136,6 +138,35 @@ class MemoryLifecycleManager:
 
     def _path(self, namespace: str, changeset_id: str) -> Path:
         return self.journal_root / self._namespace_dir(namespace) / f"{changeset_id}.json"
+
+    def _write_changeset(self, namespace: str, item: dict[str, Any]) -> str:
+        changeset_id = str(item.get("changeset_id") or uuid.uuid4().hex)
+        item["changeset_id"] = changeset_id
+        path = self._path(namespace, changeset_id)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(path.parent, 0o700)
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(item, ensure_ascii=False, indent=2) + "\n")
+        return changeset_id
+
+    def record_create(self, *, uri: str, namespace: str, after: Mapping[str, Any]) -> str:
+        return self._write_changeset(namespace, {
+            "schema_version": 1, "operation": "create", "namespace": namespace,
+            "uri": uri, "before": {"absent": True}, "after": dict(after),
+            "created_at": datetime.now(timezone.utc).isoformat(), "rolled_back_at": None,
+            "result": "created",
+        })
+
+    def record_update(self, *, uri: str, namespace: str, before: Mapping[str, Any], after: Mapping[str, Any]) -> str:
+        return self._write_changeset(namespace, {
+            "schema_version": 1, "operation": "update", "namespace": namespace,
+            "uri": uri,
+            "before": {"content": before.get("content", ""), "priority": int(before.get("priority") or 0)},
+            "after": {"content": after.get("content", ""), "priority": int(after.get("priority") or 0)},
+            "created_at": datetime.now(timezone.utc).isoformat(), "rolled_back_at": None,
+            "result": "updated",
+        })
 
     @staticmethod
     def _split_uri(uri: str) -> tuple[str, str, str]:
@@ -169,12 +200,8 @@ class MemoryLifecycleManager:
             "created_at": now,
             "rolled_back_at": None,
         }
+        self._write_changeset(namespace, changeset)
         path = self._path(namespace, changeset_id)
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(path.parent, 0o700)
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(changeset, ensure_ascii=False, indent=2) + "\n")
         deleted = bool(self.delete(uri, namespace))
         absent = self.read(uri, namespace) is None
         if not deleted or not absent:
@@ -193,6 +220,33 @@ class MemoryLifecycleManager:
         if item.get("namespace") != namespace:
             return {"ok": False, "error": "namespace_mismatch"}
         existing = self.read(item["uri"], namespace)
+        operation = item.get("operation")
+        if operation == "create":
+            if not existing:
+                return {"ok": True, "already_rolled_back": True, "uri": item["uri"]}
+            if self.children(item["uri"], namespace):
+                return {"ok": False, "error": "created_uri_has_children"}
+            if not self.delete(item["uri"], namespace) or self.read(item["uri"], namespace) is not None:
+                return {"ok": False, "error": "create_rollback_readback_failed"}
+            item["rolled_back_at"] = datetime.now(timezone.utc).isoformat()
+            item["result"] = "rolled_back"
+            path.write_text(json.dumps(item, ensure_ascii=False, indent=2) + "\n")
+            return {"ok": True, "uri": item["uri"], "readback_absent": True}
+        if operation == "update":
+            if not existing:
+                return {"ok": False, "error": "updated_uri_missing"}
+            if existing.get("content") == item["before"]["content"]:
+                return {"ok": True, "already_restored": True, "uri": item["uri"]}
+            if self.update is None:
+                return {"ok": False, "error": "update_adapter_unavailable"}
+            self.update(item["uri"], namespace, item["before"]["content"], item["before"]["priority"])
+            restored = self.read(item["uri"], namespace)
+            if not restored or restored.get("content") != item["before"]["content"]:
+                return {"ok": False, "error": "update_rollback_readback_failed"}
+            item["rolled_back_at"] = datetime.now(timezone.utc).isoformat()
+            item["result"] = "rolled_back"
+            path.write_text(json.dumps(item, ensure_ascii=False, indent=2) + "\n")
+            return {"ok": True, "uri": item["uri"], "readback_restored": True}
         if existing:
             if existing.get("content") == item["before"]["content"]:
                 return {"ok": True, "already_restored": True, "uri": item["uri"]}

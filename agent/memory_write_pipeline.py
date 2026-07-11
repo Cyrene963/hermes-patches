@@ -1172,6 +1172,21 @@ class MemoryWritePipeline:
                 break
 
         failure_reason = '' if readback_ok else 'created memory was not found in top search results for generated future queries'
+        changeset_id = ''
+        changeset_error = ''
+        if readback_ok:
+            try:
+                from tools.memory_lifecycle_tool import _manager
+                created_uri = created.get('uri') or f"core://{created.get('path', '')}"
+                changeset_id = _manager(namespace).record_create(
+                    uri=created_uri,
+                    namespace=namespace,
+                    after={'content': content, 'priority': 1 if candidate.importance < 0.95 else 2},
+                )
+            except Exception as exc:
+                changeset_error = exc.__class__.__name__
+                failure_reason = f'created memory read back but changeset journal failed: {changeset_error}'
+                readback_ok = False
 
         return {
             'written': True,
@@ -1183,6 +1198,9 @@ class MemoryWritePipeline:
             'failure_reason': failure_reason,
             'uri': created.get('uri') or f"core://{created.get('path', '')}",
             'node_uuid': created.get('node_uuid'),
+            'changeset_id': changeset_id,
+            'changeset_recorded': bool(changeset_id),
+            'changeset_error': changeset_error,
         }
 
     def _write_hindsight(self, candidate: CandidateFact, classification: Dict[str, Any]) -> Dict[str, Any]:
@@ -1354,6 +1372,18 @@ class MemoryWritePipeline:
                     'new_results': new_rows,
                     'old_results': old_rows,
                 })
+                try:
+                    from tools.memory_lifecycle_tool import _manager
+                    graph_result['changeset_id'] = _manager(namespace).record_update(
+                        uri=uri,
+                        namespace=namespace,
+                        before=old,
+                        after={'content': updated_content, 'priority': 2 if candidate.importance >= 0.95 else 1},
+                    )
+                    graph_result['changeset_recorded'] = True
+                except Exception as exc:
+                    graph_result['changeset_recorded'] = False
+                    graph_result['changeset_error'] = exc.__class__.__name__
 
             new_rows = list(graph_result.get('new_results') or [])
             old_rows = list(graph_result.get('old_results') or [])
@@ -1396,9 +1426,16 @@ class MemoryWritePipeline:
                 'old_top1_stale': stale_top1,
                 'new_top_uri': top_new.get('uri', ''),
                 'old_top_uri': top_old.get('uri', ''),
+                'changeset_id': graph_result.get('changeset_id', ''),
+                'changeset_recorded': bool(graph_result.get('changeset_recorded')),
             })
+            lifecycle_journal_required = self.graph is None
+            if result['written'] and result['readback_ok'] and lifecycle_journal_required and not result['changeset_recorded']:
+                result['readback_ok'] = False
+                result['failure_reason'] = 'supersede committed but changeset journal failed'
             if not result['readback_ok']:
-                result['failure_reason'] = 'supersede committed but temporal top-1 verification failed'
+                if not result.get('failure_reason'):
+                    result['failure_reason'] = 'supersede committed but temporal top-1 verification failed'
                 self._record_repair_queue(candidate, classification, result)
             return result
         except Exception as exc:

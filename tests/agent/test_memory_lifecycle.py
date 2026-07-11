@@ -31,7 +31,8 @@ def manager(tmp_path):
     def delete(uri, ns): return store.pop(uri, None) is not None
     def create(domain, parent, title, content, priority):
         uri=f"{domain}://{parent + '/' if parent else ''}{title}";store[uri]={"content":content,"priority":priority};return {"uri":uri}
-    return MemoryLifecycleManager(read=read,children=children,delete=delete,create=create,journal_root=tmp_path),store
+    def update(uri, ns, content, priority): store[uri]={"content":content,"priority":priority};return {"uri":uri,"updated":True}
+    return MemoryLifecycleManager(read=read,children=children,delete=delete,create=create,update=update,journal_root=tmp_path),store
 
 
 def test_delete_readback_and_idempotent_rollback(tmp_path):
@@ -57,6 +58,21 @@ def test_delete_refuses_non_leaf_without_calling_delete(tmp_path):
 def test_namespace_mismatch_cannot_rollback(tmp_path):
     mgr,_=manager(tmp_path);result=mgr.delete_leaf(request())
     assert mgr.rollback(changeset_id=result["changeset_id"],namespace="other:private")["error"]=="changeset_not_found"
+
+
+def test_create_and_update_changesets_rollback_idempotently(tmp_path):
+    mgr,store=manager(tmp_path)
+    create_id=mgr.record_create(uri="core://neutral/item",namespace="test:private",after=store["core://neutral/item"])
+    removed=mgr.rollback(changeset_id=create_id,namespace="test:private")
+    assert removed["ok"] and removed["readback_absent"] and not store
+    assert mgr.rollback(changeset_id=create_id,namespace="test:private")["already_rolled_back"]
+
+    store["core://neutral/item"]={"content":"before","priority":1}
+    before=dict(store["core://neutral/item"]);store["core://neutral/item"]={"content":"after","priority":2}
+    update_id=mgr.record_update(uri="core://neutral/item",namespace="test:private",before=before,after=store["core://neutral/item"])
+    restored=mgr.rollback(changeset_id=update_id,namespace="test:private")
+    assert restored["ok"] and restored["readback_restored"] and store["core://neutral/item"]==before
+    assert mgr.rollback(changeset_id=update_id,namespace="test:private")["already_restored"]
 
 
 def test_delete_grant_is_scoped_signed_expiring_and_single_use(tmp_path):

@@ -25,7 +25,9 @@ def _manager(namespace):
         return bool(data.get("deleted"))
     def create(domain,parent,title,content,priority):
         return _json(memory_graph_tool._create({"domain":domain,"parent_uri":f"{domain}://{parent}" if parent else "","title":title,"content":content,"priority":priority,"namespace":namespace})) or {}
-    return MemoryLifecycleManager(read=read,children=children,delete=delete,create=create)
+    def update(uri,ns,content,priority):
+        return _json(memory_graph_tool._update({"uri":uri,"namespace":ns,"content":content,"priority":priority})) or {}
+    return MemoryLifecycleManager(read=read,children=children,delete=delete,create=create,update=update)
 
 
 DELETE_SCHEMA={"name":"memory_lifecycle_delete","description":"Delete exactly one leaf memory using a short-lived host-signed grant issued from the current explicit user request. Never recursively deletes subtrees.","parameters":{"type":"object","properties":{"uri":{"type":"string"},"namespace":{"type":"string"},"delete_grant":{"type":"string"},"candidate_count":{"type":"integer"}},"required":["uri","namespace","delete_grant","candidate_count"],"additionalProperties":False}}
