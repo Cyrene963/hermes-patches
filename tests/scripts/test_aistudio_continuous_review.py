@@ -76,6 +76,16 @@ def test_promote_ready_memory_rejects_non_user_sensitive_or_raw_candidates():
             module.promote_ready_memory(row, consensus_gate="independent_a_b")
 
 
+def test_demote_unconsented_ready_memory_fails_closed():
+    module = load_module()
+    row = _ready_row()
+    row["candidate"]["suggested_store"] = "memory_graph"
+    assert module.demote_unconsented_ready_memory(row, demoted_at="2026-01-01T00:00:00+00:00") is True
+    assert row["candidate"]["suggested_store"] == "review"
+    assert row["candidate"]["metadata"]["review_state"] == "needs_consensus_review"
+    assert module.demote_unconsented_ready_memory(row) is False
+
+
 def test_reviewer_uses_same_private_lock_as_distiller():
     module = load_module()
     assert module.LOCK.name == "continuous_distill.lock"

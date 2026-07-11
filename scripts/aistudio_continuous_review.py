@@ -60,6 +60,29 @@ def atomic_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     tmp.chmod(0o600); tmp.replace(path)
 
 
+def demote_unconsented_ready_memory(row: dict[str, Any], *, demoted_at: str | None = None) -> bool:
+    """Fail closed for legacy ready-memory rows without consensus evidence."""
+    candidate = row.get("candidate") or {}
+    metadata = candidate.get("metadata") or {}
+    if row.get("status", "pending") != "pending":
+        return False
+    if candidate.get("suggested_store") != "memory_graph" or metadata.get("consensus_gate"):
+        return False
+    timestamp = demoted_at or now()
+    candidate["suggested_store"] = "review"
+    metadata["target_store"] = "review"
+    metadata["review_state"] = "needs_consensus_review"
+    metadata["demoted_reason"] = "missing_independent_consensus_gate"
+    metadata["demoted_at"] = timestamp
+    candidate["metadata"] = metadata
+    decision = row.setdefault("decision", {})
+    decision["action"] = "review"
+    decision["target_store"] = "review"
+    decision["reason"] = "missing independent consensus gate"
+    row["updated_at"] = timestamp
+    return True
+
+
 def promote_ready_memory(row: dict[str, Any], *, consensus_gate: str, promoted_at: str | None = None) -> None:
     """Promote a reviewed proposal to the API's ready-memory stage.
 
@@ -197,6 +220,9 @@ def run_main() -> int:
     args = parser.parse_args()
 
     rows = load_jsonl(args.queue)
+    demoted = sum(1 for row in rows if demote_unconsented_ready_memory(row))
+    if demoted:
+        atomic_jsonl(args.queue, rows)
     pending = [row for row in rows if row.get("status", "pending") == "pending" and (row.get("candidate") or {}).get("source") == "google_ai_studio_continuous"]
     if args.proposal_id:
         pending = [row for row in pending if row.get("proposal_id") == args.proposal_id]
@@ -278,6 +304,7 @@ def run_main() -> int:
 
     report = {
         "generated_at": now(), "apply": args.apply, "pending_reviewed": len(pending),
+        "demoted_unconsented_ready_memory": demoted,
         "deterministic_rejects": blocked, "model_decisions": decisions, "errors": errors,
         "decision_counts": {
             action: sum(1 for decision in decisions.values() if decision.get("decision") == action)
@@ -288,7 +315,7 @@ def run_main() -> int:
     REPORTS.mkdir(parents=True, exist_ok=True)
     output = REPORTS / f"continuous-second-review-{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"); output.chmod(0o600)
-    print(json.dumps({"report": str(output), "pending_reviewed": len(pending), "decision_counts": report["decision_counts"], "deterministic_rejects": len(blocked), "errors": len(errors), "applied": applied}, ensure_ascii=False))
+    print(json.dumps({"report": str(output), "pending_reviewed": len(pending), "demoted_unconsented_ready_memory": demoted, "decision_counts": report["decision_counts"], "deterministic_rejects": len(blocked), "errors": len(errors), "applied": applied}, ensure_ascii=False))
     return 0 if not errors and not applied["failed"] else 1
 
 
