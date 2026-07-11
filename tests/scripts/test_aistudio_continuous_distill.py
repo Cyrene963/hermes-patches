@@ -101,6 +101,24 @@ def test_route_rejects_non_project_fact_misclassified_as_project():
     assert module.route_is_plausible({"kind": "project", "fact": "用户正在开发番茄钟网站项目。"}) is True
 
 
+def test_historical_learning_proposal_requires_current_validation(monkeypatch):
+    module = load_module()
+    monkeypatch.setattr(module, "graph_search", lambda query, namespace: [])
+    item = {
+        "action": "propose", "kind": "learning", "fact": "用户当时在陌生力学题的受力分析上卡住。",
+        "evidence_quote": "我这题不会做，受力图也画不出来", "risk": "low", "volatility": "stable", "reason": "历史学习观察",
+    }
+    src = source("我这题不会做，受力图也画不出来")
+    src["create_time"] = "2025-01-02T03:04:05Z"
+    proposal = module.proposal_for(item, src, config())
+    candidate = proposal["candidate"]
+    assert candidate["suggested_store"] == "review"
+    assert candidate["metadata"]["learning_state"] == "historical_observation"
+    assert candidate["metadata"]["requires_current_validation"] is True
+    assert candidate["metadata"]["current_validation_status"] == "unverified"
+    assert candidate["metadata"]["observed_at"] == "2025-01-02T03:04:05Z"
+
+
 def test_proposal_never_auto_approves(monkeypatch):
     module = load_module()
     monkeypatch.setattr(module, "graph_search", lambda query, namespace: [])

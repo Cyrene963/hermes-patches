@@ -97,6 +97,8 @@ def promote_ready_memory(row: dict[str, Any], *, consensus_gate: str, promoted_a
         raise ValueError("proposal is not distilled")
     if metadata.get("role") != "user":
         raise ValueError("only role=user evidence can be promoted")
+    if metadata.get("requires_current_validation") and metadata.get("current_validation_status") != "confirmed_current":
+        raise ValueError("historical learning evidence requires current validation before promotion")
     if candidate.get("risk_level") != "low" or metadata.get("volatility") in {"sensitive", "time_bound"}:
         raise ValueError("sensitive or volatile proposal cannot be promoted")
     if not candidate.get("readback_queries"):
@@ -135,6 +137,10 @@ def candidate_payload(row: dict[str, Any]) -> dict[str, Any]:
         "proposal_id": row.get("proposal_id"), "kind": candidate.get("kind"),
         "fact": candidate.get("content"), "evidence_quote": candidate.get("evidence_quote"),
         "risk": candidate.get("risk_level"), "volatility": metadata.get("volatility"),
+        "learning_state": metadata.get("learning_state"),
+        "requires_current_validation": bool(metadata.get("requires_current_validation")),
+        "current_validation_status": metadata.get("current_validation_status"),
+        "observed_at": metadata.get("observed_at"),
         "target_path": candidate.get("target_path"), "review_state": metadata.get("review_state"),
         "duplicates": duplicates,
     }
@@ -145,6 +151,8 @@ def deterministic_block(item: dict[str, Any]) -> str:
     evidence = str(item.get("evidence_quote") or "")
     if str(item.get("risk") or "") == "high" or str(item.get("volatility") or "") in {"sensitive", "time_bound"}:
         return "sensitive_or_volatile"
+    if item.get("requires_current_validation") and str(item.get("current_validation_status") or "") != "confirmed_current":
+        return "historical_learning_state_unverified"
     if str(item.get("kind") or "") in SENSITIVE_KIND:
         return "sensitive_kind"
     if len(fact) < 12 or len(evidence) < 4:
@@ -159,7 +167,7 @@ def deterministic_block(item: dict[str, Any]) -> str:
 def review_prompt(items: list[dict[str, Any]]) -> str:
     return """You are a conservative second-stage reviewer for durable USER memory. Return JSON only:
 {"items":[{"proposal_id":"...","decision":"approve|reject|clarify","novelty":"new|duplicate|too_narrow|volatile|unsupported|misrouted","utility":"high|medium|low","reason":"brief Chinese"}]}.
-Approve only when ALL are true: evidence explicitly supports the fact; stable and low-risk; materially changes answers across multiple future conversations OR is a stable learning weakness/communication hard preference; not a one-off question/task; correctly routed; materially new versus duplicate contents. Reject project implementation details, one website/source rule, one exam paper symbol, one game state, one-off task formats, vague self-description, generic quality requirements, narrow situations, weak inference, copied text, and facts useful only in their original conversation. Clarify sensitive/self-label/stale plans. Approval should be rare, normally below 10% of all input proposals. Prefer rejecting over increasing count. One decision per input proposal.
+Approve only when ALL are true: evidence explicitly supports the fact; stable and low-risk; materially changes answers across multiple future conversations OR is a currently validated stable learning weakness/communication hard preference; not a one-off question/task; correctly routed; materially new versus duplicate contents. Historical learning questions are temporal observations, not proof of current ability: reject approval when requires_current_validation=true unless current_validation_status=confirmed_current. A past wrong answer or request for help must not become a permanent current weakness. Reject project implementation details, one website/source rule, one exam paper symbol, one game state, one-off task formats, vague self-description, generic quality requirements, narrow situations, weak inference, copied text, and facts useful only in their original conversation. Clarify sensitive/self-label/stale plans. Approval should be rare, normally below 10% of all input proposals. Prefer rejecting over increasing count. One decision per input proposal.
 INPUT:\n""" + json.dumps(items, ensure_ascii=False)
 
 

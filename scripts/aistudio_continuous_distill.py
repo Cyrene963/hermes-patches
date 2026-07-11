@@ -218,6 +218,7 @@ def prompt_for(rows: list[dict[str, Any]]) -> str:
             "source_turn_id": int(row["id"]),
             "conversation_name": str(row.get("conversation_name") or ""),
             "turn_index": row.get("turn_index"),
+            "observed_at": str(row.get("create_time") or ""),
             "text": str(row.get("text") or ""),
         }
         for row in rows
@@ -236,7 +237,8 @@ Rules:
 - If most of a turn is a pasted AI summary, quoted profile, essay draft, prompt, or third-party text, do not extract claims from that pasted block. Only extract the user's short outer statement when it explicitly endorses, rejects, or corrects a specific claim.
 - evidence_quote must be an exact substring from that source turn and directly support the fact.
 - Sensitive identity, family, health, relationship status, location, finance, or potentially stale plans use action=clarify.
-- Stable low-risk preferences, learning patterns, workflows, and explicit requirements may use action=propose.
+- Stable low-risk preferences, workflows, and explicit requirements may use action=propose.
+- Historical learning/question records are temporal evidence, not proof of current ability. A past wrong answer, request for help, or statement of not understanding may describe an earlier learning state that has since changed. For kind=learning, phrase the fact as an observed historical pattern (for example, "用户当时在...上卡住") unless the source itself contains current repeated evidence. Never turn one old question into a permanent current weakness.
 - If uncertain, skip. Never include secrets or credentials.
 - Output an item for a skipped source if it contains no durable fact; fact may briefly name why it was skipped.
 
@@ -345,6 +347,10 @@ def proposal_for(item: dict[str, Any], source: dict[str, Any], config: dict[str,
         if str(hit.get("uri") or "") and duplicate_score(item["fact"], hit) >= 0.45
     ][:3]
     review_state = "needs_dedup_review" if duplicate_uris else "ready_memory"
+    learning_state = "historical_observation" if item["kind"] == "learning" else "not_applicable"
+    requires_current_validation = item["kind"] == "learning"
+    if requires_current_validation:
+        review_state = "needs_current_learning_validation"
     evidence_id = "ev_ai_cont_" + digest({"turn": source["id"], "quote": item["evidence_quote"]})
     candidate = {
         "kind": item["kind"], "distilled": True, "content": item["fact"],
@@ -362,6 +368,10 @@ def proposal_for(item: dict[str, Any], source: dict[str, Any], config: dict[str,
             "source_content_sha256": source["content_sha256"],
             "conversation_id": source.get("conversation_id"),
             "turn_index": source.get("turn_index"),
+            "observed_at": str(source.get("create_time") or ""),
+            "learning_state": learning_state,
+            "requires_current_validation": requires_current_validation,
+            "current_validation_status": "unverified" if requires_current_validation else "not_required",
             "volatility": item["volatility"], "distiller_reason": item["reason"],
             "possible_duplicate_uris": duplicate_uris,
         },

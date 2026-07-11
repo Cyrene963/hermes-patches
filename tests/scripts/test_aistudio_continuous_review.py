@@ -76,6 +76,24 @@ def test_promote_ready_memory_rejects_non_user_sensitive_or_raw_candidates():
             module.promote_ready_memory(row, consensus_gate="independent_a_b")
 
 
+def test_historical_learning_requires_current_validation_before_promotion():
+    module = load_module()
+    import pytest
+    row = _ready_row()
+    row["candidate"]["metadata"].update({
+        "learning_state": "historical_observation",
+        "requires_current_validation": True,
+        "current_validation_status": "unverified",
+    })
+    item = module.candidate_payload({"proposal_id": "p", **row})
+    assert module.deterministic_block(item) == "historical_learning_state_unverified"
+    with pytest.raises(ValueError, match="current validation"):
+        module.promote_ready_memory(row, consensus_gate="independent_a_b")
+    row["candidate"]["metadata"]["current_validation_status"] = "confirmed_current"
+    module.promote_ready_memory(row, consensus_gate="independent_a_b")
+    assert row["candidate"]["suggested_store"] == "memory_graph"
+
+
 def test_demote_unconsented_ready_memory_fails_closed():
     module = load_module()
     row = _ready_row()
