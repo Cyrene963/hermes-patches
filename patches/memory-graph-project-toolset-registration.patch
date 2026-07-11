@@ -1,5 +1,5 @@
 diff --git a/toolsets.py b/toolsets.py
-index 03e64fd..4ccf175 100644
+index 03e64fd..afe4a58 100644
 --- a/toolsets.py
 +++ b/toolsets.py
 @@ -57,6 +57,13 @@ _HERMES_CORE_TOOLS = [
@@ -12,7 +12,7 @@ index 03e64fd..4ccf175 100644
 +    "memory_graph_alias", "memory_graph_glossary_add", "memory_graph_glossary_scan",
 +    "memory_graph_recall", "memory_graph_orphans", "memory_graph_random",
 +    "memory_graph_diagnostics", "memory_graph_purge",
-+    "project_decision_assess", "relationship_boundary_assess", "temporal_self_resolve", "completion_evidence_assess", "confidence_calibrate", "cross_domain_consistency_assess", "privacy_inference_assess",
++    "project_decision_assess", "relationship_boundary_assess", "temporal_self_resolve", "completion_evidence_assess", "confidence_calibrate", "cross_domain_consistency_assess", "privacy_inference_assess", "memory_lifecycle_delete", "memory_lifecycle_rollback",
      # Session history search
      "session_search",
      # Clarifying questions
@@ -28,7 +28,7 @@ index 03e64fd..4ccf175 100644
 +            "memory_graph_alias", "memory_graph_glossary_add", "memory_graph_glossary_scan",
 +            "memory_graph_recall", "memory_graph_orphans", "memory_graph_random",
 +            "memory_graph_diagnostics", "memory_graph_purge",
-+            "project_decision_assess", "relationship_boundary_assess", "temporal_self_resolve", "completion_evidence_assess", "confidence_calibrate", "cross_domain_consistency_assess", "privacy_inference_assess",
++            "project_decision_assess", "relationship_boundary_assess", "temporal_self_resolve", "completion_evidence_assess", "confidence_calibrate", "cross_domain_consistency_assess", "privacy_inference_assess", "memory_lifecycle_delete", "memory_lifecycle_rollback",
 +        ],
 +        "includes": [],
 +    },
