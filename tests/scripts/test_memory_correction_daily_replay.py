@@ -98,6 +98,23 @@ def test_ledger_digest_does_not_copy_private_content(monkeypatch, tmp_path):
     assert private_text not in digest
 
 
+def test_provenance_only_downgrade_preserves_prior_complete_result(monkeypatch, tmp_path):
+    module = load_module(monkeypatch, tmp_path)
+    prior = {"passed_gates": 41, "total_gates": 41}
+    evaluated = {"next_gaps": [
+        {"detail": "commit unavailable: deadbeef"},
+        {"detail": "commit unavailable: cafebabe"},
+    ]}
+    assert module._should_preserve_prior_result(prior, evaluated) is True
+
+
+def test_real_regression_never_preserves_prior_complete_result(monkeypatch, tmp_path):
+    module = load_module(monkeypatch, tmp_path)
+    prior = {"passed_gates": 41, "total_gates": 41}
+    evaluated = {"next_gaps": [{"detail": "health check failed: ConnectionError"}]}
+    assert module._should_preserve_prior_result(prior, evaluated) is False
+
+
 def test_script_direct_execution_resolves_repo_imports(tmp_path):
     repo = Path(__file__).resolve().parents[2]
     home = tmp_path / "home"
