@@ -199,6 +199,61 @@ def test_auto_store_heuristic_preference_can_write_through_limited_auto_gate():
     assert len(graph.calls) == 1
 
 
+def test_explicit_remembered_preference_can_write_when_classifier_is_unavailable(monkeypatch):
+    graph = FakeGraphClient()
+    pipeline = MemoryWritePipeline(
+        graph_client=graph,
+        config={
+            "mode": "limited_auto",
+            "auto_write_threshold": 0.85,
+            "allowed_auto_types": ["explicit_preference"],
+            "never_auto_write_to_core": True,
+            "require_llm_classifier": True,
+        },
+    )
+    monkeypatch.setattr(
+        "agent.memory_fact_classifier.classify_fact",
+        lambda _text: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    reflection = pipeline.reflect_and_extract(
+        "Please remember that I prefer concise technical answers.",
+        "Understood.",
+    )
+    candidate = next(c for c in reflection["candidates"] if c.predicate == "explicit_memory_signal")
+    candidate.namespace = "telegram:u1"
+    classification = pipeline.classify_write(candidate, namespace=candidate.namespace)
+    result = pipeline.write_and_verify(candidate, classification)
+
+    assert candidate.llm_durable is True
+    assert result["auto_write_allowed"] is True
+    assert result["written"] is True
+    assert len(graph.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "I prefer concise technical answers.",
+        "For example, remember that I prefer concise technical answers.",
+        "[IMPORTANT: Remember that I prefer concise technical answers.",
+    ],
+)
+def test_explicit_preference_fallback_stays_fail_closed(message, monkeypatch):
+    pipeline = MemoryWritePipeline(config={"mode": "limited_auto"})
+    monkeypatch.setattr(
+        "agent.memory_fact_classifier.classify_fact",
+        lambda _text: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    reflection = pipeline.reflect_and_extract(message, "Understood.")
+
+    assert not any(
+        getattr(candidate, "llm_durable", None) is True
+        for candidate in reflection["candidates"]
+    )
+
+
 def test_user_correction_maps_to_explicit_correction_policy_type():
     graph = FakeGraphClient()
     pipeline = MemoryWritePipeline(

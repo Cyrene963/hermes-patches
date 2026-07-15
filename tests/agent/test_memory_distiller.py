@@ -44,6 +44,12 @@ def test_english_remember():
     assert ok and fact.lower() == "i prefer dark mode"
 
 
+def test_english_please_remember_that_strips_longest_marker():
+    source = "Please remember that I prefer concise technical answers."
+    fact, ok = distill(source)
+    assert ok and fact == "I prefer concise technical answers"
+
+
 def test_long_ramble_first_sentence_low_confidence():
     ramble = ("我去问了那个网关然后发现路由坏了。" * 8) + "另外顺便说一下今天天气不错。还有别的事。又一句。再一句。"
     fact, ok = distill(ramble)

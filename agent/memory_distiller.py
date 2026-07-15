@@ -30,7 +30,8 @@ _LEADING_MARKERS = [
     "纠正一下", "更正一下", "纠正", "更正", "澄清一下",
     "我想说的是", "我的意思是", "我之前说的是", "我说过",
     "其实是", "其实", "应该是", "正确的是", "准确说",
-    "note that", "please remember", "just remember", "remember that", "remember",
+    "please remember that", "just remember that", "remember that",
+    "note that", "please remember", "just remember", "remember",
     "for the record", "fyi", "actually", "correction", "to clarify", "i meant",
 ]
 

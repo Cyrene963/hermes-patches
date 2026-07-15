@@ -266,6 +266,19 @@ def _auto_type(candidate: "CandidateFact") -> str:
         return candidate.memory_type
     return candidate.memory_type
 
+
+def _explicit_durable_preference(patterns: List[str], confidence: float) -> bool:
+    """Recognize an unambiguous user request to retain a stated preference."""
+    lowered = [str(pattern).lower() for pattern in patterns]
+    has_explicit_store = any(
+        "explicit" in pattern or "remember/don't forget" in pattern
+        for pattern in lowered
+    )
+    has_preference = any("preference" in pattern or "habit" in pattern for pattern in lowered)
+    has_negative = any("[negative]" in pattern for pattern in lowered)
+    return confidence >= 0.85 and has_explicit_store and has_preference and not has_negative
+
+
 def is_verified_write_result(result: Mapping[str, Any]) -> bool:
     """A natural-path write counts only after storage, readback, and journal."""
     return bool(result.get('written') and result.get('readback_ok') and result.get('changeset_recorded'))
@@ -535,6 +548,10 @@ class MemoryWritePipeline:
                             _auto_source = 'user_correction'
             except Exception:
                 _llm_durable = None
+            if _llm_durable is not True and _explicit_durable_preference(_auto_patterns, _auto_confidence):
+                # Explicit remember + first-person preference is already a direct
+                # durability assertion. Keep this narrow when the classifier is down.
+                _llm_durable = True
             if _object_value is None:  # LLM unavailable/disabled → rule distiller fallback
                 try:
                     from agent.memory_distiller import distill_fact
@@ -542,6 +559,13 @@ class MemoryWritePipeline:
                 except Exception:
                     _distilled, _distill_ok = user_msg.strip()[:1000], False
                 _object_value = _distilled if (_distill_ok and _distilled) else user_msg.strip()[:1000]
+            if _llm_durable is True and _subject == 'auto_store_heuristic':
+                # Match the classifier contract: store a standalone, third-person
+                # fact rather than a verbatim slice of the user's utterance.
+                _object_value = re.sub(r'(?i)^I\s+prefer\b', 'The user prefers', _object_value)
+                _object_value = re.sub(r'(?i)^I\s+(?:like|love)\b', 'The user likes', _object_value)
+                _object_value = re.sub(r'^我(?:更)?(?:喜欢|偏好|爱)', '用户偏好', _object_value)
+                _subject = '用户偏好'
             # Auto-write only when the LLM positively confirmed durability; otherwise review.
             _requires_review = (_llm_durable is not True)
             _cand = CandidateFact(
