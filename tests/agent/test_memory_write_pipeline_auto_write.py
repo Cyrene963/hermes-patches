@@ -128,6 +128,15 @@ def test_limited_auto_writes_high_confidence_user_candidate_and_verifies_readbac
     assert "Project Alpha decision" in readback_queries
 
 
+def test_memory_graph_titles_are_stable_and_distinct_per_fact():
+    pipeline = MemoryWritePipeline(config={"mode": "shadow"})
+    first = make_candidate(object_value="first durable value")
+    second = make_candidate(object_value="second durable value")
+
+    assert pipeline._memory_graph_title(first) == pipeline._memory_graph_title(first)
+    assert pipeline._memory_graph_title(first) != pipeline._memory_graph_title(second)
+
+
 def test_limited_auto_refuses_core_namespace_by_policy():
     graph = FakeGraphClient()
     pipeline = MemoryWritePipeline(

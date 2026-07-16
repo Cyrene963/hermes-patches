@@ -7,6 +7,7 @@ import re
 import logging
 import json
 import os
+import hashlib
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Mapping
 from dataclasses import dataclass, field
@@ -1121,8 +1122,11 @@ class MemoryWritePipeline:
     def _memory_graph_title(self, candidate: CandidateFact) -> str:
         subject = (candidate.subject or candidate.memory_type or 'memory').strip()
         predicate = (candidate.predicate or 'fact').strip()
-        raw = f"{subject}-{predicate}".strip('-')
-        return re.sub(r'\s+', ' ', raw)[:80] or 'auto-write-memory'
+        digest = hashlib.sha256(
+            f"{candidate.memory_type}|{candidate.object_value}".encode("utf-8", "ignore")
+        ).hexdigest()[:8]
+        raw = f"{subject}-{predicate}-{digest}".strip('-')
+        return re.sub(r'\s+', ' ', raw)[:80] or f'auto-write-memory-{digest}'
 
     def _memory_graph_content(self, candidate: CandidateFact) -> str:
         return (
@@ -1201,6 +1205,23 @@ class MemoryWritePipeline:
                 break
 
         failure_reason = '' if readback_ok else 'created memory was not found in top search results for generated future queries'
+        if not readback_ok:
+            try:
+                created_uri = created.get('uri') or f"core://{created.get('path', '')}"
+                exact = json.loads(memory_graph_tool._read({
+                    'uri': created_uri,
+                    'namespace': namespace,
+                }))
+                readback_ok = bool(
+                    not exact.get('error')
+                    and candidate.object_value
+                    and candidate.object_value in str(exact.get('content', ''))
+                )
+                if readback_ok:
+                    top_uri = created_uri
+                    failure_reason = ''
+            except Exception:
+                pass
         changeset_id = ''
         changeset_error = ''
         if readback_ok:
