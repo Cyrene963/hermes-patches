@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from agent.memory_clarification_queue import build_clarification_context_block
-from agent.memory_write_pipeline import CandidateFact, MemoryWritePipeline, is_verified_write_result
+from agent.memory_write_pipeline import CandidateFact, MemoryWritePipeline, is_verified_write_result, resolve_turn_write_namespace
 
 
 class FakeGraphClient:
@@ -92,6 +92,19 @@ def test_default_shadow_mode_never_writes_even_high_confidence(shadow_pipeline_c
     assert result["auto_write_allowed"] is False
     assert result["written"] is False
     assert graph.calls == []
+
+
+def test_turn_write_namespace_prefers_explicit_session_identity(monkeypatch):
+    class Agent:
+        _user_id = None
+        _chat_id = None
+        platform = 'cli'
+
+    monkeypatch.setenv('HERMES_SESSION_USER_ID', 'neutral-e2e')
+    monkeypatch.setenv('HERMES_SESSION_PLATFORM', 'cli')
+    monkeypatch.setattr('agent.request_context.get_namespace', lambda: 'telegram:stale-context')
+
+    assert resolve_turn_write_namespace(Agent()) == 'cli:neutral-e2e'
 
 
 def test_verified_write_requires_storage_readback_and_changeset():

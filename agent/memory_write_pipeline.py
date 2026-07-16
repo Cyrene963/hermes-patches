@@ -285,6 +285,36 @@ def is_verified_write_result(result: Mapping[str, Any]) -> bool:
     return bool(result.get('written') and result.get('readback_ok') and result.get('changeset_recorded'))
 
 
+def resolve_turn_write_namespace(agent: Any) -> str:
+    """Resolve a write namespace with explicit session identity first."""
+    env_user = str(os.environ.get('HERMES_SESSION_USER_ID') or '').strip()
+    env_platform = str(os.environ.get('HERMES_SESSION_PLATFORM') or '').strip()
+    if env_user:
+        return f"{env_platform or 'cli'}:{env_user}"
+    try:
+        from agent.request_context import get_namespace
+        contextual = str(get_namespace() or '').strip()
+        if contextual:
+            return contextual
+    except Exception:
+        pass
+    user_id = str(getattr(agent, '_user_id', '') or '').strip()
+    platform = str(getattr(agent, '_platform', '') or getattr(agent, 'platform', '') or '').strip()
+    if user_id:
+        return f"{platform or 'telegram'}:{user_id}"
+    chat_id = str(getattr(agent, '_chat_id', '') or '').strip()
+    if chat_id:
+        return f"{platform or 'telegram'}:{chat_id}"
+    try:
+        from hermes_cli.config import load_config
+        owner = str(((load_config() or {}).get('memory_graph') or {}).get('default_terminal_user') or '').strip()
+        if owner:
+            return f"telegram:{owner}"
+    except Exception:
+        pass
+    return ''
+
+
 # ─── Data Classes ────────────────────────────────────────────────
 
 @dataclass
