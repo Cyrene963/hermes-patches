@@ -6,9 +6,9 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-import shutil
 import sqlite3
 import subprocess
+import shutil
 import time
 from pathlib import Path
 
@@ -18,6 +18,8 @@ ACTIVE = HOME / "runtime" / "active_sessions.json"
 STATE_DB = HOME / "state.db"
 LOCK = HOME / "runtime" / "continuation-watchdog.lock"
 LOG = HOME / "logs" / "continuation-watchdog.jsonl"
+
+
 def resolve_hermes_cli() -> Path | None:
     explicit = os.environ.get("HERMES_CONTINUATION_CLI", "").strip()
     candidates = [
@@ -111,6 +113,9 @@ def run_one(path: Path, now: float, active: set[str]) -> None:
     prompt = str(payload.get("next_prompt") or "").strip()
     if not prompt:
         log("missing_prompt", session_id=sid)
+        return
+    if HERMES is None:
+        log("missing_cli", session_id=sid)
         return
     payload["status"] = "running"
     payload["updated_at"] = now
