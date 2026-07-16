@@ -64,6 +64,25 @@ from utils import base_url_host_matches, env_var_enabled
 logger = logging.getLogger(__name__)
 
 
+def _stringify_tool_message_content(api_messages: List[Dict[str, Any]]) -> None:
+    """Make structured tool results valid for OpenAI chat-completions APIs."""
+    for api_msg in api_messages:
+        if api_msg.get("role") != "tool":
+            continue
+        tool_content = api_msg.get("content")
+        if tool_content is None or isinstance(tool_content, str):
+            continue
+        try:
+            api_msg["content"] = json.dumps(
+                tool_content,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        except (TypeError, ValueError):
+            api_msg["content"] = str(tool_content)
+
+
 def _large_context_max_attempts(approx_tokens: int, configured_attempts: int) -> int:
     """Bound long-prompt primary attempts before fallback.
 
@@ -1067,6 +1086,11 @@ def run_conversation(
             effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
         if effective_system:
             api_messages = [{"role": "system", "content": effective_system}] + api_messages
+
+        # OpenAI-compatible chat-completions endpoints require tool-result
+        # content to be a string. Session persistence intentionally decodes
+        # structured content, so serialize it on the API copy.
+        _stringify_tool_message_content(api_messages)
 
         # Inject ephemeral prefill messages right after the system prompt
         # but before conversation history. Same API-call-time-only pattern.
