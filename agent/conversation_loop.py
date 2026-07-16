@@ -84,6 +84,36 @@ def _stringify_tool_message_content(api_messages: List[Dict[str, Any]]) -> None:
             api_msg["content"] = str(tool_content)
 
 
+def _compact_historical_tool_message_content(
+    api_messages: List[Dict[str, Any]],
+    *,
+    max_chars: int = 24_000,
+    head_chars: int = 8_000,
+    tail_chars: int = 4_000,
+) -> int:
+    """Bound old tool results while preserving the newest pending tool batch."""
+    last_tool_call_index = -1
+    for index, api_msg in enumerate(api_messages):
+        if api_msg.get("role") == "assistant" and api_msg.get("tool_calls"):
+            last_tool_call_index = index
+
+    compacted = 0
+    for index, api_msg in enumerate(api_messages):
+        if index >= last_tool_call_index or api_msg.get("role") != "tool":
+            continue
+        content = api_msg.get("content")
+        if not isinstance(content, str) or len(content) <= max_chars:
+            continue
+        omitted = len(content) - head_chars - tail_chars
+        api_msg["content"] = (
+            content[:head_chars]
+            + f"\n...[historical tool result compacted: {omitted} characters omitted]...\n"
+            + content[-tail_chars:]
+        )
+        compacted += 1
+    return compacted
+
+
 def _retire_multimodal_tool_payloads(messages: List[Dict[str, Any]]) -> int:
     """Drop image bytes after the model has consumed a tool-result image once."""
     retired = 0
@@ -1106,6 +1136,17 @@ def run_conversation(
         # content to be a string. Session persistence intentionally decodes
         # structured content, so serialize it on the API copy.
         _stringify_tool_message_content(api_messages)
+
+        # Preserve the newest pending tool batch so fresh screenshots remain
+        # visible. Bound only older, already-consumed tool results; otherwise
+        # large history plus the full tool schema can make strict relays 502.
+        _compacted_tool_results = _compact_historical_tool_message_content(api_messages)
+        if _compacted_tool_results:
+            request_logger.info(
+                "Compacted %s historical tool result(s) before request (session=%s)",
+                _compacted_tool_results,
+                agent.session_id or "-",
+            )
 
         # Inject ephemeral prefill messages right after the system prompt
         # but before conversation history. Same API-call-time-only pattern.
