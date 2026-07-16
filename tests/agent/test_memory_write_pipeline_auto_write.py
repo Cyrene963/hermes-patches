@@ -101,6 +101,39 @@ def test_verified_write_requires_storage_readback_and_changeset():
     assert not is_verified_write_result({'written':False,'readback_ok':True,'changeset_recorded':True})
 
 
+def test_completed_turn_candidates_isolate_failure_and_keep_verified_sibling(monkeypatch):
+    pipeline = MemoryWritePipeline(config={"mode": "limited_auto"})
+    failed = make_candidate(subject="first")
+    verified = make_candidate(subject="second")
+
+    monkeypatch.setattr(
+        pipeline,
+        "classify_write",
+        lambda candidate, namespace: {"target_store": "memory_graph", "namespace": namespace},
+    )
+
+    def write(candidate, _classification):
+        if candidate is failed:
+            raise RuntimeError("postgresql://private-user:secret@private-host/db")
+        return {
+            "auto_write_allowed": True,
+            "written": True,
+            "readback_ok": True,
+            "changeset_recorded": True,
+            "changeset_id": "safe-id",
+        }
+
+    monkeypatch.setattr(pipeline, "write_and_verify", write)
+
+    payloads, results = pipeline.process_candidates([failed, verified], namespace="tenant:private")
+
+    assert len(payloads) == len(results) == 2
+    assert results[0]["error"] == "RuntimeError"
+    assert "secret" not in str(payloads + results)
+    assert is_verified_write_result(results[1])
+    assert payloads[1]["changeset_recorded"] is True
+
+
 def test_limited_auto_writes_high_confidence_user_candidate_and_verifies_readback():
     graph = FakeGraphClient()
     pipeline = MemoryWritePipeline(

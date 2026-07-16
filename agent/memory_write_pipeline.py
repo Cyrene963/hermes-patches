@@ -480,6 +480,56 @@ class MemoryWritePipeline:
             logger.warning(f"Failed to initialize shadow write logger: {exc}")
             self.shadow_logger = None
 
+    def process_candidates(self, candidates: List[CandidateFact], *, namespace: str) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Process each completed-turn candidate independently.
+
+        A failed sibling must not suppress later writes or the completed-turn
+        journal. Exception messages are excluded because provider failures can
+        contain credentials or private connection details.
+        """
+        payloads: List[Dict[str, Any]] = []
+        results: List[Dict[str, Any]] = []
+        for candidate in candidates:
+            candidate.namespace = candidate.namespace or namespace
+            classification: Dict[str, Any] = {}
+            try:
+                classification = self.classify_write(candidate, namespace=namespace)
+                result = self.write_and_verify(candidate, classification)
+            except Exception as exc:
+                logger.warning("Memory write candidate failed: %s", exc.__class__.__name__)
+                result = {
+                    "auto_write_allowed": False,
+                    "written": False,
+                    "readback_ok": False,
+                    "error": exc.__class__.__name__,
+                    "failure_reason": "candidate_processing_error",
+                }
+            results.append(result)
+            payloads.append({
+                "memory_type": candidate.memory_type,
+                "importance": candidate.importance,
+                "target_store": classification.get("target_store", candidate.target_store),
+                "target_path": classification.get("target_path", candidate.target_path),
+                "subject": candidate.subject,
+                "predicate": candidate.predicate,
+                "object_value": candidate.object_value,
+                "requires_review": candidate.requires_review or classification.get("requires_review", False),
+                "reason": candidate.reason or classification.get("reason", ""),
+                "namespace": namespace,
+                "auto_write_allowed": result.get("auto_write_allowed", False),
+                "actually_written": result.get("written", False),
+                "readback_ok": result.get("readback_ok", False),
+                "readback_queries": result.get("readback_queries", []),
+                "top_uri": result.get("top_uri", ""),
+                "top_score": result.get("top_score"),
+                "failure_reason": result.get("failure_reason", ""),
+                "uri": result.get("uri", ""),
+                "write_error": result.get("error", ""),
+                "changeset_id": result.get("changeset_id", ""),
+                "changeset_recorded": bool(result.get("changeset_recorded")),
+            })
+        return payloads, results
+
     def reflect_and_extract(self, user_msg: str, assistant_msg: str) -> Dict[str, Any]:
         """Generate memory reflection from a conversation turn."""
         combined = f"{user_msg} {assistant_msg}"

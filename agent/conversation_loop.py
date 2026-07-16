@@ -5066,36 +5066,10 @@ def run_conversation(
                 _user_id = str(getattr(agent, "_user_id", "") or "")
                 _namespace = resolve_turn_write_namespace(agent)
 
-                _candidate_payloads = []
-                _auto_write_results = []
-                for c in _candidates:
-                    c.namespace = c.namespace or _namespace
-                    _classification = _pipeline.classify_write(c, namespace=_namespace)
-                    _write_result = _pipeline.write_and_verify(c, _classification)
-                    _auto_write_results.append(_write_result)
-                    _candidate_payloads.append({
-                        "memory_type": c.memory_type,
-                        "importance": c.importance,
-                        "target_store": _classification.get("target_store", c.target_store),
-                        "target_path": _classification.get("target_path", c.target_path),
-                        "subject": c.subject,
-                        "predicate": c.predicate,
-                        "object_value": c.object_value,
-                        "requires_review": c.requires_review or _classification.get("requires_review", False),
-                        "reason": c.reason or _classification.get("reason", ""),
-                        "namespace": _namespace,
-                        "auto_write_allowed": _write_result.get("auto_write_allowed", False),
-                        "actually_written": _write_result.get("written", False),
-                        "readback_ok": _write_result.get("readback_ok", False),
-                        "readback_queries": _write_result.get("readback_queries", []),
-                        "top_uri": _write_result.get("top_uri", ""),
-                        "top_score": _write_result.get("top_score"),
-                        "failure_reason": _write_result.get("failure_reason", ""),
-                        "uri": _write_result.get("uri", ""),
-                        "write_error": _write_result.get("error", ""),
-                        "changeset_id": _write_result.get("changeset_id", ""),
-                        "changeset_recorded": bool(_write_result.get("changeset_recorded")),
-                    })
+                _candidate_payloads, _auto_write_results = _pipeline.process_candidates(
+                    _candidates,
+                    namespace=_namespace,
+                )
 
                 _mode = "auto" if any(
                     is_verified_write_result(r) for r in _auto_write_results
