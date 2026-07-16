@@ -180,7 +180,7 @@ fi
 # Fast-moving core ABI files are intentionally excluded from the default copy
 # path unless they are known-rebased. A stale copy can pass py_compile while
 # breaking imports/call signatures added upstream.
-for module in active_workstream.py proactive_need.py project_decision.py relationship_boundary.py temporal_self_model.py completion_fidelity.py confidence_calibration.py cross_domain_consistency.py privacy_inference_policy.py memory_lifecycle.py correction_regression.py memory_metacognition.py memory_task_contract.py memory_semantic_classifier.py memory_review_proposals.py memory_write_filters.py memory_write_pipeline.py memory_clarification_queue.py memory_distiller.py memory_fact_classifier.py memory_write_earn.py shadow_write_logger.py hindsight_access_tracker.py hindsight_reranker.py request_context.py skill_router.py prompt_builder.py conversation_loop.py tool_executor.py system_prompt.py agent_runtime_helpers.py auto_store_heuristic.py memory_auto_hooks.py; do
+for module in active_workstream.py proactive_need.py project_decision.py relationship_boundary.py temporal_self_model.py completion_fidelity.py confidence_calibration.py cross_domain_consistency.py privacy_inference_policy.py memory_lifecycle.py correction_regression.py memory_metacognition.py memory_task_contract.py memory_semantic_classifier.py memory_review_proposals.py memory_write_filters.py memory_write_pipeline.py memory_clarification_queue.py memory_distiller.py memory_fact_classifier.py memory_write_earn.py shadow_write_logger.py hindsight_access_tracker.py hindsight_reranker.py request_context.py skill_router.py prompt_builder.py conversation_loop.py progress_completion_gate.py tool_executor.py system_prompt.py agent_runtime_helpers.py auto_store_heuristic.py memory_auto_hooks.py; do
     if [ -f "$PATCHES_DIR/agent/$module" ]; then
         cp "$PATCHES_DIR/agent/$module" "$HERMES_DIR/agent/"
         echo "   ✅ agent/$module 已复制"
@@ -547,6 +547,12 @@ if [ -f "$PATCHES_DIR/scripts/hermes-patch-chain-guard.sh" ]; then
     cp "$PATCHES_DIR/scripts/hermes-patch-chain-guard.sh" "$PROFILE_DIR/scripts/hermes-patch-chain-guard.sh"
     chmod +x "$PROFILE_DIR/scripts/hermes-patch-chain-guard.sh"
     echo "   ✅ hermes-patch-chain-guard.sh 已安装"
+fi
+if [ -f "$PATCHES_DIR/scripts/continuation-watchdog.py" ]; then
+    mkdir -p "$PROFILE_DIR/scripts"
+    cp "$PATCHES_DIR/scripts/continuation-watchdog.py" "$PROFILE_DIR/scripts/continuation-watchdog.py"
+    chmod 700 "$PROFILE_DIR/scripts/continuation-watchdog.py"
+    echo "   ✅ zero-model original-session continuation watchdog 已安装"
 fi
 if [ -f "$PATCHES_DIR/scripts/aistudio_turn_index.py" ]; then
     mkdir -p "$PROFILE_DIR/scripts"

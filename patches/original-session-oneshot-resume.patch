@@ -1,0 +1,129 @@
+diff --git a/hermes_cli/main.py b/hermes_cli/main.py
+index 4400ee9..69331b1 100644
+--- a/hermes_cli/main.py
++++ b/hermes_cli/main.py
+@@ -12434,10 +12434,11 @@ def _try_termux_fast_cli_launch() -> bool:
+             run_oneshot(
+                 args.oneshot,
+                 model=getattr(args, "model", None),
+                 provider=getattr(args, "provider", None),
+                 toolsets=getattr(args, "toolsets", None),
++                resume_session_id=getattr(args, "resume", None),
+             )
+         )
+ 
+     if (args.resume or args.continue_last) and args.command is None:
+         args.command = "chat"
+@@ -13862,10 +13863,11 @@ def main():
+             run_oneshot(
+                 args.oneshot,
+                 model=getattr(args, "model", None),
+                 provider=getattr(args, "provider", None),
+                 toolsets=getattr(args, "toolsets", None),
++                resume_session_id=getattr(args, "resume", None),
+             )
+         )
+ 
+     # Handle top-level --resume / --continue as shortcut to chat
+     if (args.resume or args.continue_last) and args.command is None:
+diff --git a/hermes_cli/oneshot.py b/hermes_cli/oneshot.py
+index 38d8e5e..6678282 100644
+--- a/hermes_cli/oneshot.py
++++ b/hermes_cli/oneshot.py
+@@ -125,10 +125,11 @@ def _validate_explicit_toolsets(toolsets: object = None) -> tuple[list[str] | No
+ def run_oneshot(
+     prompt: str,
+     model: Optional[str] = None,
+     provider: Optional[str] = None,
+     toolsets: object = None,
++    resume_session_id: Optional[str] = None,
+ ) -> int:
+     """Execute a single prompt and print only the final content block.
+ 
+     Args:
+         prompt: The user message to send.
+@@ -187,10 +188,11 @@ def run_oneshot(
+                     prompt,
+                     model=model,
+                     provider=provider,
+                     toolsets=explicit_toolsets,
+                     use_config_toolsets=use_config_toolsets,
++                    resume_session_id=resume_session_id,
+                 )
+             except BaseException as exc:  # noqa: BLE001
+                 # Capture anything that escapes the agent (including OSError
+                 # from prompt_toolkit/Vt100 when stdout is a non-TTY pipe,
+                 # KeyboardInterrupt, SystemExit, etc.) so we can surface it on
+@@ -251,10 +253,11 @@ def _run_agent(
+     prompt: str,
+     model: Optional[str] = None,
+     provider: Optional[str] = None,
+     toolsets: object = None,
+     use_config_toolsets: bool = True,
++    resume_session_id: Optional[str] = None,
+ ) -> tuple[str, dict]:
+     """Build an AIAgent exactly like a normal CLI chat turn would, then
+     run a single conversation.  Returns ``(final_response, run_result)``."""
+     # Imports are local so they don't run when hermes is invoked for
+     # other commands (keeps top-level CLI startup cheap).
+@@ -331,10 +334,32 @@ def _run_agent(
+     toolsets_list = _normalize_toolsets(toolsets)
+     if toolsets_list is None and use_config_toolsets:
+         toolsets_list = sorted(_get_platform_tools(cfg, "cli"))
+ 
+     session_db = _create_session_db_for_oneshot()
++    conversation_history = []
++    resolved_session_id = str(resume_session_id or "").strip()
++    if resolved_session_id:
++        if session_db is None:
++            raise RuntimeError("Cannot resume oneshot: session database is unavailable")
++        resolved_session_id = session_db.resolve_resume_session_id(resolved_session_id)
++        if not session_db.get_session(resolved_session_id):
++            raise RuntimeError(
++                f"Cannot resume oneshot: session not found: {resolved_session_id}"
++            )
++        conversation_history = session_db.get_messages_as_conversation(
++            resolved_session_id
++        )
++        conversation_history = [
++            message
++            for message in conversation_history
++            if message.get("role") != "session_meta"
++        ]
++        if not conversation_history:
++            raise RuntimeError(
++                f"Cannot resume oneshot: session has no messages: {resolved_session_id}"
++            )
+     # Read the effective fallback chain from profile config so oneshot workers
+     # honour the same merge semantics as interactive CLI and gateway sessions.
+     _fb = get_fallback_chain(cfg)
+ 
+     agent = AIAgent(
+@@ -345,10 +370,11 @@ def _run_agent(
+         model=effective_model,
+         enabled_toolsets=toolsets_list,
+         quiet_mode=True,
+         platform="cli",
+         session_db=session_db,
++        session_id=resolved_session_id or None,
+         credential_pool=runtime.get("credential_pool"),
+         fallback_model=_fb or None,
+         # Interactive callbacks are intentionally NOT wired beyond this
+         # one.  In oneshot mode there's no user sitting at a terminal:
+         #   - clarify  → returns a synthetic "pick a default" instruction
+@@ -367,11 +393,14 @@ def _run_agent(
+     # display callbacks that would bypass our stdout capture.
+     agent.suppress_status_output = True
+     agent.stream_delta_callback = None
+     agent.tool_gen_callback = None
+ 
+-    result = agent.run_conversation(prompt)
++    result = agent.run_conversation(
++        prompt,
++        conversation_history=conversation_history,
++    )
+     return (result.get("final_response") or "", result)
+ 
+ 
+ def _oneshot_clarify_callback(question: str, choices=None) -> str:
+     """Clarify is disabled in oneshot mode — tell the agent to pick a

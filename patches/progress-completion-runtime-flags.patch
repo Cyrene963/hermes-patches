@@ -1,0 +1,64 @@
+diff --git a/agent/agent_init.py b/agent/agent_init.py
+index 41ed85e..2aa7069 100644
+--- a/agent/agent_init.py
++++ b/agent/agent_init.py
+@@ -1350,10 +1365,22 @@ def init_agent(
+     # as a separate flag from tool_use_enforcement because the guidance
+     # applies to ALL models, not just the model families enforcement
+     # targets.
+     agent._task_completion_guidance = bool(_agent_section.get("task_completion_guidance", True))
+ 
++    # Same-turn anti-stop gate for explicit "finish to 100%" instructions.
++    # It is bounded and evidence-aware; ordinary questions never trigger it.
++    agent._progress_completion_gate = bool(
++        _agent_section.get("progress_completion_gate", True)
++    )
++    try:
++        agent._max_progress_completion_nudges = max(
++            0, int(_agent_section.get("max_progress_completion_nudges", 3))
++        )
++    except (TypeError, ValueError):
++        agent._max_progress_completion_nudges = 3
++
+     # Universal parallel-tool-call guidance toggle.  Default True.  Separate
+     # flag from task_completion_guidance because a user may want one but not
+     # the other.  Steers the model to batch independent tool calls into a
+     # single turn; the runtime already executes such batches concurrently.
+     agent._parallel_tool_call_guidance = bool(_agent_section.get("parallel_tool_call_guidance", True))
+diff --git a/hermes_cli/config.py b/hermes_cli/config.py
+index 797f4d0..f1184cd 100644
+--- a/hermes_cli/config.py
++++ b/hermes_cli/config.py
+@@ -967,10 +967,16 @@ DEFAULT_CONFIG = {
+         # all models that targets two cross-family failure modes: (1) stopping
+         # after a stub instead of finishing the artifact, (2) fabricating
+         # plausible-looking output when a real path is blocked.  Costs ~80
+         # tokens in the cached system prompt.  Set False to disable globally.
+         "task_completion_guidance": True,
++        # Keep explicitly persistent goals ("finish to 100%", "do not stop")
++        # inside the same tool loop when a model tries to end on a progress
++        # report. Bounded by max_progress_completion_nudges and no-progress
++        # detection, so this is not a blind keep-alive loop.
++        "progress_completion_gate": True,
++        "max_progress_completion_nudges": 3,
+         # Universal parallel-tool-call guidance — short prompt block applied to
+         # all models that tells the model to batch independent tool calls
+         # (reads, searches, web fetches, read-only commands) into one turn
+         # instead of one call per turn.  The runtime already runs independent
+         # calls concurrently, so this just steers the model to produce the
+diff --git a/run_agent.py b/run_agent.py
+index cdd82f4..da1b8bc 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -230,10 +230,11 @@ _EPHEMERAL_SCAFFOLDING_FLAGS = (
+     # turn before it can claim completion. Those messages exist only to
+     # drive the verification loop; persisting them poisons the resumed
+     # transcript and breaks prompt-prefix cache reuse on later turns. (#55733)
+     "_verification_stop_synthetic",
+     "_pre_verify_synthetic",
++    "_progress_completion_synthetic",
+ )
+ 
+ 
+ def _is_ephemeral_scaffolding(msg: Any) -> bool:
+     """Return True when ``msg`` is internal recovery scaffolding that must never

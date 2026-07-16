@@ -2,5 +2,5 @@
 *.bash text eol=lf
 install.sh text eol=lf
 scripts/* text eol=lf
-*.patch text eol=lf
+*.patch text eol=lf whitespace=-blank-at-eol,-blank-at-eof
 *.md text eol=lf

@@ -788,6 +788,19 @@ def run_conversation(
     compression_attempts = 0
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
 
+    # These counters are scoped to one real user turn. A reused agent instance
+    # must not carry a previous task's continuation budget/fingerprint forward.
+    agent._progress_completion_nudges = 0
+    agent._progress_completion_fingerprint = None
+    try:
+        from agent.progress_completion_gate import touch_running_checkpoint
+        touch_running_checkpoint(
+            session_id=agent.session_id or "",
+            user_message=user_message if isinstance(user_message, str) else "",
+        )
+    except Exception:
+        logger.debug("completion running checkpoint init failed", exc_info=True)
+
     # Per-turn file-mutation verifier state.  Keyed by resolved path;
     # each failed ``write_file`` / ``patch`` call records the error
     # preview.  Later successful writes to the same path remove the
@@ -867,6 +880,14 @@ def run_conversation(
         api_call_count += 1
         agent._api_call_count = api_call_count
         agent._touch_activity(f"starting API call #{api_call_count}")
+        try:
+            from agent.progress_completion_gate import touch_running_checkpoint
+            touch_running_checkpoint(
+                session_id=agent.session_id or "",
+                user_message=user_message if isinstance(user_message, str) else "",
+            )
+        except Exception:
+            logger.debug("completion running checkpoint heartbeat failed", exc_info=True)
 
         # Grace call: the budget is exhausted but we gave the model one
         # more chance.  Consume the grace flag so the loop exits after
@@ -4389,6 +4410,48 @@ def run_conversation(
 
                 if _continue_nudge is None:
                     try:
+                        from agent.progress_completion_gate import (
+                            build_progress_completion_nudge,
+                            progress_fingerprint,
+                        )
+
+                        if getattr(agent, "_progress_completion_gate", True):
+                            _progress_attempt = getattr(
+                                agent, "_progress_completion_nudges", 0
+                            )
+                            _progress_fingerprint = progress_fingerprint(
+                                messages,
+                                getattr(agent, "_turn_file_mutation_paths", set()),
+                            )
+                            _active_todos = [
+                                item
+                                for item in agent._todo_store.read()
+                                if item.get("status") in {"pending", "in_progress"}
+                            ] if getattr(agent, "_todo_store", None) else []
+                            _continue_nudge = build_progress_completion_nudge(
+                                user_message=user_message,
+                                final_response=final_response,
+                                active_todos=_active_todos,
+                                attempts=_progress_attempt,
+                                max_attempts=getattr(
+                                    agent, "_max_progress_completion_nudges", 3
+                                ),
+                                current_fingerprint=_progress_fingerprint,
+                                previous_fingerprint=getattr(
+                                    agent, "_progress_completion_fingerprint", None
+                                ),
+                            )
+                            if _continue_nudge:
+                                agent._progress_completion_nudges = _progress_attempt + 1
+                                agent._progress_completion_fingerprint = _progress_fingerprint
+                                _continue_flag = "_progress_completion_synthetic"
+                    except Exception:
+                        logger.debug(
+                            "progress completion gate failed", exc_info=True
+                        )
+
+                if _continue_nudge is None:
+                    try:
                         from agent.verify_hooks import max_verify_nudges
                         from hermes_cli.plugins import get_pre_verify_continue_message
 
@@ -4429,6 +4492,26 @@ def run_conversation(
                     continue
 
                 final_msg = agent._build_assistant_message(assistant_message, finish_reason)
+
+                # Completion-gate assistant/user pairs are API-only scaffolding.
+                # Keep any real tool calls/results they caused, but remove the
+                # synthetic messages before returning or persisting the turn.
+                _completion_scaffolding_flags = (
+                    "_verification_stop_synthetic",
+                    "_pre_verify_synthetic",
+                    "_progress_completion_synthetic",
+                )
+                messages[:] = [
+                    message
+                    for message in messages
+                    if not (
+                        isinstance(message, dict)
+                        and any(
+                            message.get(flag)
+                            for flag in _completion_scaffolding_flags
+                        )
+                    )
+                ]
 
                 # Pop thinking-only prefill and empty-response retry
                 # scaffolding before appending the final response.  These
@@ -4600,6 +4683,30 @@ def run_conversation(
     # same empty-response loop again.
     agent._drop_trailing_empty_response_scaffolding(messages)
     agent._persist_session(messages, conversation_history)
+
+    # Durable handoff for provider/process interruption after this turn. The
+    # watchdog consumes this explicit contract without an LLM classification call.
+    try:
+        from agent.progress_completion_gate import (
+            progress_fingerprint,
+            update_completion_checkpoint,
+        )
+        _checkpoint_todos = [
+            item for item in agent._todo_store.read()
+            if item.get("status") in {"pending", "in_progress"}
+        ] if getattr(agent, "_todo_store", None) else []
+        update_completion_checkpoint(
+            session_id=agent.session_id or "",
+            user_message=user_message if isinstance(user_message, str) else "",
+            final_response=final_response or "",
+            active_todos=_checkpoint_todos,
+            attempts=getattr(agent, "_progress_completion_nudges", 0),
+            fingerprint=progress_fingerprint(
+                messages, getattr(agent, "_turn_file_mutation_paths", set())
+            ),
+        )
+    except Exception:
+        logger.debug("completion checkpoint update failed", exc_info=True)
 
     # ── Turn-exit diagnostic log ─────────────────────────────────────
     # Always logged at INFO so agent.log captures WHY every turn ended.
@@ -4851,7 +4958,11 @@ def run_conversation(
     # current policy leaves auto-write disabled.
     if final_response and not interrupted:
         try:
-            from agent.memory_write_pipeline import MemoryWritePipeline, is_verified_write_result
+            from agent.memory_write_pipeline import (
+                MemoryWritePipeline,
+                is_verified_write_result,
+                resolve_turn_write_namespace,
+            )
             from agent.shadow_write_logger import log_shadow_write
 
             _pipeline = MemoryWritePipeline()
@@ -4863,53 +4974,7 @@ def run_conversation(
 
             if _candidates:
                 _user_id = str(getattr(agent, "_user_id", "") or "")
-                _chat_id = str(getattr(agent, "_chat_id", "") or "")
-                _platform = str(getattr(agent, "_platform", "") or getattr(agent, "platform", "") or "")
-                # Personal-fact attribution must be DETERMINISTIC from the SPEAKER's
-                # platform identity: platform:user_id. chat_id is only a fallback —
-                # in group chats chat_id is the GROUP id, and using it filed every
-                # member's durable facts into one shared group namespace. Also use
-                # the real platform instead of hardcoding telegram (universal repo);
-                # default to telegram only when platform is unknown (back-compat with
-                # existing telegram:<id> data and default_terminal_user convention).
-                _ns_platform = _platform or "telegram"
-                if _user_id:
-                    _namespace = f"{_ns_platform}:{_user_id}"
-                elif _chat_id:
-                    _namespace = f"{_ns_platform}:{_chat_id}"
-                else:
-                    _namespace = ""
-                if not _namespace:
-                    try:
-                        from agent.request_context import get_namespace as _mw_get_namespace
-                        _namespace = _mw_get_namespace() or ""
-                    except Exception:
-                        _namespace = ""
-                if not _namespace:
-                    try:
-                        import os as _mw_os
-                        _env_chat = str(_mw_os.environ.get("HERMES_SESSION_CHAT_ID") or "").strip()
-                        _env_user = str(_mw_os.environ.get("HERMES_SESSION_USER_ID") or "").strip()
-                        _env_platform = str(_mw_os.environ.get("HERMES_SESSION_PLATFORM") or "").strip()
-                        # speaker (user) first; chat id only as fallback (group chat id
-                        # must not own members' personal facts)
-                        if _env_user and (_env_platform == "telegram" or _env_user.isdigit()):
-                            _namespace = f"{_env_platform or 'telegram'}:{_env_user}"
-                        elif _env_chat and (_env_platform == "telegram" or _env_chat.lstrip("-").isdigit()):
-                            _namespace = f"{_env_platform or 'telegram'}:{_env_chat}"
-                    except Exception:
-                        _namespace = ""
-                if not _namespace and _user_id and _user_id.isdigit():
-                    _namespace = f"telegram:{_user_id}"
-                if not _namespace:
-                    try:
-                        from hermes_cli.config import load_config as _mw_load_config
-                        _mw_cfg = _mw_load_config() or {}
-                        _mw_default_user = str((_mw_cfg.get("memory_graph") or {}).get("default_terminal_user") or "").strip()
-                        if _mw_default_user:
-                            _namespace = f"telegram:{_mw_default_user}"
-                    except Exception:
-                        _namespace = ""
+                _namespace = resolve_turn_write_namespace(agent)
 
                 _candidate_payloads = []
                 _auto_write_results = []
