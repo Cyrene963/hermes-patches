@@ -54,6 +54,7 @@ from agent.model_metadata import (
 from agent.process_bootstrap import _install_safe_stdio
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.retry_utils import jittered_backoff
+from agent.tool_dispatch_helpers import _trajectory_normalize_msg
 from agent.trajectory import has_incomplete_scratchpad
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from hermes_constants import PARTIAL_STREAM_STUB_ID
@@ -81,6 +82,20 @@ def _stringify_tool_message_content(api_messages: List[Dict[str, Any]]) -> None:
             )
         except (TypeError, ValueError):
             api_msg["content"] = str(tool_content)
+
+
+def _retire_multimodal_tool_payloads(messages: List[Dict[str, Any]]) -> int:
+    """Drop image bytes after the model has consumed a tool-result image once."""
+    retired = 0
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        normalized = _trajectory_normalize_msg(message)
+        if normalized is message or normalized.get("content") == message.get("content"):
+            continue
+        messages[index] = normalized
+        retired += 1
+    return retired
 
 
 def _large_context_max_attempts(approx_tokens: int, configured_attempts: int) -> int:
@@ -3588,6 +3603,16 @@ def run_conversation(
             normalized = _transport.normalize_response(response, **_normalize_kwargs)
             assistant_message = normalized
             finish_reason = normalized.finish_reason
+
+            # Keep multimodal tool data for the call that consumes it, then
+            # retain only its text summary for later iterations. Inline base64
+            # screenshots otherwise add several megabytes to every request.
+            _retired_images = _retire_multimodal_tool_payloads(messages)
+            if _retired_images:
+                logger.info(
+                    "Retired %s consumed multimodal tool payload(s) from live history",
+                    _retired_images,
+                )
             
             # Normalize content to string — some OpenAI-compatible servers
             # (llama-server, etc.) return content as a dict or list instead
