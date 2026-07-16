@@ -125,16 +125,16 @@ created = json.loads(m._create({"parent_uri": parent, "title": title, "content":
 if created.get("error"):
     raise SystemExit("create failed: " + json.dumps(created, ensure_ascii=False))
 uri = created.get("uri") or ("core://" + title)
-search = json.loads(m._search({"query": title, "limit": 5, "domain": "core"}))
-if not any(title in (r.get("path","") + r.get("snippet","") + r.get("name", "")) for r in search.get("results", [])):
-    raise SystemExit("search miss after create: " + json.dumps(search, ensure_ascii=False)[:500])
+readback = json.loads(m._read({"uri": uri, "domain": "core"}))
+if readback.get("error") or content not in str(readback.get("content", "")):
+    raise SystemExit("exact readback failed after create")
 deleted = json.loads(m._delete({"uri": uri, "domain": "core"}))
 if not deleted.get("deleted"):
-    raise SystemExit("delete failed: " + json.dumps(deleted, ensure_ascii=False))
-search2 = json.loads(m._search({"query": title, "limit": 5, "domain": "core"}))
-if any(title in (r.get("path","") + r.get("snippet","") + r.get("name", "")) for r in search2.get("results", [])):
-    raise SystemExit("search hit after delete: " + json.dumps(search2, ensure_ascii=False)[:500])
-print("MG_CRUD_OK", uri)
+    raise SystemExit("delete failed")
+readback2 = json.loads(m._read({"uri": uri, "domain": "core"}))
+if not readback2.get("error"):
+    raise SystemExit("exact readback still present after delete")
+print("MG_CRUD_OK")
 PY
 }
 
