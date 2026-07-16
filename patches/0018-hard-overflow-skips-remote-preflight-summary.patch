@@ -1,0 +1,33 @@
+diff --git a/agent/turn_context.py b/agent/turn_context.py
+--- a/agent/turn_context.py
++++ b/agent/turn_context.py
+@@ -87,6 +87,11 @@ def _should_run_preflight_estimate(
+     if len(messages) > protect_first_n + protect_last_n + 1:
+         return True
+     return estimate_messages_tokens_rough(messages) >= threshold_tokens
++
++
++def _preflight_requires_local_guard(rough_tokens: int, context_length: int) -> bool:
++    """Return True when remote summarization would itself exceed the window."""
++    return context_length > 0 and rough_tokens >= context_length
+ 
+ 
+ @dataclass
+@@ -457,6 +462,17 @@ def build_turn_context(
+                 f"{_preflight_tokens:,}",
+                 f"{_compressor.threshold_tokens:,}",
+                 f"{_compressor.last_real_prompt_tokens:,}",
++            )
++        elif _preflight_requires_local_guard(
++            _preflight_tokens,
++            int(getattr(_compressor, "context_length", 0) or 0),
++        ):
++            logger.warning(
++                "Skipping remote preflight summary: rough estimate ~%s >= "
++                "configured context %s; final local request guard will compact "
++                "the API copy without mutating stored history",
++                f"{_preflight_tokens:,}",
++                f"{int(getattr(_compressor, 'context_length', 0) or 0):,}",
+             )
+         elif _compression_cooldown:
+             logger.info(
