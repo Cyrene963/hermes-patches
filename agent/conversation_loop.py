@@ -90,16 +90,29 @@ def _compact_historical_tool_message_content(
     max_chars: int = 24_000,
     head_chars: int = 8_000,
     tail_chars: int = 4_000,
+    preserve_pending: bool = True,
 ) -> int:
-    """Bound old tool results while preserving the newest pending tool batch."""
-    last_tool_call_index = -1
-    for index, api_msg in enumerate(api_messages):
-        if api_msg.get("role") == "assistant" and api_msg.get("tool_calls"):
-            last_tool_call_index = index
+    """Bound consumed tool results while preserving a truly pending tail batch.
+
+    A batch is pending only when the last assistant tool call is followed solely
+    by tool results through the end of the request. If a user or assistant turn
+    follows those results, the model already moved past that batch and it is safe
+    to compact it. This distinction prevents old multimodal payloads from being
+    exempted forever after an out-of-band user message is appended.
+    """
+    pending_start = len(api_messages)
+    if preserve_pending:
+        last_tool_call_index = -1
+        for index, api_msg in enumerate(api_messages):
+            if api_msg.get("role") == "assistant" and api_msg.get("tool_calls"):
+                last_tool_call_index = index
+        trailing = api_messages[last_tool_call_index + 1:] if last_tool_call_index >= 0 else []
+        if trailing and all(msg.get("role") == "tool" for msg in trailing):
+            pending_start = last_tool_call_index
 
     compacted = 0
     for index, api_msg in enumerate(api_messages):
-        if index >= last_tool_call_index or api_msg.get("role") != "tool":
+        if index >= pending_start or api_msg.get("role") != "tool":
             continue
         content = api_msg.get("content")
         if not isinstance(content, str) or len(content) <= max_chars:
@@ -112,6 +125,65 @@ def _compact_historical_tool_message_content(
         )
         compacted += 1
     return compacted
+
+
+def _fit_api_messages_to_hard_context_budget(
+    api_messages: List[Dict[str, Any]],
+    *,
+    tools: Optional[List[Dict[str, Any]]],
+    budget_tokens: int,
+    budget_chars: int = 0,
+) -> tuple[List[Dict[str, Any]], int]:
+    """Fit an API-copy into hard token/body budgets without changing history."""
+    def _fits(candidate: List[Dict[str, Any]]) -> bool:
+        token_ok = estimate_request_tokens_rough(candidate, tools=tools) <= budget_tokens
+        if not token_ok:
+            return False
+        if budget_chars <= 0:
+            return True
+        body_chars = sum(len(json.dumps(msg, ensure_ascii=False)) for msg in candidate)
+        body_chars += len(json.dumps(tools or [], ensure_ascii=False))
+        return body_chars <= budget_chars
+
+    if budget_tokens <= 0:
+        return api_messages, 0
+    if _fits(api_messages):
+        return api_messages, 0
+
+    # Under hard pressure even the newest image/tool batch may be too large for
+    # the provider. Keep a useful head/tail excerpt and let the model re-run the
+    # tool if full fidelity is still required.
+    _compact_historical_tool_message_content(
+        api_messages,
+        max_chars=12_000,
+        head_chars=4_000,
+        tail_chars=2_000,
+        preserve_pending=False,
+    )
+    if _fits(api_messages):
+        return api_messages, 0
+
+    prefix_end = 0
+    while prefix_end < len(api_messages) and api_messages[prefix_end].get("role") in {"system", "developer"}:
+        prefix_end += 1
+    prefix = [msg.copy() for msg in api_messages[:prefix_end]]
+    user_starts = [
+        index for index in range(prefix_end, len(api_messages))
+        if api_messages[index].get("role") == "user"
+    ]
+    marker = "[Earlier conversation omitted by the local hard context guard. Re-read it with session_search if needed.]\n\n"
+    for start in user_starts:
+        tail = [msg.copy() for msg in api_messages[start:]]
+        content = tail[0].get("content", "")
+        if isinstance(content, str):
+            tail[0]["content"] = marker + content
+        elif isinstance(content, list):
+            tail[0]["content"] = [{"type": "text", "text": marker}, *content]
+        candidate = prefix + tail
+        if _fits(candidate):
+            return candidate, start - prefix_end
+
+    return api_messages, 0
 
 
 def _retire_multimodal_tool_payloads(messages: List[Dict[str, Any]]) -> int:
@@ -1223,12 +1295,61 @@ def run_conversation(
         # the OpenAI SDK. Sanitizing here prevents the 3-retry cycle.
         _sanitize_messages_surrogates(api_messages)
 
-        # Calculate approximate request size for logging
-        total_chars = sum(len(str(msg)) for msg in api_messages)
+        # Calculate approximate request size for logging. Apply a final local
+        # guard to the API copy before any network call; stored session history
+        # remains untouched. This also catches multimodal bodies whose token
+        # estimator is intentionally cheap but whose serialized HTTP body is huge.
+        total_chars = sum(len(json.dumps(msg, ensure_ascii=False)) for msg in api_messages)
         approx_tokens = estimate_messages_tokens_rough(api_messages)
         approx_request_tokens = estimate_request_tokens_rough(
             api_messages, tools=agent.tools or None
         )
+        _compressor = agent.context_compressor
+        _hard_context = int(getattr(_compressor, "context_length", 0) or 0)
+        _reserved_output = int(getattr(_compressor, "max_tokens", 0) or 0)
+        if _hard_context > 0:
+            if _reserved_output <= 0:
+                _reserved_output = max(4_096, int(_hard_context * 0.05))
+            _hard_input_budget = max(1, _hard_context - _reserved_output - 1_024)
+            _hard_body_budget = 1_500_000
+            api_messages, _guard_dropped = _fit_api_messages_to_hard_context_budget(
+                api_messages,
+                tools=agent.tools or None,
+                budget_tokens=_hard_input_budget,
+                budget_chars=_hard_body_budget,
+            )
+            total_chars = sum(len(json.dumps(msg, ensure_ascii=False)) for msg in api_messages)
+            approx_tokens = estimate_messages_tokens_rough(api_messages)
+            approx_request_tokens = estimate_request_tokens_rough(
+                api_messages, tools=agent.tools or None
+            )
+            _body_chars = total_chars + len(json.dumps(agent.tools or [], ensure_ascii=False))
+            if _guard_dropped:
+                request_logger.warning(
+                    "Hard context guard omitted %s old message(s) from API copy "
+                    "(session=%s, request_tokens~%s, body_chars=%s)",
+                    _guard_dropped,
+                    agent.session_id or "-",
+                    f"{approx_request_tokens:,}",
+                    f"{_body_chars:,}",
+                )
+            if approx_request_tokens > _hard_input_budget or _body_chars > _hard_body_budget:
+                final_response = (
+                    "Local context guard blocked an oversized provider request "
+                    f"(~{approx_request_tokens:,} input tokens, {_body_chars:,} body characters). "
+                    "Start a new conversation or remove/re-run the latest oversized tool payload."
+                )
+                failed = True
+                _turn_exit_reason = "local_hard_context_guard"
+                messages.append({"role": "assistant", "content": final_response})
+                agent._emit_status("❌ Local context guard blocked an oversized API request")
+                api_call_count -= 1
+                agent._api_call_count = api_call_count
+                try:
+                    agent.iteration_budget.refund()
+                except Exception:
+                    pass
+                break
 
         _runtime_context_error = _ollama_context_limit_error(
             agent, approx_request_tokens

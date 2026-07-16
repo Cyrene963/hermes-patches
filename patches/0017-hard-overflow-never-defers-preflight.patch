@@ -1,0 +1,16 @@
+diff --git a/agent/context_compressor.py b/agent/context_compressor.py
+index 7c7b5ec..a6e7544 100644
+--- a/agent/context_compressor.py
++++ b/agent/context_compressor.py
+@@ -1446,6 +1446,11 @@ class ContextCompressor(ContextEngine):
+         """
+         if rough_tokens < self.threshold_tokens:
+             return False
++        # A rough estimate at or beyond the entire model window is a hard
++        # overflow signal, not normal schema-estimator noise. Never let stale
++        # provider usage or the post-compaction one-turn defer bypass it.
++        if self.context_length > 0 and rough_tokens >= self.context_length:
++            return False
+         # Immediately after a compaction the post-compression path sets
+         # ``awaiting_real_usage_after_compression`` and parks
+         # ``last_prompt_tokens = -1``, but ``last_real_prompt_tokens`` still
