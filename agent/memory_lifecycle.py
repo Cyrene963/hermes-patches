@@ -168,6 +168,76 @@ class MemoryLifecycleManager:
             "result": "updated",
         })
 
+    def archive_stale_leaf(
+        self,
+        *,
+        uri: str,
+        namespace: str,
+        stale_days: float,
+        threshold_days: int,
+        last_accessed_at: str | None,
+    ) -> dict[str, Any]:
+        """Move one proven-stale private leaf into the archive domain."""
+        if not namespace:
+            return {"ok": False, "error": "private_namespace_required"}
+        if not last_accessed_at:
+            return {"ok": False, "error": "access_evidence_required"}
+        if threshold_days < 30 or stale_days < threshold_days:
+            return {"ok": False, "error": "not_stale"}
+        if uri.startswith(("archive://", "system://")):
+            return {"ok": False, "error": "protected_domain"}
+        if self.children(uri, namespace):
+            return {"ok": False, "error": "archive_requires_leaf"}
+        before = self.read(uri, namespace)
+        if not before:
+            return {"ok": False, "error": "not_found"}
+
+        domain, parent, title = self._split_uri(uri)
+        archive_parent = "/".join(part for part in (domain, parent) if part)
+        archive_uri = f"archive://{archive_parent + '/' if archive_parent else ''}{title}"
+        if self.read(archive_uri, namespace):
+            return {"ok": False, "error": "archive_path_exists"}
+        changeset_id = uuid.uuid4().hex
+        item = {
+            "schema_version": 1,
+            "changeset_id": changeset_id,
+            "operation": "archive",
+            "namespace": namespace,
+            "uri": uri,
+            "archive_uri": archive_uri,
+            "before": {
+                "content": before.get("content", ""),
+                "priority": int(before.get("priority") or 0),
+                "domain": domain,
+                "parent": parent,
+                "title": title,
+            },
+            "eligibility": {
+                "last_accessed_at": last_accessed_at,
+                "stale_days": stale_days,
+                "threshold_days": threshold_days,
+            },
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "rolled_back_at": None,
+            "result": "pending",
+        }
+        self._write_changeset(namespace, item)
+        path = self._path(namespace, changeset_id)
+        created = self.create("archive", archive_parent, title, before.get("content", ""), int(before.get("priority") or 0))
+        archived = self.read(archive_uri, namespace)
+        if not created or not archived or archived.get("content") != before.get("content", ""):
+            item["result"] = "archive_create_failed"
+            path.write_text(json.dumps(item, ensure_ascii=False, indent=2) + "\n")
+            return {"ok": False, "changeset_id": changeset_id, "error": "archive_readback_failed"}
+        if not self.delete(uri, namespace) or self.read(uri, namespace) is not None:
+            self.delete(archive_uri, namespace)
+            item["result"] = "source_delete_failed"
+            path.write_text(json.dumps(item, ensure_ascii=False, indent=2) + "\n")
+            return {"ok": False, "changeset_id": changeset_id, "error": "source_delete_readback_failed"}
+        item["result"] = "archived"
+        path.write_text(json.dumps(item, ensure_ascii=False, indent=2) + "\n")
+        return {"ok": True, "changeset_id": changeset_id, "uri": uri, "archive_uri": archive_uri, "readback_archived": True}
+
     @staticmethod
     def _split_uri(uri: str) -> tuple[str, str, str]:
         domain, path = uri.split("://", 1)
@@ -221,6 +291,27 @@ class MemoryLifecycleManager:
             return {"ok": False, "error": "namespace_mismatch"}
         existing = self.read(item["uri"], namespace)
         operation = item.get("operation")
+        if operation == "archive":
+            archived = self.read(item["archive_uri"], namespace)
+            if existing and not archived:
+                return {"ok": True, "already_restored": True, "uri": item["uri"]}
+            if existing:
+                return {"ok": False, "error": "source_uri_reused"}
+            if not archived or archived.get("content") != item["before"]["content"]:
+                return {"ok": False, "error": "archive_missing_or_changed"}
+            before = item["before"]
+            self.create(before["domain"], before["parent"], before["title"], before["content"], before["priority"])
+            restored = self.read(item["uri"], namespace)
+            if not restored or restored.get("content") != before["content"]:
+                return {"ok": False, "error": "archive_rollback_readback_failed"}
+            if self.children(item["archive_uri"], namespace) or not self.delete(item["archive_uri"], namespace):
+                return {"ok": False, "error": "archive_cleanup_failed"}
+            if self.read(item["archive_uri"], namespace) is not None:
+                return {"ok": False, "error": "archive_cleanup_readback_failed"}
+            item["rolled_back_at"] = datetime.now(timezone.utc).isoformat()
+            item["result"] = "rolled_back"
+            path.write_text(json.dumps(item, ensure_ascii=False, indent=2) + "\n")
+            return {"ok": True, "uri": item["uri"], "readback_restored": True}
         if operation == "create":
             if not existing:
                 return {"ok": True, "already_rolled_back": True, "uri": item["uri"]}

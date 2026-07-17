@@ -30,6 +30,17 @@ def _manager(namespace):
     return MemoryLifecycleManager(read=read,children=children,delete=delete,create=create,update=update)
 
 
+def archive_stale_candidate(candidate, namespace):
+    """Archive a diagnostics-selected stale leaf through normal Graph adapters."""
+    return _manager(namespace).archive_stale_leaf(
+        uri=str(candidate.get("uri") or ""),
+        namespace=namespace,
+        stale_days=float(candidate.get("stale_days") or 0),
+        threshold_days=int(candidate.get("threshold_days") or 0),
+        last_accessed_at=candidate.get("last_accessed_at"),
+    )
+
+
 DELETE_SCHEMA={"name":"memory_lifecycle_delete","description":"Delete exactly one leaf memory using a short-lived host-signed grant issued from the current explicit user request. Never recursively deletes subtrees.","parameters":{"type":"object","properties":{"uri":{"type":"string"},"namespace":{"type":"string"},"delete_grant":{"type":"string"},"candidate_count":{"type":"integer"}},"required":["uri","namespace","delete_grant","candidate_count"],"additionalProperties":False}}
 ROLLBACK_SCHEMA={"name":"memory_lifecycle_rollback","description":"Idempotently restore a memory deleted through memory_lifecycle_delete, scoped to its original namespace.","parameters":{"type":"object","properties":{"changeset_id":{"type":"string"},"namespace":{"type":"string"}},"required":["changeset_id","namespace"],"additionalProperties":False}}
 

@@ -75,6 +75,39 @@ def test_create_and_update_changesets_rollback_idempotently(tmp_path):
     assert mgr.rollback(changeset_id=update_id,namespace="test:private")["already_restored"]
 
 
+def test_stale_leaf_archive_and_rollback_are_namespace_safe(tmp_path):
+    mgr, store = manager(tmp_path)
+    result = mgr.archive_stale_leaf(
+        uri="core://neutral/item", namespace="test:private", stale_days=91,
+        threshold_days=90, last_accessed_at="2026-01-01T00:00:00+00:00",
+    )
+    assert result["ok"] and result["readback_archived"]
+    assert "core://neutral/item" not in store
+    assert store["archive://core/neutral/item"]["content"] == "neutral value"
+    changeset = next(tmp_path.rglob("*.json"))
+    assert changeset.stat().st_mode & 0o777 == 0o600
+    assert mgr.rollback(changeset_id=result["changeset_id"], namespace="other:private")["error"] == "changeset_not_found"
+    restored = mgr.rollback(changeset_id=result["changeset_id"], namespace="test:private")
+    assert restored["ok"] and restored["readback_restored"]
+    assert "archive://core/neutral/item" not in store
+    assert mgr.rollback(changeset_id=result["changeset_id"], namespace="test:private")["already_restored"]
+
+
+def test_archive_abstains_without_access_evidence_or_for_non_leaf(tmp_path):
+    mgr, store = manager(tmp_path)
+    missing = mgr.archive_stale_leaf(
+        uri="core://neutral/item", namespace="test:private", stale_days=100,
+        threshold_days=90, last_accessed_at=None,
+    )
+    assert missing["error"] == "access_evidence_required" and "core://neutral/item" in store
+    mgr.children = lambda *_: [{"uri": "core://neutral/item/child"}]
+    non_leaf = mgr.archive_stale_leaf(
+        uri="core://neutral/item", namespace="test:private", stale_days=100,
+        threshold_days=90, last_accessed_at="2026-01-01T00:00:00+00:00",
+    )
+    assert non_leaf["error"] == "archive_requires_leaf" and "core://neutral/item" in store
+
+
 def test_delete_grant_is_scoped_signed_expiring_and_single_use(tmp_path):
     now=[1000]
     authority=DeleteGrantAuthority(b"neutral-secret",now=lambda:now[0],consumed_dir=tmp_path)
