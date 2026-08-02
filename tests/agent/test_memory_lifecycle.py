@@ -1,4 +1,4 @@
-from agent.memory_lifecycle import DeleteGrantAuthority, MemoryLifecycleManager, decide_delete_intent
+from agent.memory_lifecycle import DeleteGrantAuthority, MemoryLifecycleManager, bind_delete_turn, decide_delete_intent
 
 
 def request(**overrides):
@@ -111,12 +111,17 @@ def test_archive_abstains_without_access_evidence_or_for_non_leaf(tmp_path):
 def test_delete_grant_is_scoped_signed_expiring_and_single_use(tmp_path):
     now=[1000]
     authority=DeleteGrantAuthority(b"neutral-secret",now=lambda:now[0],consumed_dir=tmp_path)
-    token=authority.issue(uri="core://neutral/item",namespace="test:private",user_message="forget exact neutral item",ttl_seconds=10)
+    bind_delete_turn(user_message="forget exact neutral item", session_id="session-a")
+    token=authority.issue(uri="core://neutral/item",namespace="test:private",user_message="forget exact neutral item",session_id="session-a",ttl_seconds=10)
     assert authority.consume(token,uri="core://neutral/other",namespace="test:private")["error"]=="delete_grant_scope_mismatch"
+    bind_delete_turn(user_message="different message", session_id="session-a")
+    assert authority.consume(token,uri="core://neutral/item",namespace="test:private")["error"]=="delete_grant_message_mismatch"
+    bind_delete_turn(user_message="forget exact neutral item", session_id="session-a")
     first=authority.consume(token,uri="core://neutral/item",namespace="test:private")
     assert first["ok"] and len(first["message_sha256"])==64
     assert authority.consume(token,uri="core://neutral/item",namespace="test:private")["error"]=="delete_grant_replayed"
-    other=authority.issue(uri="core://neutral/item",namespace="test:private",user_message="forget",ttl_seconds=1)
+    bind_delete_turn(user_message="forget", session_id="session-a")
+    other=authority.issue(uri="core://neutral/item",namespace="test:private",user_message="forget",session_id="session-a",ttl_seconds=1)
     now[0]=1002
     assert authority.consume(other,uri="core://neutral/item",namespace="test:private")["error"]=="delete_grant_expired"
     tampered=token[:-1]+("0" if token[-1]!="0" else "1")

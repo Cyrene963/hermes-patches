@@ -8,10 +8,21 @@ import json
 import os
 import re
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
+
+
+_active_delete_turn: ContextVar[tuple[str, str] | None] = ContextVar(
+    "active_memory_delete_turn", default=None
+)
+
+
+def bind_delete_turn(*, user_message: str, session_id: str) -> None:
+    """Bind delete grants to the raw message and session of this agent turn."""
+    _active_delete_turn.set((hashlib.sha256(user_message.encode()).hexdigest(), session_id))
 
 
 class DeleteGrantAuthority:
@@ -23,11 +34,12 @@ class DeleteGrantAuthority:
         self.now = now or time.time
         self.consumed_dir = Path(consumed_dir or os.path.expanduser("~/.hermes/memory_delete_grants/consumed"))
 
-    def issue(self, *, uri: str, namespace: str, user_message: str, ttl_seconds: int = 300) -> str:
+    def issue(self, *, uri: str, namespace: str, user_message: str, session_id: str, ttl_seconds: int = 300) -> str:
         payload = {
             "uri": uri,
             "namespace": namespace,
             "message_sha256": hashlib.sha256(user_message.encode()).hexdigest(),
+            "session_id": session_id,
             "expires_at": int(self.now()) + max(1, min(int(ttl_seconds), 600)),
             "nonce": uuid.uuid4().hex,
         }
@@ -57,6 +69,11 @@ class DeleteGrantAuthority:
             return {"ok": False, "error": "delete_grant_expired"}
         if payload.get("uri") != uri or payload.get("namespace") != namespace:
             return {"ok": False, "error": "delete_grant_scope_mismatch"}
+        active_turn = _active_delete_turn.get()
+        if not active_turn or active_turn != (
+            payload.get("message_sha256"), payload.get("session_id")
+        ):
+            return {"ok": False, "error": "delete_grant_message_mismatch"}
         self.consumed_dir.mkdir(parents=True, exist_ok=True)
         try:
             fd = os.open(consumed, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)

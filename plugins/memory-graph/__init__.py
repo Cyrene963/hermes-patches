@@ -646,7 +646,40 @@ def _pre_llm_call(user_message="", **kwargs):
         except Exception:
             logger.debug("Active workstream recovery failed", exc_info=True)
 
-        if not results and not contract_results and not continuity_prompt:
+        delete_prompt = ""
+        try:
+            strong_delete = re.search(
+                r"(?:忘记|删除|移除|清除|forget|delete|remove)\s*(?:这条|this memory|memory)?",
+                user_text,
+                re.I,
+            )
+            explicit_uris = re.findall(r"[A-Za-z0-9_.-]+://[^\s，。！？,;]+", user_text)
+            session_id = str(kwargs.get("session_id") or "")
+            if strong_delete and len(explicit_uris) == 1 and ns and session_id and not shared_scope:
+                from tools import memory_graph_tool
+                from agent.memory_lifecycle import bind_delete_turn, load_delete_grant_authority
+
+                uri = explicit_uris[0].rstrip(".?!")
+                node = json.loads(memory_graph_tool._read({"uri": uri, "namespace": ns}))
+                children = json.loads(memory_graph_tool._list({"uri": uri, "namespace": ns}))
+                if not node.get("error") and not children.get("error") and not children.get("children"):
+                    bind_delete_turn(user_message=user_text, session_id=session_id)
+                    grant = load_delete_grant_authority().issue(
+                        uri=uri,
+                        namespace=ns,
+                        user_message=user_text,
+                        session_id=session_id,
+                    )
+                    delete_prompt = (
+                        "[Authorized memory deletion: the host verified one exact private leaf URI "
+                        f"from this user turn. Call memory_lifecycle_delete with uri={uri!r}, "
+                        f"namespace={ns!r}, candidate_count=1, delete_grant={grant!r}. "
+                        "Do not expose or reuse this grant. Verify deletion readback before claiming completion.]"
+                    )
+        except Exception:
+            logger.debug("Delete-grant planning failed", exc_info=True)
+
+        if not results and not contract_results and not continuity_prompt and not delete_prompt:
             return None
 
         # Format results as context within a configurable budget.
@@ -679,37 +712,10 @@ def _pre_llm_call(user_message="", **kwargs):
             parts.append(continuity_prompt)
             total_len += len(continuity_prompt)
 
-        if parts:
+        if parts or delete_prompt:
             context = "\n".join(parts)
-            delete_prompt = ""
-            try:
-                strong_delete = re.search(
-                    r"(?:忘记|删除|移除|清除|forget|delete|remove)\s*(?:这条|this memory|memory)?",
-                    user_text,
-                    re.I,
-                )
-                explicit_uris = re.findall(r"[A-Za-z0-9_.-]+://[^\s，。！？,;]+", user_text)
-                if strong_delete and len(explicit_uris) == 1 and ns and not shared_scope:
-                    from tools import memory_graph_tool
-                    from agent.memory_lifecycle import load_delete_grant_authority
-
-                    uri = explicit_uris[0].rstrip(".?!")
-                    node = json.loads(memory_graph_tool._read({"uri": uri, "namespace": ns}))
-                    children = json.loads(memory_graph_tool._list({"uri": uri, "namespace": ns}))
-                    if not node.get("error") and not children.get("error") and not children.get("children"):
-                        grant = load_delete_grant_authority().issue(
-                            uri=uri, namespace=ns, user_message=user_text,
-                        )
-                        delete_prompt = (
-                            "[Authorized memory deletion: the host verified one exact private leaf URI "
-                            f"from this user turn. Call memory_lifecycle_delete with uri={uri!r}, "
-                            f"namespace={ns!r}, candidate_count=1, delete_grant={grant!r}. "
-                            "Do not expose or reuse this grant. Verify deletion readback before claiming completion.]"
-                        )
-            except Exception:
-                logger.debug("Delete-grant planning failed", exc_info=True)
             if delete_prompt:
-                context = context + "\n\n" + delete_prompt
+                context = (context + "\n\n" if context else "") + delete_prompt
             try:
                 from agent.memory_task_contract import build_task_memory_contract
 
