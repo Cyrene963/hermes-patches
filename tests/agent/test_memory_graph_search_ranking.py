@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 import agent.memory_graph.services.search as search_module
-from agent.memory_graph.services.search import _memory_source_rank
+from agent.memory_graph.services.search import _memory_source_rank, _memory_status_rank
 from agent.memory_graph.services.search_terms import expand_query_terms
 
 
@@ -28,6 +28,20 @@ def test_non_user_intent_does_not_special_case_user_domain():
     private_rule = {"domain": "用户", "path": "Neutral preference rule", "namespace_rank": 0}
     project = {"domain": "项目", "path": "Neutral project", "namespace_rank": 0}
     assert _memory_source_rank(private_rule, query) == _memory_source_rank(project, query)
+
+
+def test_private_generic_memory_outranks_shared_structured_memory():
+    query = "How should this project be deployed?"
+    private_generic = {"domain": "core", "path": "deployment", "namespace_rank": 0}
+    shared_project = {"domain": "项目", "path": "项目/shared", "namespace_rank": 1}
+    assert _memory_source_rank(private_generic, query) < _memory_source_rank(shared_project, query)
+
+
+def test_obsolete_memory_is_demoted_for_current_but_not_historical_queries():
+    obsolete = {"path": "old_api", "snippet": "[已废弃] old API 已下线，请勿使用"}
+    current = {"path": "current_api", "snippet": "当前 API 使用 HTTPS"}
+    assert _memory_status_rank(current, "现在的 API 是什么") < _memory_status_rank(obsolete, "现在的 API 是什么")
+    assert _memory_status_rank(obsolete, "历史上的旧 API 是什么") == 0
 
 
 def test_candidate_pool_supports_retrieve_then_rerank():

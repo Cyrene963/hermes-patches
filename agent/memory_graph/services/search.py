@@ -67,21 +67,36 @@ def _memory_source_rank(item: Dict[str, Any], query: str) -> int:
     other_structured = domain in {"项目", "经验教训"} or path.startswith(("项目", "经验教训"))
     structured = user_structured or other_structured
     conversation = path.startswith("对话记录")
-    if namespace_rank == 0 and user_profile_intent and user_structured:
-        return 0
-    if namespace_rank == 0 and structured:
-        return 1
-    if namespace_rank == 1 and user_profile_intent and user_structured:
-        return 2
-    if namespace_rank == 1 and structured:
-        return 3
-    if namespace_rank == 0 and not conversation:
-        return 4
-    if namespace_rank == 0 and conversation:
-        return 5
+    # The caller's namespace is canonical for that caller. Source structure may
+    # order candidates within a namespace tier, but must never let a shared row
+    # outrank an equally eligible private row.
+    tier = 0 if namespace_rank == 0 else 4
+    if user_profile_intent and user_structured:
+        return tier
+    if structured:
+        return tier + 1
     if not conversation:
-        return 6
-    return 7
+        return tier + 2
+    return tier + 3
+
+
+def _memory_status_rank(item: Dict[str, Any], query: str) -> int:
+    """Demote explicitly obsolete facts unless historical state was requested."""
+    query_text = (query or "").casefold()
+    historical_intent = any(
+        token in query_text
+        for token in ("old", "obsolete", "deprecated", "previous", "history", "旧", "废弃", "以前", "历史")
+    )
+    if historical_intent:
+        return 0
+    text_value = " ".join(
+        str(item.get(key, "")) for key in ("uri", "path", "snippet", "content")
+    ).casefold()
+    obsolete = any(
+        marker in text_value
+        for marker in ("[obsolete]", "[deprecated]", "[已废弃]", "已废弃", "已下线", "请勿使用")
+    )
+    return 1 if obsolete else 0
 
 
 class SearchIndexer:
@@ -536,6 +551,7 @@ class SearchIndexer:
                     # the allowed current/private + public set, prefer durable
                     # structured facts over raw conversation fragments.
                     _memory_source_rank(item, query),
+                    _memory_status_rank(item, query),
                     -exact_phrase,
                     -high_signal_hits,
                     -weighted_hit_score,
