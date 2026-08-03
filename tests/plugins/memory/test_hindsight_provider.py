@@ -20,6 +20,7 @@ from plugins.memory.hindsight import (
     RECALL_SCHEMA,
     REFLECT_SCHEMA,
     RETAIN_SCHEMA,
+    _PROVIDER_DEFAULT_MODELS,
     _load_config,
     _build_embedded_profile_env,
     _normalize_retain_tags,
@@ -88,6 +89,11 @@ class _FakeSessionDB:
 
     def get_messages_as_conversation(self, session_id):
         return list(self._messages)
+
+
+def test_minimax_default_model_tracks_current_provider_default():
+    assert _PROVIDER_DEFAULT_MODELS["minimax"] == "MiniMax-M3"
+    assert _PROVIDER_DEFAULT_MODELS["minimax-cn"] == "MiniMax-M3"
 
 
 @pytest.fixture()
@@ -1595,6 +1601,12 @@ class TestConfigSchema:
             "recall_prompt_preamble",
         }
         assert expected_keys.issubset(keys), f"Missing: {expected_keys - keys}"
+
+    def test_schema_exposes_minimax_regions(self, provider):
+        schema = provider.get_config_schema()
+        provider_field = next(f for f in schema if f["key"] == "llm_provider")
+        assert "minimax" in provider_field["choices"]
+        assert "minimax-cn" in provider_field["choices"]
 
 
 # ---------------------------------------------------------------------------
