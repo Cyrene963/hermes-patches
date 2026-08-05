@@ -437,3 +437,33 @@ class TestUserScopeIsolation:
         result = json.loads(session_search(query="sharedneedle", db=db, limit=10))
         sids = {r["session_id"] for r in result["results"]}
         assert {"tg_alice", "tg_bob", "cli_local"}.issubset(sids)
+
+    def test_scroll_rejects_mismatched_user_scope(self, db):
+        self._seed_private_sessions(db)
+        result = json.loads(session_search(
+            session_id="tg_bob",
+            around_message_id=1,
+            db=db,
+            user_id="alice",
+            source="telegram",
+        ))
+        assert result["success"] is False
+        assert "different user scope" in result["error"]
+
+    def test_browse_hides_current_compression_tip(self, db):
+        db.create_session("root", source="cli")
+        db._conn.execute(
+            "UPDATE sessions SET started_at = ?, ended_at = ?, end_reason = ?, title = ? WHERE id = ?",
+            (1.0, 2.0, "compression", "Root Session", "root"),
+        )
+        db.create_session("tip", source="cli", parent_session_id="root")
+        db._conn.execute(
+            "UPDATE sessions SET started_at = ?, title = ? WHERE id = ?",
+            (3.0, "Tip Session", "tip"),
+        )
+        db._conn.commit()
+
+        result = json.loads(session_search(db=db, current_session_id="root"))
+        sids = [r["session_id"] for r in result["results"]]
+        assert "tip" not in sids
+        assert "root" not in sids
