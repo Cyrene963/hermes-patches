@@ -269,7 +269,7 @@ fi
 if [ -d "$PATCHES_DIR/plugins/image_gen/minimax" ]; then
     mkdir -p "$HERMES_DIR/plugins/image_gen/minimax"
     cp -R "$PATCHES_DIR/plugins/image_gen/minimax/." "$HERMES_DIR/plugins/image_gen/minimax/"
-    echo "   ✅ MiniMax image_gen provider 已复制"
+    echo "   ✅ MiniMax image_gen provider copied"
 fi
 if [ -f "$PATCHES_DIR/plugins/memory-graph/__init__.py" ]; then
     mkdir -p "$PROFILE_DIR/plugins/memory-graph"

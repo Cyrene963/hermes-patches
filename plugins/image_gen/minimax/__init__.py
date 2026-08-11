@@ -8,11 +8,11 @@ URLs / base64 payloads are cached under ``$HERMES_HOME/cache/images/``.
 
 Output handling
 ---------------
-The API returns ``data.image_urls`` when ``response_format=url`` (the
-default; result URLs expire after 24h) and ``data.image_base64`` when
-``response_format=base64``. URL results are materialised locally with
-:func:`save_url_image` so downstream consumers get a stable file instead of
-an expiring link; base64 results are decoded with :func:`save_b64_image`.
+The API returns generated image values in ``data.image_urls`` for both
+response formats. URL results (the default; result URLs expire after 24h) are
+materialised locally with :func:`save_url_image` so downstream consumers get a
+stable file instead of an expiring link; base64 results are decoded with
+:func:`save_b64_image`.
 
 Selection precedence (first hit wins):
 
@@ -329,20 +329,33 @@ class MiniMaxImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
+        image_items = data.get("image_urls")
+        if not isinstance(image_items, list) or not image_items:
+            return error_response(
+                error="MiniMax returned no generated images",
+                error_type="empty_response",
+                provider="minimax",
+                model=model_id,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
+
+        image_value = image_items[0]
+        if not isinstance(image_value, str) or not image_value.strip():
+            return error_response(
+                error="MiniMax returned an empty generated image",
+                error_type="empty_response",
+                provider="minimax",
+                model=model_id,
+                prompt=prompt,
+                aspect_ratio=aspect,
+            )
+        image_value = image_value.strip()
+
         if response_format == "base64":
-            b64_items = data.get("image_base64")
-            if not isinstance(b64_items, list) or not b64_items:
-                return error_response(
-                    error="MiniMax returned no base64 image data",
-                    error_type="empty_response",
-                    provider="minimax",
-                    model=model_id,
-                    prompt=prompt,
-                    aspect_ratio=aspect,
-                )
             try:
                 saved_path = save_b64_image(
-                    str(b64_items[0]).strip(), prefix=f"minimax_{model_id}"
+                    image_value, prefix=f"minimax_{model_id}"
                 )
                 image_ref = str(saved_path)
             except Exception as exc:
@@ -355,40 +368,19 @@ class MiniMaxImageGenProvider(ImageGenProvider):
                     aspect_ratio=aspect,
                 )
         else:
-            url_items = data.get("image_urls")
-            if not isinstance(url_items, list) or not url_items:
-                return error_response(
-                    error="MiniMax returned no image URLs",
-                    error_type="empty_response",
-                    provider="minimax",
-                    model=model_id,
-                    prompt=prompt,
-                    aspect_ratio=aspect,
-                )
-            image_url = url_items[0]
-            if not isinstance(image_url, str) or not image_url.strip():
-                return error_response(
-                    error="MiniMax returned an empty image URL",
-                    error_type="empty_response",
-                    provider="minimax",
-                    model=model_id,
-                    prompt=prompt,
-                    aspect_ratio=aspect,
-                )
-            image_url = image_url.strip()
             # MiniMax result URLs expire after 24h — materialise the bytes
             # locally so downstream consumers get a stable file. Fall back to
             # the bare URL if the download fails.
             try:
-                saved_path = save_url_image(image_url, prefix=f"minimax_{model_id}")
+                saved_path = save_url_image(image_value, prefix=f"minimax_{model_id}")
                 image_ref = str(saved_path)
             except Exception as exc:
                 logger.warning(
                     "MiniMax image URL %s could not be cached (%s); falling back to bare URL.",
-                    image_url,
+                    image_value,
                     exc,
                 )
-                image_ref = image_url
+                image_ref = image_value
 
         metadata = body.get("metadata")
         extra: Dict[str, Any] = {

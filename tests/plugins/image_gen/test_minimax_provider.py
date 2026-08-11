@@ -31,7 +31,7 @@ def _url_body(image_url: str = "https://api.minimax.io/generated/img.png", succe
 def _b64_body(b64: str, success_count: int = 1) -> dict:
     return {
         "id": "trace-456",
-        "data": {"image_base64": [b64]},
+        "data": {"image_urls": [b64]},
         "metadata": {"success_count": success_count, "failed_count": 0},
         "base_resp": {"status_code": 0, "status_msg": "success"},
     }
