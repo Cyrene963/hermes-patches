@@ -266,6 +266,11 @@ if [ -f "$PATCHES_DIR/plugins/image_gen/openai/__init__.py" ]; then
     cp "$PATCHES_DIR/plugins/image_gen/openai/__init__.py" "$HERMES_DIR/plugins/image_gen/openai/__init__.py"
     echo "   ✅ OpenAI image_gen provider 已复制"
 fi
+if [ -d "$PATCHES_DIR/plugins/image_gen/minimax" ]; then
+    mkdir -p "$HERMES_DIR/plugins/image_gen/minimax"
+    cp -R "$PATCHES_DIR/plugins/image_gen/minimax/." "$HERMES_DIR/plugins/image_gen/minimax/"
+    echo "   ✅ MiniMax image_gen provider copied"
+fi
 if [ -f "$PATCHES_DIR/plugins/memory-graph/__init__.py" ]; then
     mkdir -p "$PROFILE_DIR/plugins/memory-graph"
     cp "$PATCHES_DIR/plugins/memory-graph/__init__.py" "$PROFILE_DIR/plugins/memory-graph/__init__.py"
@@ -505,6 +510,9 @@ if [ -n "$PYTHON_BIN" ]; then
     done
     if [ -f "$PROFILE_DIR/plugins/memory-graph/__init__.py" ]; then
         compile_files+=("$PROFILE_DIR/plugins/memory-graph/__init__.py")
+    fi
+    if [ -f "$HERMES_DIR/plugins/image_gen/minimax/__init__.py" ]; then
+        compile_files+=("$HERMES_DIR/plugins/image_gen/minimax/__init__.py")
     fi
     if [ ${#compile_files[@]} -gt 0 ]; then
         "$PYTHON_BIN" -m py_compile "${compile_files[@]}"
