@@ -265,9 +265,11 @@ _API_KEY_PROVIDER_AUX_MODELS_FALLBACK: Dict[str, str] = {
     "stepfun": "step-3.5-flash",
     "kimi-coding-cn": "kimi-k2-turbo-preview",
     "gmi": "google/gemini-3.1-flash-lite-preview",
-    "minimax": "MiniMax-M2.7",
-    "minimax-oauth": "MiniMax-M2.7-highspeed",
-    "minimax-cn": "MiniMax-M2.7",
+    # MiniMax global, OAuth, and China routes all register MiniMax-M3 as the
+    # current default; MiniMax-M2.7 remains a supported, user-selectable model.
+    "minimax": "MiniMax-M3",
+    "minimax-oauth": "MiniMax-M3",
+    "minimax-cn": "MiniMax-M3",
     "anthropic": "claude-haiku-4-5-20251001",
     "opencode-zen": "gemini-3-flash",
     "opencode-go": "glm-5",
