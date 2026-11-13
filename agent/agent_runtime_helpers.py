@@ -1219,7 +1219,7 @@ def anthropic_prompt_cache_policy(
         return True, True
 
     # MiniMax on its Anthropic-compatible endpoint serves its own
-    # model family (MiniMax-M2.7, M2.5, M2.1, M2) with documented
+    # model family (MiniMax-M3, M2.7, M2.5, M2.1, M2) with documented
     # cache_control support (0.1× read pricing, 5-minute TTL).  The
     # blanket is_claude gate above excludes these — opt them in
     # explicitly via provider id or host match so users on
