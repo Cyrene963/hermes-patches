@@ -1,0 +1,7 @@
+name: minimax
+version: 1.0.0
+description: "MiniMax image generation backend (image-01 / image-01-live). Text-to-image via the regional /v1/image_generation endpoint."
+author: octo-patch
+kind: backend
+requires_env:
+  - MINIMAX_API_KEY
